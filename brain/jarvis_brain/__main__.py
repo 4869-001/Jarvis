@@ -25,6 +25,7 @@ def _watch_parent(server, interval=2.0):
     import threading
 
     original = os.getppid()
+    server.log("看门狗启动：ppid=%d" % original)
 
     def loop():
         while True:
@@ -32,11 +33,12 @@ def _watch_parent(server, interval=2.0):
             current = os.getppid()
             if current == original and current != 1:
                 continue
-            server.log("父进程已退出（ppid %d → %d），Brain 一并退出" % (original, current))
+            server.log("看门狗触发：父进程已退出（ppid %d → %d），Brain 一并退出" % (original, current))
             # 只删 socket 文件，不 close listener——从别的线程关掉它会让
             # 主线程的 accept() 抛异常，在 os._exit 落地前刷出半截 traceback。
             try:
                 if os.path.exists(server.socket_path):
+                    server.log("看门狗清理 socket：%s" % server.socket_path)
                     os.unlink(server.socket_path)
             except Exception:
                 pass
