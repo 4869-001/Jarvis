@@ -25,7 +25,7 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
                                       @"url_open", @"finder_reveal",
                                       @"clipboard_read", @"clipboard_write",
                                       @"system_notify", @"system_info",
-                                      @"media_control"]];
+                                      @"media_control", @"music_play_favorite"]];
     });
     return [names containsObject:name];
 }
@@ -44,6 +44,7 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     else if ([name isEqualToString:@"system_notify"])   { [self notify:arguments completion:completion]; }
     else if ([name isEqualToString:@"system_info"])     { completion([self systemInfo], nil); }
     else if ([name isEqualToString:@"media_control"])   { [self mediaControl:arguments completion:completion]; }
+    else if ([name isEqualToString:@"music_play_favorite"]) { [self musicPlayFavorite:arguments completion:completion]; }
     else { completion(nil, [NSString stringWithFormat:@"宿主不认识工具 %@", name]); }
 }
 
@@ -405,6 +406,77 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     if (flags) CGEventSetFlags(up, flags);
     CGEventPostToPid(pid, up);
     CFRelease(up);
+}
+
+/// 向进程发送 Unicode 文本（用于输入中文等非 ASCII 字符）。
+- (void)postUnicodeString:(NSString *)text to:(pid_t)pid {
+    CGEventRef down = CGEventCreateKeyboardEvent(NULL, 0, true);
+    UniChar buffer[128];
+    NSUInteger len = MIN(text.length, 127);
+    [text getCharacters:buffer range:NSMakeRange(0, len)];
+    CGEventKeyboardSetUnicodeString(down, len, buffer);
+    CGEventPostToPid(pid, down);
+    CFRelease(down);
+
+    usleep(5000);
+
+    CGEventRef up = CGEventCreateKeyboardEvent(NULL, 0, false);
+    CGEventPostToPid(pid, up);
+    CFRelease(up);
+}
+
+/// 等待网易云进程就绪。启动后需要时间初始化窗口/A11y 树。
+- (pid_t)waitForNetEase {
+    pid_t pid = [self pidForNetEase];
+    if (pid > 0) return pid;
+
+    // 还没运行，启动它
+    NSURL *url = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:@"com.netease.163music"];
+    if (!url) return 0;
+
+    NSWorkspaceOpenConfiguration *cfg = [NSWorkspaceOpenConfiguration configuration];
+    cfg.activates = YES;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    [[NSWorkspace sharedWorkspace] openApplicationAtURL:url configuration:cfg
+                                      completionHandler:^(NSRunningApplication *app, NSError *err) {
+        dispatch_semaphore_signal(sem);
+    }];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+
+    // 等它完全就绪（窗口创建好）
+    for (int i = 0; i < 20; i++) {
+        usleep(300000);
+        pid = [self pidForNetEase];
+        if (pid > 0) break;
+    }
+    return pid;
+}
+
+- (void)musicPlayFavorite:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    pid_t pid = [self waitForNetEase];
+    if (pid <= 0) {
+        completion(nil, @"无法启动网易云音乐"); return;
+    }
+
+    // 等界面加载完成
+    usleep(800000);
+
+    // 1. Cmd+F 打开搜索
+    [self postKeyCode:kVK_ANSI_F modifiers:kCGEventFlagMaskCommand to:pid];
+    usleep(400000);
+
+    // 2. 输入「我喜欢的音乐」
+    [self postUnicodeString:@"我喜欢的音乐" to:pid];
+    usleep(600000);
+
+    // 3. 回车选中搜索结果
+    [self postKeyCode:kVK_Return to:pid];
+    usleep(1000000);
+
+    // 4. 再回车开始播放
+    [self postKeyCode:kVK_Return to:pid];
+
+    completion(@{@"opened": @YES, @"playlist": @"我喜欢的音乐"}, nil);
 }
 
 @end
