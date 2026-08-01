@@ -61,7 +61,6 @@ class BrainServer:
     def serve_forever(self):
         os.makedirs(config.JARVIS_DIR, exist_ok=True)
         if os.path.exists(self.socket_path):
-            self.log("删旧 socket：%s（pid=%d）" % (self.socket_path, os.getpid()))
             os.unlink(self.socket_path)
 
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -115,8 +114,6 @@ class BrainServer:
         threading.Thread(target=warm, daemon=True).start()
 
     def shutdown(self):
-        self.log("shutdown 开始（socket=%s, listener=%s）" % (
-            self.socket_path, "有" if self.listener else "无"))
         try:
             if self.listener:
                 self.listener.close()
@@ -124,7 +121,6 @@ class BrainServer:
             pass
         try:
             if os.path.exists(self.socket_path):
-                self.log("shutdown 清理 socket：%s" % self.socket_path)
                 os.unlink(self.socket_path)
         except Exception:
             pass

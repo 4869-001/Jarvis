@@ -83,12 +83,12 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 
 ## 工具
 
-19 个，固定工具集，没有「让模型自己拼命令行」这条路。
+17 个，固定工具集，没有「让模型自己拼命令行」这条路。
 
 | 由谁执行 | 工具 |
 |---|---|
-| ObjC 宿主 | `app_open` `app_quit` `app_list_running` `url_open` `finder_reveal` `clipboard_read` `clipboard_write` `system_notify` `system_info` `media_control` |
-| Python Brain | `fs_list` `fs_read` `fs_search` `fs_write` `fs_move` `web_search` `web_fetch` `shell_run` `music_play_favorite` |
+| ObjC 宿主 | `app_open` `app_quit` `app_list_running` `url_open` `finder_reveal` `clipboard_read` `clipboard_write` `system_notify` `system_info` |
+| Python Brain | `fs_list` `fs_read` `fs_search` `fs_write` `fs_move` `web_search` `web_fetch` `shell_run` |
 
 原生那半留在 ObjC，因为 **TCC 权限按 app bundle 授予**：Python 子进程去发 Apple Events
 会让授权归属漂到解释器上，弹窗写的是 "Python" 而不是 "J.A.R.V.I.S."。
@@ -96,9 +96,6 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 风险分级 L0–L4，**L2 起弹确认框**（`fs_write` / `fs_move` / `app_quit` / `shell_run`）。
 `shell_run` 默认禁用，开启后仍有命令黑名单（rm -rf / sudo / 磁盘操作 / 下载即执行 …）。
 文件工具全部经过路径闸门：越出 `fs_roots` 或命中 `.ssh` / Keychains 一律拒绝。
-
-`media_control` 发送系统级媒体键事件（play_pause/next/previous），兼容任何音乐 App。
-`music_play_favorite` 打开网易云音乐并自动导航到「我喜欢的音乐」歌单开始播放。不需要歌单 ID，通过键盘模拟实现。
 
 ## 语音
 
