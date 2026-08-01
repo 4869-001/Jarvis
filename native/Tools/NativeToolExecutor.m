@@ -23,7 +23,8 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
         names = [NSSet setWithArray:@[@"app_open", @"app_quit", @"app_list_running",
                                       @"url_open", @"finder_reveal",
                                       @"clipboard_read", @"clipboard_write",
-                                      @"system_notify", @"system_info"]];
+                                      @"system_notify", @"system_info",
+                                      @"media_control"]];
     });
     return [names containsObject:name];
 }
@@ -41,6 +42,7 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     else if ([name isEqualToString:@"clipboard_write"]) { [self writeClipboard:arguments completion:completion]; }
     else if ([name isEqualToString:@"system_notify"])   { [self notify:arguments completion:completion]; }
     else if ([name isEqualToString:@"system_info"])     { completion([self systemInfo], nil); }
+    else if ([name isEqualToString:@"media_control"])   { [self mediaControl:arguments completion:completion]; }
     else { completion(nil, [NSString stringWithFormat:@"宿主不认识工具 %@", name]); }
 }
 
@@ -340,6 +342,48 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     return [NSString stringWithFormat:@"已用 %.1f / %.0f GB，压缩 %.1f GB，累计换出 %.1f GB",
             usedGB, totalGB,
             (double)((uint64_t)stats.compressor_page_count * pageSize) / 1e9, swapGB];
+}
+
+#pragma mark - 媒体控制
+
+/// 系统级媒体键事件。macOS 会把事件自动路由到当前正在播放的 App（网易云/Spotify/Apple Music…），
+/// 不需要我们指定目标。
+- (void)mediaControl:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    NSString *action = arguments[@"action"];
+    if (![action isKindOfClass:[NSString class]] || action.length == 0) {
+        completion(nil, @"缺少 action（play_pause / next / previous）"); return;
+    }
+
+    int keyCode = -1;
+    if ([action isEqualToString:@"play_pause"])      keyCode = 16;   // NX_KEYTYPE_PLAY
+    else if ([action isEqualToString:@"next"])        keyCode = 17;   // NX_KEYTYPE_NEXT
+    else if ([action isEqualToString:@"previous"])    keyCode = 18;   // NX_KEYTYPE_PREVIOUS
+    else {
+        completion(nil, [NSString stringWithFormat:@"未知操作：%@，可选 play_pause / next / previous", action]);
+        return;
+    }
+
+    // 发一对 key-down + key-up。NSEventTypeSystemDefined + subtype 8 是标准媒体键通道。
+    [self postSystemDefinedKey:keyCode state:0xA];  // down
+    [self postSystemDefinedKey:keyCode state:0xB];  // up
+
+    completion(@{@"action": action}, nil);
+}
+
+/// 发送系统级按键事件。从 IOKit/hidsystem/ev_keymap.h 取 keyCode。
+- (void)postSystemDefinedKey:(int)keyCode state:(int)state {
+    // data1 布局: high 16 bits = keyCode, bits 8-15 = state, bits 0-7 = 0
+    // modifierFlags: 0xA00 = NX_KEYDOWN, 0xB00 = NX_KEYUP
+    NSEvent *event = [NSEvent otherEventWithType:NSEventTypeSystemDefined
+                                        location:NSZeroPoint
+                                   modifierFlags:(state == 0xA ? 0xA00 : 0xB00)
+                                       timestamp:0
+                                    windowNumber:0
+                                         context:0
+                                         subtype:8   // NX_SUBTYPE_AUX_CONTROL_BUTTONS
+                                           data1:((keyCode & 0xFF) << 16) | ((state & 0xF) << 8)
+                                           data2:-1];
+    CGEventPost(kCGHIDEventTap, [event CGEvent]);
 }
 
 @end

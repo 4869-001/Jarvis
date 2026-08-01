@@ -81,6 +81,15 @@ TOOLS = [
     _tool("system_info", "获取本机状态：电量、内存压力、磁盘剩余、当前前台应用、时间。",
           {}, "L0", "native"),
 
+    _tool("media_control", "控制当前正在播放音乐的应用程序（网易云、Spotify、Apple Music 等）。"
+          "不指定具体 App，系统会自动把命令发给正在播放的 App。",
+          {"action": {
+              "type": "string",
+              "enum": ["play_pause", "next", "previous"],
+              "description": "play_pause 播放/暂停切换，next 下一首，previous 上一首",
+          }},
+          "L1", "native", required=["action"]),
+
     # ------------------------------------------------ 文件（Brain 执行）
     _tool("fs_list", "列出目录内容。",
           {"path": _p("目录路径，默认 ~"),
@@ -163,6 +172,7 @@ def describe(name, arguments):
         "fs_search": "搜索文件「{query}」",
         "fs_write": "写入文件 {path}",
         "fs_move": "把 {source} 移动到 {destination}",
+        "media_control": "媒体控制：{action}",
         "web_search": "联网搜索「{query}」",
         "web_fetch": "抓取网页 {url}",
         "shell_run": "执行命令：{command}",
