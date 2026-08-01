@@ -1,6 +1,7 @@
 #import "NativeToolExecutor.h"
 
 #import <AppKit/AppKit.h>
+#import <Carbon/Carbon.h>
 #import <UserNotifications/UserNotifications.h>
 #import <IOKit/ps/IOPowerSources.h>
 #import <IOKit/ps/IOPSKeys.h>
@@ -346,44 +347,64 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
 
 #pragma mark - 媒体控制
 
-/// 用 NSAppleScript 直接给网易云发按键。
-/// NSTask 启动的 osascript 子进程不继承 Jarvis.app 的辅助功能权限，但
-/// NSAppleScript 在宿主进程内执行，权限归 Jarvis.app 的 bundle。
+/// CGEvent 直接向网易云进程注入键盘事件。
+/// 不走 System Events（它需要独立的辅助功能权限），也不走 osascript（孙进程权限断裂）。
+/// CGEventPostToPid 的权限归调用进程（Jarvis.app），Jarvis 已在 TCC 中授权。
 - (void)mediaControl:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
     NSString *action = arguments[@"action"];
     if (![action isKindOfClass:[NSString class]] || action.length == 0) {
         completion(nil, @"缺少 action（play_pause / next / previous）"); return;
     }
 
-    NSString *keystroke = nil;
+    // 找网易云进程
+    pid_t targetPID = [self pidForNetEase];
+    if (targetPID <= 0) {
+        completion(nil, @"网易云音乐没有在运行。先说「放音乐」打开它。"); return;
+    }
+
+    // 用 CGEventPostToPid 直接注入按键
     if ([action isEqualToString:@"play_pause"]) {
-        keystroke = @"keystroke space";
+        [self postKeyCode:kVK_Space to:targetPID];
     } else if ([action isEqualToString:@"next"]) {
-        keystroke = @"key code 124 using command down";    // Cmd+Right
+        [self postKeyCode:kVK_RightArrow modifiers:(kCGEventFlagMaskCommand) to:targetPID];
     } else if ([action isEqualToString:@"previous"]) {
-        keystroke = @"key code 123 using command down";    // Cmd+Left
+        [self postKeyCode:kVK_LeftArrow modifiers:(kCGEventFlagMaskCommand) to:targetPID];
     } else {
         completion(nil, [NSString stringWithFormat:@"未知操作：%@", action]);
         return;
     }
 
-    NSString *source = [NSString stringWithFormat:
-        @"tell application \"System Events\"\n"
-        @"    tell process \"NeteaseMusic\"\n"
-        @"        %@\n"
-        @"    end tell\n"
-        @"end tell", keystroke];
+    completion(@{@"action": action}, nil);
+}
 
-    NSAppleScript *script = [[NSAppleScript alloc] initWithSource:source];
-    NSDictionary *error = nil;
-    [script executeAndReturnError:&error];
-
-    if (error) {
-        NSString *msg = error[NSAppleScriptErrorMessage] ?: error[NSAppleScriptErrorBriefMessage] ?: @"未知";
-        completion(nil, [NSString stringWithFormat:@"媒体控制失败：%@", msg]);
-    } else {
-        completion(@{@"action": action}, nil);
+- (pid_t)pidForNetEase {
+    NSArray<NSRunningApplication *> *apps = [[NSWorkspace sharedWorkspace] runningApplications];
+    for (NSRunningApplication *app in apps) {
+        if ([app.bundleIdentifier isEqualToString:@"com.netease.163music"]) {
+            return app.processIdentifier;
+        }
     }
+    return 0;
+}
+
+/// 注入一次按键（down + up）。modifiers 为 0 表示无修饰键。
+- (void)postKeyCode:(CGKeyCode)keyCode to:(pid_t)pid {
+    [self postKeyCode:keyCode modifiers:0 to:pid];
+}
+
+- (void)postKeyCode:(CGKeyCode)keyCode modifiers:(CGEventFlags)flags to:(pid_t)pid {
+    CGEventRef down = CGEventCreateKeyboardEvent(NULL, keyCode, true);
+    if (flags) CGEventSetFlags(down, flags);
+    CGEventPostToPid(pid, down);
+    CFRelease(down);
+
+    // 小间隔让 App 来得及处理
+    usleep(5000);
+
+    CGEventRef up = CGEventCreateKeyboardEvent(NULL, keyCode, false);
+    if (flags) CGEventSetFlags(up, flags);
+    CGEventPostToPid(pid, up);
+    CFRelease(up);
 }
 
 @end
