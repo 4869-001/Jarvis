@@ -124,7 +124,6 @@ cat > "$AGENT" <<AGENTPLIST
   <key>ProgramArguments</key>
   <array><string>${APP}/Contents/MacOS/${APP_NAME}</string></array>
   <key>RunAtLoad</key>         <true/>
-  <key>KeepAlive</key>         <true/>
   <key>ProcessType</key>       <string>Interactive</string>
   <key>StandardOutPath</key>   <string>/tmp/jarvis.log</string>
   <key>StandardErrorPath</key> <string>/tmp/jarvis.log</string>
