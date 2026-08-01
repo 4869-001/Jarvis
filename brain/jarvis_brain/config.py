@@ -55,6 +55,11 @@ DEFAULTS = {
         # 设成 null 则按文本内容自动判断。
         "language": "en",
         "metallic": True,           # 金属滤镜链。关掉就是普通朗读，不像 Jarvis
+        # 超过这么多字符的整句，先在从句处切开再逐段合成。
+        # 定稿音色在 M2 Air 上 RTF ≈ 1.2——合成一句话的时间和念完它一样长，
+        # 所以长句是"开口前那段沉默"的主要来源。切开之后第一段能早得多地出声，
+        # 代价是分段处语调略平。0 = 不切（整句合成，语调最自然但首音最慢）。
+        "max_chars_per_chunk": 80,
         "system": {"zh_voice": "Li-mu", "en_voice": "Daniel", "rate": 180},
         "neural": {"zh_speed": 1.0, "en_length_scale": 1.0},
     },

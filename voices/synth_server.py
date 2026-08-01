@@ -63,13 +63,19 @@ def synth(lang, text, speed):
 def main():
     import soundfile as sf
 
-    # 启动就把中文模型加载好——第一句话不该比后面的慢 3 秒
+    # 启动就把要用的模型加载好——第一句话不该比后面的慢一大截。
+    #
+    # **只加载真正会用到的那个语言。** 以前这里无条件 _load_zh()，而 Jarvis 一律讲英文，
+    # 结果是 Kokoro（约 500MB，含 jieba 词典）常驻却一次没用上，Piper 反而留到第一句
+    # 现加载。8GB 机器上那 500MB 会直接把合成速度拖下来——Piper 本来就是 CPU 密集的。
+    # 语言由 neural.py 按第一次请求传进来。
+    preload = sys.argv[1] if len(sys.argv) > 1 else "zh"
     try:
-        _load_zh()
+        _load_en() if preload == "en" else _load_zh()
     except Exception as exc:
-        print(json.dumps({"ok": False, "error": "预加载中文模型失败：%s" % exc}), flush=True)
+        print(json.dumps({"ok": False, "error": "预加载 %s 模型失败：%s" % (preload, exc)}), flush=True)
 
-    print(json.dumps({"ok": True, "ready": True}), flush=True)
+    print(json.dumps({"ok": True, "ready": True, "preloaded": preload}), flush=True)
 
     for line in sys.stdin:
         line = line.strip()

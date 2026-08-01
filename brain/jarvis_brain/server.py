@@ -94,19 +94,28 @@ class BrainServer:
     def _prewarm_tts(self):
         """后台把定稿音色的模型先加载起来。
 
-        不预热的话第一句要多等约 1.5 秒（加载 Kokoro + jieba 词典），
-        而第一句恰恰是最容易被感知到慢的那句。
+        不预热的话第一句要多等一秒多加载模型，而第一句恰恰是最容易被感知到慢的那句。
+
+        **必须按配置的语言预热。** 以前这里写死 "zh"，于是在 `tts.language = "en"`
+        的默认配置下预热的是 Kokoro（一个从头到尾都用不上的模型），
+        真正要用的 Piper 仍然留到第一句现加载——两头都没讨着好，还白占
+        约 500MB 常驻内存。8GB 机器上这块内存本身就会把合成拖慢。
         """
         if not (self.cfg["tts"]["enabled"] and self.cfg["tts"]["backend"] == "neural"):
             return
 
+        # language 为 null 表示按内容自动判断，那就没法预知，按中文赌一把
+        lang = self.cfg["tts"].get("language") or "zh"
+        sample = "就绪" if lang == "zh" else "At your service."
+
         def warm():
             from .tts import neural
+            started = time.time()
             try:
                 path = os.path.join(tts_module.CACHE_DIR, "_prewarm.wav")
-                neural.synthesize("就绪", path, "zh", self.cfg["tts"].get("neural") or {})
+                neural.synthesize(sample, path, lang, self.cfg["tts"].get("neural") or {})
                 os.unlink(path)
-                self.log("定稿音色已预热")
+                self.log("定稿音色已预热（%s，%.1fs）" % (lang, time.time() - started))
             except neural.NotInstalled as exc:
                 self.log("定稿音色未安装，将使用系统音色：%s" % exc)
             except Exception as exc:

@@ -94,7 +94,7 @@ const CORE = (function(){
   const cHot  = new THREE.Color(0xfff3d0);
   const cGold = new THREE.Color(0xffc46a);
   const cAmb  = new THREE.Color(0xff8a1e);
-  const cDeep = new THREE.Color(0xff4d08);
+  const cDeep = new THREE.Color(0xff6a0e);
   const tmp   = new THREE.Color();
 
   function radialTex(stops){
@@ -137,12 +137,12 @@ const CORE = (function(){
     s.scale.set(scale, scale, 1);
     return s;
   }
-  const coreLight = sprite(0.52, 0xffffff, 0.80); root.add(coreLight);
-  const halo1     = sprite(1.90, 0xffa040, 0.22); root.add(halo1);
-  const halo2     = sprite(3.20, 0xff6a10, 0.13); root.add(halo2);
+  const coreLight = sprite(0.42, 0xffffff, 0.85); root.add(coreLight);
+  const halo1     = sprite(1.90, 0xffa040, 0.22); root.add(halo1); halo1.visible = false; // 外层辉光关闭（试效果）
+  const halo2     = sprite(3.20, 0xff6a10, 0.13); root.add(halo2); halo2.visible = false; // 外层辉光关闭（试效果）
 
   /* 2) 主粒子壳 */
-  const PN = 7200;
+  const PN = 4500;
   const pPos = new Float32Array(PN*3), pCol = new Float32Array(PN*3);
   for (let i = 0; i < PN; i++){
     onSphere(_a);
@@ -197,13 +197,13 @@ const CORE = (function(){
 
   /* 4) 城市光柱 */
   (function cityLines(){
-    const N = 3000, pos = [], col = [];
+    const N = 400, pos = [], col = [];   // 大幅减少（参考图无外延光柱）
     for (let i = 0; i < N; i++){
       onSphere(_a);
-      const h = 0.010 + Math.pow(Math.random(), 2.6)*0.115;
+      const h = 0.004 + Math.pow(Math.random(), 3.0)*0.022;  // 长度大幅缩短，贴球面做内部数据标记
       _b.copy(_a).multiplyScalar(R*0.985); pos.push(_b.x,_b.y,_b.z);
       _b.copy(_a).multiplyScalar(R*0.985 + h); pos.push(_b.x,_b.y,_b.z);
-      tmp.copy(cAmb).lerp(cHot, Math.min(1, h/0.115));
+      tmp.copy(cAmb).lerp(cHot, Math.min(1, h/0.022));
       col.push(cDeep.r*0.9, cDeep.g*0.9, cDeep.b*0.9, tmp.r, tmp.g, tmp.b);
     }
     const g = new THREE.BufferGeometry();
@@ -211,6 +211,25 @@ const CORE = (function(){
     g.setAttribute('color',    new THREE.Float32BufferAttribute(col, 3));
     shell.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({
       vertexColors:true, transparent:true, opacity:0.75, blending:ADD, depthWrite:false
+    })));
+  })();
+
+  /* 4b) 内部数据线 —— 从球面向球心画短线（参考图：球体内部透出的数据/电路感） */
+  (function innerData(){
+    const N = 800, pos = [], col = [];
+    for (let i = 0; i < N; i++){
+      onSphere(_a);
+      const len = 0.05 + Math.pow(Math.random(), 1.8)*0.25;  // 向内延伸 0.05~0.30
+      _b.copy(_a).multiplyScalar(R*0.985); pos.push(_b.x,_b.y,_b.z);
+      _b.copy(_a).multiplyScalar(R*0.985 - len); pos.push(_b.x,_b.y,_b.z);  // 减号：向内
+      tmp.copy(cGold).lerp(cAmb, Math.random()*0.6);
+      col.push(tmp.r, tmp.g, tmp.b, tmp.r*0.10, tmp.g*0.08, tmp.b*0.05);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('color',    new THREE.Float32BufferAttribute(col, 3));
+    shell.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({
+      vertexColors:true, transparent:true, opacity:0.35, blending:ADD, depthWrite:false
     })));
   })();
 
@@ -234,23 +253,24 @@ const CORE = (function(){
     g.setAttribute('color',    new THREE.Float32BufferAttribute(col, 3));
     rimMesh = new THREE.LineSegments(g, rimMat);
     shell.add(rimMesh);
+    rimMesh.visible = false; // 边缘毛刺关闭（参考图无外延毛刺）
   })();
 
-  /* 6) 轨道弧网 —— 均匀随机法线 + 正交基，避免出现优选轴亮带 */
+  /* 6) 轨道弧网 —— 大弧经线（参考图：几段很长的弧横跨球面，像经线） */
   (function arcNet(){
-    const ARCS = 300, pos = [], col = [];
+    const ARCS = 52, pos = [], col = [];
     const n = new THREE.Vector3(), e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), v = new THREE.Vector3();
     for (let k = 0; k < ARCS; k++){
-      const radius = R*(0.72 + Math.random()*0.34);
+      const radius = R*(0.94 + Math.random()*0.10);
       onSphere(n);
       e1.set(0,1,0);
       if (Math.abs(n.y) > 0.9) e1.set(1,0,0);
       e1.crossVectors(e1, n).normalize();
       e2.crossVectors(n, e1).normalize();
-      const arcLen = 0.25 + Math.random()*4.4;
+      const arcLen = 2.8 + Math.random()*2.8;   // 大弧跨大半球
       const start  = Math.random()*Math.PI*2;
-      const segs   = 5 + Math.floor(Math.random()*18);
-      tmp.copy(cGold).lerp(cAmb, Math.random()*0.9);
+      const segs   = 28;                          // 段数多，弧线平滑
+      tmp.copy(cGold).lerp(cAmb, 0.2 + Math.random()*0.4);   // 偏金色
       let prev = null;
       for (let i = 0; i <= segs; i++){
         const a = start + arcLen*(i/segs);
@@ -266,21 +286,21 @@ const CORE = (function(){
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     g.setAttribute('color',    new THREE.Float32BufferAttribute(col, 3));
     shell.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({
-      vertexColors:true, transparent:true, opacity:0.55, blending:ADD, depthWrite:false
+      vertexColors:true, transparent:true, opacity:0.42, blending:ADD, depthWrite:false
     })));
   })();
 
-  /* 7) 纬线笼 */
+  /* 7) 纬线笼 —— 稀疏化（参考图纬线少而精，非均匀铺满） */
   (function latitudes(){
     const mat = new THREE.LineBasicMaterial({
       color:0xffb066, transparent:true, opacity:0.17, blending:ADD, depthWrite:false
     });
-    for (let i = 1; i < 13; i++){
-      const y = -1 + (i/13)*2;
+    for (let i = 1; i < 9; i++){
+      const y = -1 + (i/9)*2;
       const rr = Math.sqrt(Math.max(0, 1-y*y))*R*0.995;
       const pts = [];
-      for (let s = 0; s <= 72; s++){
-        const a = s/72*Math.PI*2;
+      for (let s = 0; s <= 80; s++){
+        const a = s/80*Math.PI*2;
         pts.push(new THREE.Vector3(Math.cos(a)*rr, y*R*0.995, Math.sin(a)*rr));
       }
       shell.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), mat));
@@ -307,9 +327,12 @@ const CORE = (function(){
 
   /* 9) 主赤道环 */
   const tori = [];
-  [{r:0.60,op:0.55,rx:0.35,rz:0.10,w:96},
-   {r:0.80,op:0.40,rx:-0.62,rz:0.55,w:110},
-   {r:0.97,op:0.28,rx:1.15,rz:-0.30,w:120}].forEach(c => {
+  [{r:0.52,op:0.62,rx:0.35,rz:0.10,w:96},
+   {r:0.68,op:0.50,rx:-0.62,rz:0.55,w:104},
+   {r:0.82,op:0.42,rx:1.15,rz:-0.30,w:112},
+   {r:0.92,op:0.34,rx:-0.25,rz:0.85,w:118},
+   {r:0.99,op:0.28,rx:0.70,rz:-0.65,w:124},
+   {r:1.06,op:0.22,rx:-1.05,rz:0.20,w:128}].forEach(c => {
     const pts = [];
     for (let s = 0; s <= c.w; s++){
       const a = s/c.w*Math.PI*2;
@@ -337,6 +360,70 @@ const CORE = (function(){
     root.add(mesh);
     ringWaves.push(mesh);
   }
+
+  /* 9c) 流动光点 —— 沿三条主赤道环流动，交互态时点亮并加速
+          这是"线条动效"的载体：光点贴在环上跑，环本身也在转，
+          视觉上就是能量沿轨道流动，区别于待机时静止的环。 */
+  const flowDots = [];
+  (function flowLights(){
+    const COLORS = [0xfff3d0, 0xffc46a, 0xff8a1e];
+    const RADII  = [0.60, 0.80, 0.97];
+    for (let i = 0; i < tori.length; i++){
+      const ring = tori[i];
+      const grp  = new THREE.Group(); ring.add(grp);   // 跟随环的旋转
+      const r    = RADII[i] * R;
+      const N    = 16;
+      for (let j = 0; j < N; j++){
+        const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+          map:glowTex, color:COLORS[i], blending:ADD, depthWrite:false, transparent:true, opacity:0
+        }));
+        sp.scale.setScalar(0.055);
+        sp.position.set(Math.cos(j/N*Math.PI*2)*r, 0, Math.sin(j/N*Math.PI*2)*r);
+        grp.add(sp);
+        flowDots.push({ sp, r, phase: j/N*Math.PI*2, idx:i });
+      }
+    }
+  })();
+
+  /* 9d) 径向喷射粒子池 —— 交互态时从核心向外短寿命喷射
+          区别于静态壳层粒子（始终在球面上）：这些是从中心生成、
+          沿径向飞出、衰减消失的"火花"，让"粒子动效"有方向感和节奏。 */
+  const EJECT_N = 160;
+  const ejectPos = new Float32Array(EJECT_N*3);
+  const ejectCol = new Float32Array(EJECT_N*3);
+  const ejectData = [];
+  for (let i = 0; i < EJECT_N; i++){
+    ejectData.push({ life:0, vel:new THREE.Vector3(), active:false });
+    // color=0 + additive blending = 不可见，复用池子的隐藏机制
+    ejectCol[i*3] = ejectCol[i*3+1] = ejectCol[i*3+2] = 0;
+  }
+  const ejectGeo = new THREE.BufferGeometry();
+  ejectGeo.setAttribute('position', new THREE.BufferAttribute(ejectPos, 3));
+  ejectGeo.setAttribute('color',    new THREE.BufferAttribute(ejectCol, 3));
+  const ejectMat = new THREE.PointsMaterial({
+    size:0.058, map:glowTex, vertexColors:true, transparent:true,
+    opacity:0.95, blending:ADD, depthWrite:false, sizeAttenuation:true
+  });
+  const ejectPoints = new THREE.Points(ejectGeo, ejectMat);
+  root.add(ejectPoints);
+  let ejectSpawnAcc = 0;
+
+  /* 9e) 涟漪球面 —— speaking 时顶点做音乐式径向起伏（上下起伏 + 赤道扩散涟漪）
+          取代旧版"辉光增强"的主视觉。一个 wireframe 二十面体，每帧按多波叠加
+          做径向位移：sin(纬度*K + t*speed) 是上下起伏主感，
+          sin(赤道距离*K2 - t*speed) 是从赤道向外扩散的涟漪，
+          叠加经度小波增加有机感。idle 时不可见，顶点复位。 */
+  const RIPPLE_R = R * 0.985;
+  const rippleGeo = new THREE.IcosahedronGeometry(RIPPLE_R, 3);
+  const RIPPLE_N  = rippleGeo.attributes.position.count;
+  const rippleOrig = new Float32Array(rippleGeo.attributes.position.array);
+  const rippleMat = new THREE.MeshBasicMaterial({
+    color:0xffc46a, wireframe:true, transparent:true, opacity:0,
+    blending:ADD, depthWrite:false
+  });
+  const rippleMesh = new THREE.Mesh(rippleGeo, rippleMat);
+  shell.add(rippleMesh);
+  let rippleDirty = false;
 
   /* 10) 中央涡旋 —— 外层管倾角，内层管自转 */
   const vortex = new THREE.Group();
@@ -387,7 +474,7 @@ const CORE = (function(){
   api.setPower = function(p){
     power = (p === 'battery') ? 'battery' : 'ac';
     const cfg = PROFILE[power];
-    rimMesh.visible = cfg.rim;
+    if (rimMesh) rimMesh.visible = false; // 边缘毛刺永久关闭（参考图无外延毛刺）
     plateMeshes.forEach(m => m.visible = cfg.plates);
     document.getElementById('tState').textContent = power === 'battery' ? 'LOW-POWER' : 'ONLINE';
   };
@@ -439,7 +526,7 @@ const CORE = (function(){
     let stSpin=0, stCore=0, stHalo=0, stPulse=0, stSpeed=0;
     if(st==='listening'){ stCore=0.35;stHalo=0.30;stPulse=0.25;stSpeed=1.3; }
     else if(st==='thinking'){ stSpin=0.80;stCore=0.45;stHalo=0.18;stPulse=0.15;stSpeed=2.2; }
-    else if(st==='speaking'){ stCore=0.20;stHalo=0.55;stPulse=0.08;stSpeed=0.7; }
+    else if(st==='speaking'){ stCore=0.28;stHalo=0.22;stPulse=0.10;stSpeed=0.8; }
     // idle: all zero → 纯呼吸
 
     // 真实音量驱动。宿主播报时上报播放振幅，收音时上报麦克风 RMS，
@@ -460,7 +547,7 @@ const CORE = (function(){
     cityMat.size    = 0.030 * (1 + b*0.22 + p*0.60 + stMix*stCore*0.9);
     cityMat.opacity = 0.72 + b*0.26 + p*0.04 + stMix*stPulse*0.15;
 
-    coreLight.scale.setScalar(0.46 + b*0.10 + p*0.38 + stMix*stCore);
+    coreLight.scale.setScalar(0.36 + b*0.08 + p*0.30 + stMix*stCore);
     halo1.material.opacity = 0.17 + b*0.10 + p*0.24 + stMix*stHalo;
     halo2.material.opacity = 0.09 + b*0.07 + p*0.13 + stMix*stHalo*0.6;
 
@@ -522,6 +609,136 @@ const CORE = (function(){
         ringWaves[0].material.opacity = 0.55;
         ringWaves[0].userData.nextFire = rwInterval;
       }
+      // 波纹颜色随状态变化：thinking 偏白热，listening 偏金，speaking 偏暖橙
+      if (rwActive) {
+        const rwHex = st === 'thinking' ? 0xfff3d0
+                    : st === 'listening' ? 0xffc46a
+                    : 0xff8a1e;
+        for (let i = 0; i < ringWaves.length; i++) ringWaves[i].material.color.setHex(rwHex);
+      }
+    }
+
+    // -- 流动光点：沿赤道环跑，速度和亮度随交互态 --
+    // idle 时几乎不可见（opacity≈0），listening/speaking 中速流动，thinking 最快
+    if (flowDots.length) {
+      const flowSpeed = stMix * (st === 'thinking' ? 3.4
+                          : st === 'listening' ? 2.0
+                          : st === 'speaking' ? 1.5 : 0);
+      const flowOp = stMix * 0.85;
+      for (let i = 0; i < flowDots.length; i++){
+        const d = flowDots[i];
+        d.phase += flowSpeed * dt;
+        d.sp.position.set(Math.cos(d.phase)*d.r, 0, Math.sin(d.phase)*d.r);
+        // 亮度做一点呼吸，避免所有点同时一样亮显得呆板
+        d.sp.material.opacity = flowOp * (0.45 + 0.55*Math.abs(Math.sin(d.phase*1.7 + d.idx)));
+      }
+    }
+
+    // -- 径向喷射粒子：交互态时从核心向外喷出，衰减消失 --
+    if (ejectData.length) {
+      // 喷射速率：thinking 最高（思绪涌动），listening 中（感知），speaking 低（稳）
+      const ejectRate = stMix * (st === 'thinking' ? 22
+                          : st === 'listening' ? 12
+                          : st === 'speaking' ? 7 : 0);
+      ejectSpawnAcc += ejectRate * dt;
+      let spawnBudget = Math.floor(ejectSpawnAcc);
+      ejectSpawnAcc -= spawnBudget;
+      for (let i = 0; i < EJECT_N && spawnBudget > 0; i++){
+        const d = ejectData[i];
+        if (!d.active){
+          d.active = true;
+          d.life = 0.7 + Math.random()*0.7;        // 0.7~1.4s 寿命
+          onSphere(d.vel).multiplyScalar(0.40 + Math.random()*0.40); // 径向速度
+          ejectPos[i*3] = 0; ejectPos[i*3+1] = 0; ejectPos[i*3+2] = 0;
+          tmp.copy(cHot).lerp(cAmb, Math.random()*0.9);
+          ejectCol[i*3] = tmp.r; ejectCol[i*3+1] = tmp.g; ejectCol[i*3+2] = tmp.b;
+          spawnBudget--;
+        }
+      }
+      for (let i = 0; i < EJECT_N; i++){
+        const d = ejectData[i];
+        if (!d.active){
+          // 隐藏：color 归零（additive 下黑色=不可见），不动 position
+          if (ejectCol[i*3] !== 0){ ejectCol[i*3]=ejectCol[i*3+1]=ejectCol[i*3+2]=0; }
+          continue;
+        }
+        d.life -= dt;
+        if (d.life <= 0){
+          d.active = false;
+          ejectCol[i*3]=ejectCol[i*3+1]=ejectCol[i*3+2]=0;
+          continue;
+        }
+        ejectPos[i*3]   += d.vel.x * dt;
+        ejectPos[i*3+1] += d.vel.y * dt;
+        ejectPos[i*3+2] += d.vel.z * dt;
+        // 末段淡出色：lerp 向黑色
+        if (d.life < 0.35){
+          const k = d.life / 0.35;
+          ejectCol[i*3]   *= k; ejectCol[i*3+1] *= k; ejectCol[i*3+2] *= k;
+        }
+      }
+      ejectGeo.attributes.position.needsUpdate = true;
+      ejectGeo.attributes.color.needsUpdate = true;
+    }
+
+    // -- 涟漪球面：speaking 时音乐式径向起伏，listening/thinking 低强度 --
+    // 这是"球体线条涟漪"的主载体：wireframe 二十面体顶点按多波叠加做径向位移
+    if (rippleMesh) {
+      const stRipple = st === 'speaking' ? 1.0
+                     : st === 'thinking' ? 0.45
+                     : st === 'listening' ? 0.30 : 0;
+      const rippleAmp = stMix * (stRipple * 0.045 + lvl * 0.075);
+      rippleMat.opacity = stMix * (st === 'speaking' ? 0.62
+                              : st === 'thinking' ? 0.38
+                              : st === 'listening' ? 0.28 : 0);
+      rippleMat.color.setHex(st === 'thinking' ? 0xfff3d0
+                           : st === 'listening' ? 0xffc46a
+                           : 0xff8a1e);
+      if (rippleAmp > 0.0004) {
+        const pos = rippleGeo.attributes.position.array;
+        for (let i = 0; i < RIPPLE_N; i++) {
+          const ix = i*3, iy = ix+1, iz = ix+2;
+          const ox = rippleOrig[ix], oy = rippleOrig[iy], oz = rippleOrig[iz];
+          const len = Math.sqrt(ox*ox + oy*oy + oz*oz) || 1;
+          const nx = ox/len, ny = oy/len, nz = oz/len;
+          // 沿纬度(y)传播 —— "上下起伏"的主感
+          const w1 = Math.sin(ny * 8 + t * 2.6);
+          // 从赤道向外扩散的涟漪
+          const distEq = Math.sqrt(nx*nx + nz*nz);
+          const w2 = Math.sin(distEq * 10 - t * 3.2);
+          // 经度方向小波，增加有机感
+          const w3 = Math.sin(Math.atan2(nz, nx) * 6 + t * 1.9) * 0.4;
+          const disp = (w1 + w2*0.8 + w3) * rippleAmp;
+          const k = 1 + disp / RIPPLE_R;
+          pos[ix] = ox * k; pos[iy] = oy * k; pos[iz] = oz * k;
+        }
+        rippleGeo.attributes.position.needsUpdate = true;
+        rippleDirty = true;
+      } else if (rippleDirty) {
+        // 回到 idle：顶点复位一次，避免浮点漂移累积
+        rippleGeo.attributes.position.array.set(rippleOrig);
+        rippleGeo.attributes.position.needsUpdate = true;
+        rippleDirty = false;
+      }
+    }
+
+    // -- demo 推进：独立预览时自动循环四种状态 + 模拟音量 --
+    // 宿主一旦调用过 __jarvisSetState，hostTookOver 置 true，demo 永久关闭
+    if (!hostTookOver){
+      demoTimer += dt;
+      if (demoTimer >= DEMO_DUR){
+        demoTimer = 0;
+        demoIdx = (demoIdx + 1) % DEMO_SEQ.length;
+        const ns = DEMO_SEQ[demoIdx];
+        FX.state = ns; syncTelemetryState(ns);
+      }
+      const s = FX.state;
+      let lv = 0;
+      if (s === 'listening')      lv = 0.30 + 0.28 * (0.5+0.5*Math.sin(t*3.1)) * (0.7+0.3*Math.sin(t*11));
+      else if (s === 'speaking')   lv = 0.20 + 0.40 * Math.abs(Math.sin(t*4.3));
+      else if (s === 'thinking')   lv = 0.10 + 0.10 * Math.abs(Math.sin(t*1.7));
+      else                         lv = 0;
+      FX.level = lv;
     }
 
     renderer.render(scene, camera);
@@ -535,10 +752,31 @@ const CORE = (function(){
 /* ---------- 宿主 App 调用的全局钩子 ---------- */
 window.__jarvisSetPower   = p => CORE.setPower(p);
 window.__jarvisSetVisible = v => CORE.setVisible(v);
-// 四种动画状态：idle（呼吸）、listening（倾听）、thinking（思考）、speaking（说话）
-window.__jarvisSetState  = s => { FX.state = s; };  // 宿主根据真实会话注入
-// 0..1 实时音量。speaking 时是播放振幅，listening 时是麦克风 RMS
+
+// 交互动效：四种状态 + 实时音量。宿主根据真实会话注入。
+//   idle       待机呼吸（默认）
+//   listening  倾听：粒子变大、波纹金、光点中速流动、径向喷射中速
+//   thinking   思考：涡旋加速、波纹白热、光点最快、径向喷射最快
+//   speaking   说话：辉光增强、波纹暖橙、光点慢、径向喷射少而稳
+let hostTookOver = false;
+const STATE_LABEL = { idle:'ONLINE', listening:'LISTENING', thinking:'THINKING', speaking:'SPEAKING' };
+function syncTelemetryState(s){
+  const el = document.getElementById('tState');
+  if (el) el.textContent = STATE_LABEL[s] || 'ONLINE';
+}
+syncTelemetryState('idle');
+window.__jarvisSetState  = s => {
+  hostTookOver = true;            // 宿主一旦接管，永久关闭 demo
+  FX.state = s; syncTelemetryState(s);
+};
 window.__jarvisSetLevel  = v => { FX.level = Math.max(0, Math.min(1, +v || 0)); };
+
+// 独立预览 demo：宿主没调用 __jarvisSetState 时，自动循环四种状态，
+// 让交互动效在浏览器直接打开就能看到。加 ?nodemo=1 可关闭。
+const DEMO_SEQ  = ['listening','thinking','speaking','idle'];
+const DEMO_DUR  = 4.0;
+let demoIdx = 0, demoTimer = 0;
+if (new URLSearchParams(location.search).has('nodemo')) hostTookOver = true;
 
 /* ---------- 遥测文字 ---------- */
 setInterval(() => {

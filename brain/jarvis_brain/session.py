@@ -190,6 +190,10 @@ class SessionCoordinator:
         self._speech_queue = queue.Queue()
         self._speech_buffer = ""
         self._generation = 0
+        # 延迟计时。合成 worker 也会写 _turn_first_audio，所以必须在起线程前建好。
+        self._turn_started = None
+        self._turn_first_token = None
+        self._turn_first_audio = None
         threading.Thread(target=self._speech_worker, daemon=True).start()
 
     # ------------------------------------------------------------ 状态
@@ -267,12 +271,17 @@ class SessionCoordinator:
     def _tts_enabled(self):
         return bool(self.cfg.get("tts", {}).get("enabled"))
 
+    @property
+    def _speech_max_chars(self):
+        """超过这个长度的整句在从句处切开再合成。0 = 不切。"""
+        return int((self.cfg.get("tts") or {}).get("max_chars_per_chunk") or 0)
+
     def _feed_speech(self, delta):
         """把流式增量攒成整句就送去合成——不等整段说完，听感上快很多。"""
         if not self._tts_enabled:
             return
         self._speech_buffer += delta
-        sentences = tts.split_sentences(self._speech_buffer)
+        sentences = tts.split_sentences(self._speech_buffer, max_chars=self._speech_max_chars)
         # 最后一段可能还没说完，留在 buffer 里等下一批增量
         if len(sentences) <= 1:
             return
@@ -283,10 +292,14 @@ class SessionCoordinator:
     def _flush_speech(self):
         if not self._tts_enabled:
             return
-        remainder = self._speech_buffer.strip()
+        remainder = self._speech_buffer
         self._speech_buffer = ""
-        if remainder:
-            self._speech_queue.put((self._generation, remainder))
+        if not remainder.strip():
+            return
+        # 收尾这一段也要切：一句话的回复整段都留在 buffer 里，
+        # 不切的话前面 _feed_speech 的分段努力在最常见的情形下等于没做
+        for piece in tts.split_sentences(remainder, max_chars=self._speech_max_chars):
+            self._speech_queue.put((self._generation, piece))
 
     def _abandon_speech(self):
         """作废这一轮所有还没播的句子，并让宿主停掉正在播的。"""
@@ -304,6 +317,7 @@ class SessionCoordinator:
             generation, text = self._speech_queue.get()
             if generation != self._generation:
                 continue                     # 这一句属于已被取消的那一轮
+            started = time.time()
             try:
                 path, backend = tts.synthesize(text, self.cfg.get("tts") or {})
             except Exception as exc:
@@ -312,12 +326,23 @@ class SessionCoordinator:
                 continue
             if not path or generation != self._generation:
                 continue
-            self.emit({"type": "speak", "path": path, "text": text, "backend": backend})
+            synth_ms = int((time.time() - started) * 1000)
+            # 合成耗时是这套系统里最容易失控的一段（定稿音色 RTF ≈ 1.2，还随系统负载
+            # 剧烈波动）。记进日志，"延迟高"下次能直接定位到是哪一句、慢在哪。
+            self.log("播报 %5dms %-12s %s" % (synth_ms, backend, text.strip()[:48]))
+            if self._turn_first_audio is None:
+                self._turn_first_audio = time.time()
+            self.emit({"type": "speak", "path": path, "text": text,
+                       "backend": backend, "synth_ms": synth_ms})
             tts.prune_cache()
 
     # ------------------------------------------------------------ 主循环
 
     def _run_turn(self, message_id, query=""):
+        started = time.time()
+        self._turn_started = started
+        self._turn_first_token = None
+        self._turn_first_audio = None
         try:
             self.set_state("thinking")
             self._loop(message_id, self._memory_block(query))
@@ -331,7 +356,17 @@ class SessionCoordinator:
         finally:
             # 无论怎么退出都必须落回 idle
             self.set_state("idle")
+            self._log_turn_timing(started)
             self.emit({"type": "turn_done", "id": message_id})
+
+    def _log_turn_timing(self, started):
+        """一轮的延迟账单。三个数各自指向不同的锅：
+        首字慢 = 网络或模型；首音慢 = 合成；总时长远大于首音 = 回复太长。"""
+        def since(mark):
+            return "%.2fs" % (mark - started) if mark else "—"
+        self.log("一轮 首字 %s 首音 %s 总 %.2fs" % (
+            since(self._turn_first_token), since(self._turn_first_audio),
+            time.time() - started))
 
     def _loop(self, message_id, memory_block=""):
         max_rounds = self.cfg["session"]["max_tool_rounds"]
@@ -360,6 +395,8 @@ class SessionCoordinator:
                 if kind == "reasoning":
                     self.emit({"type": "assistant_reasoning_delta", "id": message_id, "text": value})
                 elif kind == "text":
+                    if self._turn_first_token is None:
+                        self._turn_first_token = time.time()
                     if not started_speaking:
                         started_speaking = True
                         self.set_state("speaking")

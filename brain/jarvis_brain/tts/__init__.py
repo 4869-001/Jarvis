@@ -6,6 +6,8 @@
 
 neural 出任何问题都自动退回 system。播报可以难听，但不能哑。
 """
+import hashlib
+import json
 import os
 import re
 import time
@@ -14,6 +16,13 @@ import uuid
 from . import metallic, neural, system
 
 CACHE_DIR = os.path.expanduser("~/.jarvis/tts")
+# 按内容寻址的缓存，和上面那个"用完即弃"的临时目录分开：
+# 临时文件 10 分钟就清，这里的要留着复用，清的规则完全不同。
+PHRASE_DIR = os.path.join(CACHE_DIR, "phrases")
+PHRASE_KEEP = 300                      # 最多留多少条，按最近使用淘汰
+# 超过这个长度就不进缓存了：长句几乎不会一字不差地重复，白占磁盘
+PHRASE_MAX_CHARS = 120
+
 _CJK = re.compile(r"[一-鿿㐀-䶿]")
 
 # 句尾标点。按句合成才能边说边生成，不必等整段回复写完。
@@ -24,7 +33,7 @@ SENTENCE_END = re.compile(r"(?<=[。！？；;\n])|(?<=[a-z0-9][.!?])(?=\s)")
 
 
 def detect_language(text, cfg=None):
-    """配置里指定了语言就用指定的。
+    """返回 (语言, 是否是越过配置的兜底)。
 
     现在 Jarvis 一律讲英文，而回复里可能夹着中文专有名词，
     靠自动检测会把整句切到中文音色上去。
@@ -32,12 +41,12 @@ def detect_language(text, cfg=None):
     forced = (cfg or {}).get("language")
     detected = "zh" if _CJK.search(text) else "en"
     if forced not in ("zh", "en"):
-        return detected
+        return detected, False
     # 兜底：强制英文但内容其实是中文（模型偶尔会不守"英文在前"的格式），
     # 硬塞给 Piper 只会念出一串乱码。这时按内容走，宁可语言不对也别听着是坏的。
     if forced == "en" and _mostly_cjk(text):
-        return "zh"
-    return forced
+        return "zh", True
+    return forced, False
 
 
 def _mostly_cjk(text):
@@ -47,8 +56,18 @@ def _mostly_cjk(text):
     return sum(1 for ch in letters if _CJK.match(ch)) / len(letters) > 0.5
 
 
-def split_sentences(text, min_length=6):
+# 从句边界。只在整句太长时才用它继续切——见 split_sentences 的说明。
+CLAUSE_END = re.compile(r"(?<=[，、；：,;:])(?=\s*\S)")
+
+
+def split_sentences(text, min_length=6, max_chars=None):
     """切句。太短的碎片并到下一句，免得"好的。"单独合成一次、听着一顿一顿。
+
+    `max_chars` 给了的话，超长的整句会继续在**从句边界**切开。这不是为了好听——
+    恰恰相反，分开合成的语调会比整句略平。是为了首句能早点出声：
+    定稿音色在这台机器上 RTF ≈ 1.2（合成一句话的时间和念完它一样长），
+    一句 5 秒的话要等 6 秒才响第一个音；从中间断开之后第一段两秒就能开口。
+    只对超长句生效，短句仍然整句合成，语调不受影响。
 
     **返回的片段不做 strip。** 调用方会把最后一段当作残留缓冲、直接拼接下一批增量，
     一旦这里把尾部空格去掉，就会拼出 "Thefiles" 这种粘连词。空格在念的时候才去。
@@ -61,7 +80,26 @@ def split_sentences(text, min_length=6):
             buffer = ""
     if buffer:
         pieces.append(buffer)
+
+    if max_chars:
+        pieces = [part for piece in pieces
+                  for part in _split_long(piece, min_length, max_chars)]
     return [piece for piece in pieces if piece.strip()]
+
+
+def _split_long(piece, min_length, max_chars):
+    if len(piece.strip()) <= max_chars:
+        return [piece]
+    out, buffer = [], ""
+    for chunk in CLAUSE_END.split(piece):
+        buffer += chunk
+        # 攒够 min_length 才断，免得切出 "好，" 这种一个词的碎片
+        if len(buffer.strip()) >= min_length and len(buffer.strip()) >= max_chars // 2:
+            out.append(buffer)
+            buffer = ""
+    if buffer:
+        out.append(buffer)
+    return out or [piece]
 
 
 def clean_for_speech(text):
@@ -84,15 +122,61 @@ def _cache_path(suffix):
 
 
 def prune_cache(keep_seconds=600):
-    """清掉十分钟前的 wav。宿主播完不负责删，统一删在这里，免得两边抢同一个文件。"""
+    """清掉十分钟前的临时 wav。宿主播完不负责删，统一删在这里，免得两边抢同一个文件。
+
+    跳过子目录——phrases/ 是内容寻址的长期缓存，归 prune_phrases 管，
+    按这里的 10 分钟规则清会让缓存等于不存在。
+    """
+    now = time.time()
     try:
-        now = time.time()
-        for name in os.listdir(CACHE_DIR):
-            path = os.path.join(CACHE_DIR, name)
+        names = os.listdir(CACHE_DIR)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(CACHE_DIR, name)
+        try:
+            if os.path.isdir(path):
+                continue
             if now - os.path.getmtime(path) > keep_seconds:
                 os.unlink(path)
-    except Exception:
+        except OSError:
+            continue
+
+
+def _phrase_key(text, lang, cfg):
+    """同样的文本、同样的合成参数 → 同一个 key。参数变了必须变 key，
+    否则改了语速/关掉金属链之后还会拿到旧声音。"""
+    payload = json.dumps([text, lang, cfg.get("backend"), bool(cfg.get("metallic", True)),
+                          cfg.get("neural") or {}, cfg.get("system") or {}],
+                         ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def _phrase_hit(key):
+    path = os.path.join(PHRASE_DIR, key + ".wav")
+    if not os.path.exists(path):
+        return None
+    try:
+        os.utime(path, None)         # 记一次使用，淘汰时按 mtime 排
+    except OSError:
         pass
+    return path
+
+
+def prune_phrases(keep=PHRASE_KEEP):
+    try:
+        entries = [(os.path.getmtime(os.path.join(PHRASE_DIR, n)), n)
+                   for n in os.listdir(PHRASE_DIR)]
+    except OSError:
+        return
+    if len(entries) <= keep:
+        return
+    entries.sort(reverse=True)
+    for _, name in entries[keep:]:
+        try:
+            os.unlink(os.path.join(PHRASE_DIR, name))
+        except OSError:
+            pass
 
 
 def synthesize(text, cfg):
@@ -101,8 +185,30 @@ def synthesize(text, cfg):
     if not text:
         return None, None
 
-    lang = detect_language(text, cfg)
+    lang, off_language = detect_language(text, cfg)
     backend = cfg.get("backend", "system")
+
+    # 走到兜底语言时一律用系统音色，**不要**为它把另一个定稿模型也拉起来。
+    #
+    # 这是实测出来的一条大坑：模型偶尔不守"英文在前"的格式、整句吐中文，
+    # 而常驻合成进程只加载了英文模型。此时按定稿音色走会现场加载 Kokoro
+    # （约 500MB + jieba 词典），一句话要 18~35 秒，之后两个模型一起常驻，
+    # 把后面每一句也拖慢。系统音色 2 秒出声，而且金属滤镜链照样过——
+    # Jarvis 的声音本来就主要来自那条链子，不是音色本身。
+    # 一次格式跑偏的代价应该是"这句声音略不同"，不是"整个对话卡半分钟"。
+    if off_language and backend != "system":
+        backend = "system"
+
+    # 短句缓存。Jarvis 的说话风格决定了短句复现率很高——"Already done."、
+    # "At your service, sir."、报时那几种句式。定稿音色合成一句要好几秒，
+    # 命中缓存就是 0 秒，这是短回复上最直接的一段延迟。
+    cacheable = len(text) <= PHRASE_MAX_CHARS
+    key = _phrase_key(text, lang, cfg) if cacheable else None
+    if key:
+        hit = _phrase_hit(key)
+        if hit:
+            return hit, backend + "·缓存"
+
     raw_path = _cache_path(".raw.wav")
     used = backend
 
@@ -121,12 +227,24 @@ def synthesize(text, cfg):
         used = "system（neural 失败：%s）" % str(exc)[:80]
 
     if not cfg.get("metallic", True):
-        return raw_path, used
+        final = raw_path
+    else:
+        final = metallic.apply(raw_path, _cache_path(".wav"))
+        if final != raw_path:
+            try:
+                os.unlink(raw_path)
+            except Exception:
+                pass
 
-    final = metallic.apply(raw_path, _cache_path(".wav"))
-    if final != raw_path:
+    # 只缓存"正常合成出来的"。退回 system 的那些不缓存——下次 neural 可能就好了，
+    # 缓存下来会让一次偶发失败永久留在耳朵里。
+    if key and used == backend:
         try:
-            os.unlink(raw_path)
-        except Exception:
+            os.makedirs(PHRASE_DIR, exist_ok=True)
+            cached = os.path.join(PHRASE_DIR, key + ".wav")
+            os.replace(final, cached)
+            prune_phrases()
+            return cached, used
+        except OSError:
             pass
     return final, used

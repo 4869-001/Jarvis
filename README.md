@@ -57,7 +57,8 @@ macOS 桌面助手。壁纸层的球体、对话面板、菜单栏、DeepSeek �
                 "shell_unrestricted": false,                // true = 摘掉命令黑名单
                 "auto_approve": [] },                       // 写进来的工具不再弹确认
 
-  "tts":      { "backend": "neural", "metallic": true },
+  "tts":      { "backend": "neural", "metallic": true,
+                "max_chars_per_chunk": 80 },                // 长句切段合成，首音更早；0 = 关
   "wake_word":{ "enabled": true, "score": 1.5, "threshold": 0.25 },
   "memory":   { "enabled": true, "max_recall": 8 },           // 长期记忆，见下
 
@@ -220,6 +221,38 @@ uv pip install --python .venv/bin/python kokoro-onnx soundfile "misaki[zh]" pipe
 
 **金属感来自 ffmpeg 滤镜链，不是音色本身**（`aecho` 三重超短延时 + `chorus` +
 `bass`/`treble` + `highpass=90,lowpass=8500`，带限那条最关键）。
+
+### 延迟：瓶颈在合成，不在模型
+
+觉得"对话慢"时先看 `~/.jarvis/brain.log`，每轮都有一行账单：
+
+```
+一轮 首字 0.60s 首音 6.14s 总 1.22s
+播报  5248ms neural       I run this Mac for you, sir — open apps,
+```
+
+三个数各指一口锅：**首字**慢 = 网络或模型；**首音**慢 = 合成；**总时长**远大于首音 = 回复太长。
+实测 DeepSeek 首字 0.5~0.7s、整轮文本 1s 出头——**文本这段从来不是问题**。
+
+问题在合成：`jarvis-high` 是 Piper 的 **high 档**模型，这台 M2 Air 上 **RTF ≈ 1.2**
+——合成一句话的时间不比念完它短，系统一忙恶化到 3~5 倍。这是模型体量决定的，
+换 medium 档能快约 4 倍，但那就不是定稿的那个音色了。在保留音色的前提下能做的四件事都做了：
+
+| 改动 | 效果 |
+|---|---|
+| 预热按配置语言走 | 以前写死预热中文 Kokoro，而 `language = "en"`——**预热的模型一次没用上**，真正要用的 Piper 仍留到首句现加载。常驻内存 484MB → 65MB |
+| 短句按内容缓存（`~/.jarvis/tts/phrases/`） | 重复的句子 0.00s，跨重启有效。上限 300 条按最近使用淘汰 |
+| 长句在从句处切段（`tts.max_chars_per_chunk`，默认 80） | 首音提前约一半；代价是分段处语调略平。设 0 关掉 |
+| 语言兜底改用系统音色 | 见下 |
+
+**⚠️ 中文滑落会拖垮整段对话。** 模型偶尔不守"英文在前"、整句吐中文，
+而常驻合成进程只加载了英文模型。以前这种情况会现场加载 Kokoro（约 500MB + jieba），
+**一句话卡 18~35 秒**，之后两个模型一起常驻、把后面每一句也拖慢。
+现在兜底语言一律走系统音色（约 2 秒，金属链照样过）——
+一次格式跑偏的代价应该是"这句声音略不同"，不是"整个对话卡半分钟"。
+
+嫌慢又不想换音色，`tts.backend` 改 `system` 是随时可退的一档：
+同条件三句话实测 11s vs 定稿音色 64s。
 
 ## 排障
 

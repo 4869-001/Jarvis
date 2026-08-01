@@ -39,11 +39,13 @@ class _Worker:
         self.process = None
         self.lock = threading.Lock()
 
-    def _spawn(self):
+    def _spawn(self, preload_lang):
         root = voices_dir()
         executable = python_executable(root)
+        # 把语言告诉它，只加载这一个模型。中英两个模型加起来约 900MB，
+        # 全装进来在 8GB 机器上会把合成本身拖慢。
         self.process = subprocess.Popen(
-            [executable, os.path.join(root, "synth_server.py")],
+            [executable, os.path.join(root, "synth_server.py"), preload_lang],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, cwd=root, bufsize=1,
         )
@@ -57,7 +59,7 @@ class _Worker:
     def request(self, payload):
         with self.lock:
             if self.process is None or self.process.poll() is not None:
-                self._spawn()
+                self._spawn(payload.get("lang") or "zh")
             try:
                 self.process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
                 self.process.stdin.flush()
