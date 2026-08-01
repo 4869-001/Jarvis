@@ -24,8 +24,7 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
         names = [NSSet setWithArray:@[@"app_open", @"app_quit", @"app_list_running",
                                       @"url_open", @"finder_reveal",
                                       @"clipboard_read", @"clipboard_write",
-                                      @"system_notify", @"system_info",
-                                      @"media_control", @"music_play_favorite"]];
+                                      @"system_notify", @"system_info"]];
     });
     return [names containsObject:name];
 }
@@ -43,8 +42,6 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     else if ([name isEqualToString:@"clipboard_write"]) { [self writeClipboard:arguments completion:completion]; }
     else if ([name isEqualToString:@"system_notify"])   { [self notify:arguments completion:completion]; }
     else if ([name isEqualToString:@"system_info"])     { completion([self systemInfo], nil); }
-    else if ([name isEqualToString:@"media_control"])   { [self mediaControl:arguments completion:completion]; }
-    else if ([name isEqualToString:@"music_play_favorite"]) { [self musicPlayFavorite:arguments completion:completion]; }
     else { completion(nil, [NSString stringWithFormat:@"宿主不认识工具 %@", name]); }
 }
 
@@ -353,6 +350,7 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
 /// CGEventPostToPid 的权限归调用进程（Jarvis.app），Jarvis 已在 TCC 中授权。
 - (void)mediaControl:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
     NSString *action = arguments[@"action"];
+    NSLog(@"[jarvis] media_control: %@", action);
     if (![action isKindOfClass:[NSString class]] || action.length == 0) {
         completion(nil, @"缺少 action（play_pause / next / previous）"); return;
     }
@@ -362,6 +360,11 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     if (targetPID <= 0) {
         completion(nil, @"网易云音乐没有在运行。先说「放音乐」打开它。"); return;
     }
+
+    // 确保网易云在前台能接收按键
+    NSRunningApplication *app = [NSRunningApplication runningApplicationWithProcessIdentifier:targetPID];
+    [app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+    usleep(300000);
 
     // 用 CGEventPostToPid 直接注入按键
     if ([action isEqualToString:@"play_pause"]) {
@@ -453,27 +456,32 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
 }
 
 - (void)musicPlayFavorite:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    NSLog(@"[jarvis] music_play_favorite 开始");
     pid_t pid = [self waitForNetEase];
+    NSLog(@"[jarvis] 网易云 PID: %d", pid);
     if (pid <= 0) {
         completion(nil, @"无法启动网易云音乐"); return;
     }
 
-    // 等界面加载完成
-    usleep(800000);
+    // 强制激活（确保窗口在前台、能接收按键）
+    NSRunningApplication *app = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+    [app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+    // 等界面完全加载——首次冷启动可能需要 3-5 秒
+    usleep(3500000);
 
     // 1. Cmd+F 打开搜索
     [self postKeyCode:kVK_ANSI_F modifiers:kCGEventFlagMaskCommand to:pid];
-    usleep(400000);
+    usleep(600000);
 
     // 2. 输入「我喜欢的音乐」
     [self postUnicodeString:@"我喜欢的音乐" to:pid];
-    usleep(600000);
+    usleep(800000);
 
-    // 3. 回车选中搜索结果
+    // 3. 回车选中搜索结果（第一个一般是「我喜欢的音乐」歌单）
     [self postKeyCode:kVK_Return to:pid];
-    usleep(1000000);
+    usleep(1200000);
 
-    // 4. 再回车开始播放
+    // 4. 双击回车 → 进入歌单 + 开始播放第一首
     [self postKeyCode:kVK_Return to:pid];
 
     completion(@{@"opened": @YES, @"playlist": @"我喜欢的音乐"}, nil);
