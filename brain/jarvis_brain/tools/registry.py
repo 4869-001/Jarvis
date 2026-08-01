@@ -16,7 +16,7 @@ from . import fs as fs_impl
 from . import music as music_impl
 from . import shell as shell_impl
 from . import web as web_impl
-from .music import music_play_favorite, media_control
+from .music import music_play_favorite
 
 CONFIRM_FROM = "L2"
 _ORDER = {"L0": 0, "L1": 1, "L2": 2, "L3": 3, "L4": 4}
@@ -83,13 +83,14 @@ TOOLS = [
     _tool("system_info", "获取本机状态：电量、内存压力、磁盘剩余、当前前台应用、时间。",
           {}, "L0", "native"),
 
-    _tool("media_control", "控制网易云音乐播放：播放/暂停、下一首、上一首。",
+    _tool("media_control", "控制网易云音乐播放：播放/暂停、下一首、上一首。"
+          "（需要辅助功能权限，当前 Jarvis.app 已授权。）",
           {"action": {
               "type": "string",
               "enum": ["play_pause", "next", "previous"],
               "description": "play_pause 播放/暂停切换，next 下一首，previous 上一首",
           }},
-          "L1", "python", media_control, required=["action"]),
+          "L1", "native", required=["action"]),
 
     _tool("music_play_favorite", "打开网易云音乐并直接播放「我喜欢的音乐」歌单。"
           "用户说「放音乐」「听歌」「打开网易云」时优先使用这个工具。",

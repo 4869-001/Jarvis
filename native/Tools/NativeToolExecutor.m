@@ -23,7 +23,8 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
         names = [NSSet setWithArray:@[@"app_open", @"app_quit", @"app_list_running",
                                       @"url_open", @"finder_reveal",
                                       @"clipboard_read", @"clipboard_write",
-                                      @"system_notify", @"system_info"]];
+                                      @"system_notify", @"system_info",
+                                      @"media_control"]];
     });
     return [names containsObject:name];
 }
@@ -41,6 +42,7 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     else if ([name isEqualToString:@"clipboard_write"]) { [self writeClipboard:arguments completion:completion]; }
     else if ([name isEqualToString:@"system_notify"])   { [self notify:arguments completion:completion]; }
     else if ([name isEqualToString:@"system_info"])     { completion([self systemInfo], nil); }
+    else if ([name isEqualToString:@"media_control"])   { [self mediaControl:arguments completion:completion]; }
     else { completion(nil, [NSString stringWithFormat:@"宿主不认识工具 %@", name]); }
 }
 
@@ -340,6 +342,48 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     return [NSString stringWithFormat:@"已用 %.1f / %.0f GB，压缩 %.1f GB，累计换出 %.1f GB",
             usedGB, totalGB,
             (double)((uint64_t)stats.compressor_page_count * pageSize) / 1e9, swapGB];
+}
+
+#pragma mark - 媒体控制
+
+/// 用 NSAppleScript 直接给网易云发按键。
+/// NSTask 启动的 osascript 子进程不继承 Jarvis.app 的辅助功能权限，但
+/// NSAppleScript 在宿主进程内执行，权限归 Jarvis.app 的 bundle。
+- (void)mediaControl:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    NSString *action = arguments[@"action"];
+    if (![action isKindOfClass:[NSString class]] || action.length == 0) {
+        completion(nil, @"缺少 action（play_pause / next / previous）"); return;
+    }
+
+    NSString *keystroke = nil;
+    if ([action isEqualToString:@"play_pause"]) {
+        keystroke = @"keystroke space";
+    } else if ([action isEqualToString:@"next"]) {
+        keystroke = @"key code 124 using command down";    // Cmd+Right
+    } else if ([action isEqualToString:@"previous"]) {
+        keystroke = @"key code 123 using command down";    // Cmd+Left
+    } else {
+        completion(nil, [NSString stringWithFormat:@"未知操作：%@", action]);
+        return;
+    }
+
+    NSString *source = [NSString stringWithFormat:
+        @"tell application \"System Events\"\n"
+        @"    tell process \"NeteaseMusic\"\n"
+        @"        %@\n"
+        @"    end tell\n"
+        @"end tell", keystroke];
+
+    NSAppleScript *script = [[NSAppleScript alloc] initWithSource:source];
+    NSDictionary *error = nil;
+    [script executeAndReturnError:&error];
+
+    if (error) {
+        NSString *msg = error[NSAppleScriptErrorMessage] ?: error[NSAppleScriptErrorBriefMessage] ?: @"未知";
+        completion(nil, [NSString stringWithFormat:@"媒体控制失败：%@", msg]);
+    } else {
+        completion(@{@"action": action}, nil);
+    }
 }
 
 @end
