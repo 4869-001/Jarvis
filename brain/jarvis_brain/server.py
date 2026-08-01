@@ -147,6 +147,7 @@ class BrainServer:
         return {
             "type": "ready",
             "protocol": PROTOCOL_VERSION,
+            "session_id": self.session.session_id,
             "model": self.cfg["deepseek"]["model"],
             "configured": self.session.provider.configured,
             "config_path": config.CONFIG_PATH,

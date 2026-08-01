@@ -22,6 +22,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 @protocol VoiceInputControllerDelegate <NSObject>
 - (void)voiceInputDidStart:(VoiceInputController *)controller;
+/// 麦克风已关、正在等识别器出终版结果。UI 该显示"正在识别"而不是还在"聆听"。
+- (void)voiceInputDidFinishCapturing:(VoiceInputController *)controller;
 - (void)voiceInput:(VoiceInputController *)controller partialText:(NSString *)text;
 /// text 为空表示什么都没听清
 - (void)voiceInput:(VoiceInputController *)controller finalText:(NSString *)text;

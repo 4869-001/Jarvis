@@ -9,6 +9,8 @@ static const CGFloat kPanelWidth  = 460.0;
 static const CGFloat kPanelHeight = 620.0;
 static const CGFloat kScreenMargin = 24.0;
 static const CGFloat kDefaultOpacity = 0.82;
+/// 低于这个高度就认为是收起态，而不是用户手动拖出来的尺寸
+static const CGFloat kMinExpandedHeight = 200.0;
 
 #pragma mark - 面板窗口
 
@@ -28,6 +30,8 @@ static const CGFloat kDefaultOpacity = 0.82;
 @property (nonatomic, strong) NSVisualEffectView *blur;
 @property (nonatomic, assign) BOOL pageReady;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *pendingEvents;
+@property (nonatomic, assign) CGFloat expandedHeight;    ///< 收起前的高度，展开时还原
+@property (nonatomic, assign) NSTimeInterval lastLevelAt;
 @end
 
 @implementation ConversationPanelController
@@ -116,7 +120,17 @@ static const CGFloat kDefaultOpacity = 0.82;
 
 /// 默认贴主屏右下角。用户拖过之后 frameAutosaveName 会接管，不再重定位。
 - (void)positionAtDefaultCorner {
-    if ([self.panel setFrameUsingName:self.panel.frameAutosaveName]) return;
+    if ([self.panel setFrameUsingName:self.panel.frameAutosaveName]) {
+        // 上次退出时如果是收起状态，自动保存下来的就是一条顶栏。
+        // 面板永远以展开状态启动，所以这里要把它撑回去，不然打开是个空壳。
+        if (self.panel.frame.size.height < kMinExpandedHeight) {
+            NSRect frame = self.panel.frame;
+            frame.origin.y -= (kPanelHeight - frame.size.height);
+            frame.size.height = kPanelHeight;
+            [self.panel setFrame:frame display:NO];
+        }
+        return;
+    }
     NSScreen *screen = [NSScreen mainScreen] ?: [NSScreen screens].firstObject;
     NSRect visible = screen.visibleFrame;
     NSRect frame = self.panel.frame;
@@ -142,6 +156,52 @@ static const CGFloat kDefaultOpacity = 0.82;
     // 全透明时索性把整层摘掉，省一次离屏合成
     self.blur.hidden = (_panelOpacity <= 0.01);
     [self pushEvent:@{@"type": @"opacity", @"value": @(_panelOpacity)}];
+}
+
+#pragma mark - 音频电平
+
+/// 每秒最多 15 次。电平回调来自 20Hz 的采样定时器，每次都过一趟 evaluateJavaScript
+/// 会在收音全程持续占着主线程——而这条信息只是让顶栏那几根条动一动。
+/// 面板不可见时干脆不发：没人看的动画不值得付出任何代价。
+- (void)pushMicLevel:(float)level {
+    if (!self.pageReady || !self.panel.isVisible) return;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - self.lastLevelAt < 1.0 / 15.0) return;
+    self.lastLevelAt = now;
+    [self.webView evaluateJavaScript:
+     [NSString stringWithFormat:@"window.__jarvisLevel && window.__jarvisLevel(%.3f)", level]
+                   completionHandler:nil];
+}
+
+#pragma mark - 收起 / 展开
+
+/// 收起只留顶栏。高度由页面量出来后传上来——写死一个数字迟早会和 CSS 对不上，
+/// 差一点就会把顶栏切掉或者露出半行内容。
+- (void)setCollapsed:(BOOL)collapsed headerHeight:(CGFloat)headerHeight {
+    if (!self.panel) return;
+
+    NSRect frame = self.panel.frame;
+    // FullSizeContentView 下 contentRect 基本等于 frame，但别假设，按 API 算
+    CGFloat chrome = frame.size.height - [self.panel contentRectForFrameRect:frame].size.height;
+
+    CGFloat target;
+    if (collapsed) {
+        if (self.expandedHeight < kMinExpandedHeight) self.expandedHeight = frame.size.height;
+        target = MAX(32.0, headerHeight) + chrome;
+    } else {
+        target = self.expandedHeight >= kMinExpandedHeight ? self.expandedHeight : kPanelHeight;
+    }
+
+    // minSize 拦在这儿：不放开的话 setFrame 会被静默钳回 360，收起看着「没反应」。
+    // 收起态也不该让用户手动拖高度，所以顺手把 max 一起钉死。
+    self.panel.minSize = NSMakeSize(360, collapsed ? target : 360);
+    self.panel.maxSize = collapsed ? NSMakeSize(CGFLOAT_MAX, target)
+                                   : NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
+
+    // 窗口原点在左下角：改高度时要把 origin 一起挪，否则收起会变成「顶栏往下掉」
+    frame.origin.y += frame.size.height - target;
+    frame.size.height = target;
+    [self.panel setFrame:frame display:YES animate:NO];
 }
 
 #pragma mark - 显示
@@ -221,11 +281,29 @@ static const CGFloat kDefaultOpacity = 0.82;
                        didAnswerConfirmation:requestID
                                     approved:[body[@"approved"] boolValue]];
         }
+    } else if ([action isEqualToString:@"collapse"]) {
+        NSNumber *header = body[@"header"];
+        [self setCollapsed:[body[@"collapsed"] boolValue]
+              headerHeight:[header isKindOfClass:[NSNumber class]] ? header.doubleValue : 56.0];
+    } else if ([action isEqualToString:@"sleep"]) {
+        [self.delegate conversationPanel:self didRequestSleep:[body[@"sleeping"] boolValue]];
+    } else if ([action isEqualToString:@"open_path"]) {
+        NSString *path = body[@"path"];
+        if ([path isKindOfClass:[NSString class]] && path.length) {
+            [self.delegate conversationPanel:self
+                              didRequestOpen:path
+                                      reveal:[body[@"reveal"] boolValue]];
+        }
     } else if ([action isEqualToString:@"set_opacity"]) {
         NSNumber *value = body[@"value"];
         if ([value isKindOfClass:[NSNumber class]]) self.panelOpacity = value.doubleValue;
     } else if ([action isEqualToString:@"close"]) {
         [self hide];
+    } else if ([action isEqualToString:@"open_log"]) {
+        // 断线时的「查看诊断」。Brain 日志比宿主日志有用得多——
+        // 连不上的原因（缺 Key、端口被占、依赖装歪）基本都写在里面。
+        [[NSWorkspace sharedWorkspace] openURL:
+            [NSURL fileURLWithPath:[JarvisPaths brainLogPath]]];
     } else if ([action isEqualToString:@"open_config"]) {
         [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:[JarvisPaths configPath]]];
     }

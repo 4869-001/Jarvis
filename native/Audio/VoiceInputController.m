@@ -213,6 +213,7 @@ typedef NS_ENUM(NSInteger, JarvisVoicePhase) {
     [self.delegate voiceInput:self level:0];
 
     [self.request endAudio];
+    [self.delegate voiceInputDidFinishCapturing:self];
 
     // finalWait 为 0 表示不等，直接用现有的 partial
     if (self.options.finalWait <= 0) [self deliverFinal];

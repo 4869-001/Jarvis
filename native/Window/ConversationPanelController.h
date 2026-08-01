@@ -17,6 +17,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)conversationPanelDidRequestNewSession:(ConversationPanelController *)panel;
 - (void)conversationPanelDidRequestRestartBrain:(ConversationPanelController *)panel;
 - (void)conversationPanelDidRequestVoiceToggle:(ConversationPanelController *)panel;
+- (void)conversationPanel:(ConversationPanelController *)panel didRequestSleep:(BOOL)sleeping;
+/// 用户在文件卡片上点了「在访达中显示」或「打开」
+- (void)conversationPanel:(ConversationPanelController *)panel
+          didRequestOpen:(NSString *)path reveal:(BOOL)reveal;
 - (void)conversationPanel:(ConversationPanelController *)panel
    didAnswerConfirmation:(NSString *)requestID
                 approved:(BOOL)approved;
@@ -37,6 +41,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 把一条 Brain 事件转发给页面。页面还没加载完时会先攒着。
 - (void)pushEvent:(NSDictionary *)event;
+
+/// 音频电平，驱动顶栏的动态条。高频调用，内部会限流并在面板不可见时直接丢弃。
+- (void)pushMicLevel:(float)level;
 
 @end
 

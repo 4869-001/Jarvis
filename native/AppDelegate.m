@@ -39,9 +39,14 @@ static const uint32_t kHotKeyVoice = 2;
 @property (nonatomic, assign) EventHotKeyRef voiceHotKey;
 @property (nonatomic, copy)   NSString *brainState;
 @property (nonatomic, copy)   NSString *uiState;
+@property (nonatomic, copy)   NSString *uiDetail;
+@property (nonatomic, copy)   NSDictionary *wakeConfig;
 @property (nonatomic, assign) NSUInteger messageCounter;
 @property (nonatomic, assign) BOOL voiceEnabled;
 @property (nonatomic, copy)   NSDictionary *voiceConfig;
+@property (nonatomic, copy)   NSString *brainDetail;
+@property (nonatomic, assign) BOOL transcribing;
+@property (nonatomic, assign) BOOL sleeping;
 @end
 
 @implementation AppDelegate
@@ -153,21 +158,76 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 /// 正在收音 > 正在播报 > Brain 的状态。否则 Brain 说完就报 idle，
 /// 而音频还在播，球体会提前熄下去。
 - (void)refreshUIState {
+    // 优先级从高到低。睡眠压一切——它的语义就是"什么都别做"。
     NSString *state = self.brainState ?: @"idle";
-    if (self.voice.isListening) state = @"listening";
-    else if (self.player.isPlaying) state = @"speaking";
+    NSString *detail = self.brainDetail;
+    if (self.sleeping) {
+        state = @"sleeping"; detail = nil;
+    } else if (self.transcribing) {
+        state = @"transcribing"; detail = nil;
+    } else if (self.voice.isListening) {
+        state = @"listening"; detail = nil;
+    } else if (self.player.isPlaying) {
+        state = @"speaking"; detail = nil;
+    }
 
-    if ([state isEqualToString:self.uiState]) return;
+    BOOL same = [state isEqualToString:self.uiState]
+             && ((detail == nil && self.uiDetail == nil) || [detail isEqualToString:self.uiDetail]);
+    if (same) return;
     self.uiState = state;
+    self.uiDetail = detail;
 
-    [self.orb applyState:state];
+    // 球体只认四个状态，executing/transcribing 这类细分对它没意义
+    [self.orb applyState:[self orbStateFor:state]];
     [self.statusItem updateSessionState:state];
-    [self.conversation pushEvent:@{@"type": @"state", @"state": state}];
+    NSMutableDictionary *event = [@{@"type": @"state", @"state": state} mutableCopy];
+    if (detail.length) event[@"detail"] = detail;
+    [self.conversation pushEvent:event];
+}
+
+/// 球体的状态词表比面板窄。多出来的状态映射到最接近的那个，别让球体收到不认识的词。
+- (NSString *)orbStateFor:(NSString *)state {
+    if ([state isEqualToString:@"transcribing"]) return @"listening";
+    if ([state isEqualToString:@"executing"])    return @"thinking";
+    if ([state isEqualToString:@"error"] || [state isEqualToString:@"sleeping"]) return @"idle";
+    return state;
+}
+
+#pragma mark - 睡眠
+
+/// 睡眠 = 停掉一切主动行为，但不退出、不清历史。
+///
+/// 和"收起面板"是两回事：收起只是把窗口缩成一条，语音唤醒照常工作；
+/// 睡眠会把麦克风、唤醒词、模型请求、播报全部按下去。
+- (void)setSleepMode:(BOOL)sleeping {
+    if (self.sleeping == sleeping) return;
+    self.sleeping = sleeping;
+
+    if (sleeping) {
+        [self.voice abort];             // 停采集，且不产出文本
+        [self.player stopAll];          // 停播报
+        [self.brain send:@{@"type": @"cancel"}];   // 取消模型请求与待执行工具
+        [self.wake stop];               // 唤醒词一并停掉，麦克风才真的还回系统
+        self.wake = nil;
+        self.transcribing = NO;
+    } else if (self.wakeConfig) {
+        [self setUpWakeWordWithConfig:self.wakeConfig];
+    }
+
+    [self.conversation pushEvent:@{@"type": @"sleep", @"sleeping": @(sleeping)}];
+    [self refreshWakeGate];
+    [self refreshUIState];
 }
 
 #pragma mark - 语音
 
 - (void)toggleVoice {
+    if (self.sleeping) {
+        [self.conversation pushEvent:@{@"type": @"error",
+                                       @"message": @"Jarvis 在睡眠中，先唤醒再说话"}];
+        [self.conversation show];
+        return;
+    }
     if (!self.voiceEnabled) {
         [self.conversation pushEvent:@{@"type": @"error", @"message": @"语音输入已在配置里关闭"}];
         return;
@@ -242,6 +302,8 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 #pragma mark - 唤醒词
 
 - (void)setUpWakeWordWithConfig:(NSDictionary *)config {
+    self.wakeConfig = config;
+    if (self.sleeping) return;                 // 睡着时不重建，醒来那一刻才建
     BOOL enabled = [config[@"enabled"] boolValue];
     if (!enabled) { [self.wake stop]; self.wake = nil; return; }
     if (self.wake.isRunning) return;
@@ -293,8 +355,16 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 #pragma mark - VoiceInputControllerDelegate
 
 - (void)voiceInputDidStart:(VoiceInputController *)controller {
+    self.transcribing = NO;
     [self.conversation pushEvent:@{@"type": @"listening", @"active": @YES}];
     [self refreshWakeGate];
+    [self refreshUIState];
+}
+
+/// 麦克风已关、在等终版结果。这段该显示"正在识别"，不该还写着"正在聆听"。
+- (void)voiceInputDidFinishCapturing:(VoiceInputController *)controller {
+    self.transcribing = YES;
+    [self.conversation pushEvent:@{@"type": @"transcribing"}];
     [self refreshUIState];
 }
 
@@ -303,6 +373,7 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 }
 
 - (void)voiceInput:(VoiceInputController *)controller finalText:(NSString *)text {
+    self.transcribing = NO;
     [self.conversation pushEvent:@{@"type": @"listening", @"active": @NO}];
     [self refreshWakeGate];
     [self refreshUIState];
@@ -318,10 +389,13 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 }
 
 - (void)voiceInput:(VoiceInputController *)controller level:(float)level {
-    if (self.voice.isListening) [self.orb applyLevel:level];
+    if (!self.voice.isListening) return;
+    [self.orb applyLevel:level];
+    [self.conversation pushMicLevel:level];
 }
 
 - (void)voiceInput:(VoiceInputController *)controller failed:(NSString *)message {
+    self.transcribing = NO;
     [self.conversation pushEvent:@{@"type": @"listening", @"active": @NO}];
     [self refreshWakeGate];
     [self.conversation pushEvent:@{@"type": @"error", @"message": message}];
@@ -340,7 +414,9 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 }
 
 - (void)speechPlayer:(SpeechPlayer *)player level:(float)level {
-    if (!self.voice.isListening) [self.orb applyLevel:level];
+    if (self.voice.isListening) return;         // 收音优先，别两个源抢同一根条
+    [self.orb applyLevel:level];
+    [self.conversation pushMicLevel:level];
 }
 
 #pragma mark - Brain 进程
@@ -374,6 +450,7 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 
     if ([type isEqualToString:@"state"]) {
         self.brainState = event[@"state"] ?: @"idle";
+        self.brainDetail = event[@"detail"];
         [self refreshUIState];
         return;                                 // 面板收的是 refreshUIState 合成后的状态
     }
@@ -468,6 +545,11 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 #pragma mark - 对话面板
 
 - (void)sendUserMessage:(NSString *)text {
+    if (self.sleeping) {
+        [self.conversation pushEvent:@{@"type": @"error",
+                                       @"message": @"Jarvis 在睡眠中，先唤醒再发送"}];
+        return;
+    }
     self.messageCounter += 1;
     NSString *messageID = [NSString stringWithFormat:@"msg_%lu", (unsigned long)self.messageCounter];
     [self.brain send:@{@"type": @"user_message", @"text": text, @"id": messageID}];
@@ -493,6 +575,28 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 
 - (void)conversationPanelDidRequestVoiceToggle:(ConversationPanelController *)panel {
     [self toggleVoice];
+}
+
+- (void)conversationPanel:(ConversationPanelController *)panel didRequestSleep:(BOOL)sleeping {
+    [self setSleepMode:sleeping];
+}
+
+/// 文件卡片上的「在访达中显示 / 打开」。走 NSWorkspace 而不是 open(1)：
+/// TCC 按 bundle 归属，从宿主进程发起，授权才算在 Jarvis.app 头上。
+- (void)conversationPanel:(ConversationPanelController *)panel
+          didRequestOpen:(NSString *)path reveal:(BOOL)reveal {
+    NSString *full = [path stringByExpandingTildeInPath];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:full]) {
+        [self.conversation pushEvent:@{@"type": @"error",
+                                       @"message": [NSString stringWithFormat:@"文件不在了：%@", path]}];
+        return;
+    }
+    NSURL *url = [NSURL fileURLWithPath:full];
+    if (reveal) {
+        [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[url]];
+    } else {
+        [[NSWorkspace sharedWorkspace] openURL:url];
+    }
 }
 
 - (void)conversationPanel:(ConversationPanelController *)panel

@@ -21,13 +21,16 @@ CONFIRM_FROM = "L2"
 _ORDER = {"L0": 0, "L1": 1, "L2": 2, "L3": 3, "L4": 4}
 
 
-def _tool(name, desc, params, risk, executor, fn=None, required=None):
+def _tool(name, desc, params, risk, executor, fn=None, required=None, recover=None):
     return {
         "name": name,
         "description": desc,
         "risk": risk,
         "executor": executor,
         "fn": fn,
+        # 确认框要回答"这事能不能撤"。写不出具体撤法的就别编，留空由 UI 显示"无法自动撤销"
+        # ——含糊的安慰比没有更危险。
+        "recover": recover,
         "schema": {
             "type": "object",
             "properties": params,
@@ -55,7 +58,7 @@ TOOLS = [
 
     _tool("app_quit", "退出一个正在运行的应用程序。",
           {"name": _p("应用名")},
-          "L2", "native", required=["name"]),
+          "L2", "native", required=["name"], recover="重新打开这个应用即可"),
 
     _tool("app_list_running", "列出当前正在运行的、有界面的应用程序。",
           {}, "L0", "native"),
@@ -118,11 +121,13 @@ TOOLS = [
            "content": _p("文件内容"),
            "mode": {"type": "string", "enum": ["overwrite", "append"],
                     "description": "overwrite 覆盖（默认），append 追加"}},
-          "L2", "python", fs_impl.fs_write, required=["path", "content"]),
+          "L2", "python", fs_impl.fs_write, required=["path", "content"],
+          recover="覆盖前会自动留一份 .jarvis.bak，改回来即可"),
 
     _tool("fs_move", "移动或重命名文件/文件夹。目标已存在时不覆盖，直接报错。",
           {"source": _p("源路径"), "destination": _p("目标路径")},
-          "L2", "python", fs_impl.fs_move, required=["source", "destination"]),
+          "L2", "python", fs_impl.fs_move, required=["source", "destination"],
+          recover="把文件从目标位置移回原路径即可"),
 
     # ------------------------------------------------ 联网（Brain 执行）
     _tool("web_search", "联网搜索。需要最新信息、不确定的事实、或用户明确要求查资料时使用。",
@@ -173,7 +178,7 @@ TOOLS = [
           {"command": _p("命令行"),
            "cwd": _p("工作目录，默认 ~"),
            "timeout": _p("超时秒数，默认 30", _INT)},
-          "L4", "python", shell_impl.shell_run, required=["command"]),
+          "L4", "python", shell_impl.shell_run, required=["command"]),   # 撤法未知，故意留空
 ]
 
 BY_NAME = {tool["name"]: tool for tool in TOOLS}
@@ -229,3 +234,69 @@ class _Blank(dict):
     """模型漏传参数时不该炸掉描述，占位就行。"""
     def __missing__(self, key):
         return "?"
+
+
+# 确认框要的「操作 / 目标」两栏。文档 §11.2 明确禁止"是否允许执行操作？"这种含糊问法，
+# 必须让人看清动的是哪个对象——所以动作和目标分开给，UI 才好各自排版。
+_ACTIONS = {
+    "app_open": "打开应用", "app_quit": "退出应用", "app_list_running": "查看运行中的应用",
+    "url_open": "打开网页", "finder_reveal": "在访达中显示",
+    "clipboard_read": "读取剪贴板", "clipboard_write": "写入剪贴板",
+    "system_notify": "发送通知", "system_info": "查看本机状态", "media_control": "播放控制",
+    "fs_list": "列出目录", "fs_read": "读取文件", "fs_search": "搜索文件",
+    "fs_write": "写入文件", "fs_move": "移动文件",
+    "web_search": "联网搜索", "web_fetch": "抓取网页",
+    "memory_save": "记住一件事", "memory_recall": "回忆", "memory_list": "翻看记忆",
+    "memory_forget": "忘掉一条记忆",
+    "shell_run": "执行命令",
+}
+_TARGET_KEYS = ("path", "source", "command", "name", "url", "text", "query", "id")
+
+
+def action_of(name):
+    return _ACTIONS.get(name, name)
+
+
+def target_of(name, arguments):
+    """挑出最能代表"动的是什么"的那个参数。移动类要把去向也写上。"""
+    arguments = arguments or {}
+    if name == "fs_move":
+        return "%s  →  %s" % (arguments.get("source", "?"), arguments.get("destination", "?"))
+    for key in _TARGET_KEYS:
+        value = arguments.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+# 哪些工具的结果值得让 UI 画成可交互卡片，以及从结果里取哪个列表。
+# 只放确定是"文件路径列表"的：UI 会给每一项加"在访达中显示 / 打开"，
+# 拿别的东西当路径会点出一堆失败。
+_FILE_LIST_TOOLS = {"fs_search": "results", "fs_list": "entries"}
+
+
+def ui_payload(name, arguments, result):
+    """把工具结果整理成 UI 能直接渲染的形状。认不出来就返回 None，UI 退回纯文字摘要。"""
+    if not isinstance(result, dict) or result.get("error"):
+        return None
+    key = _FILE_LIST_TOOLS.get(name)
+    if not key:
+        return None
+
+    raw = result.get(key) or []
+    base = result.get("path") or ""
+    items = []
+    for entry in raw[:30]:
+        if isinstance(entry, str):                       # fs_search：一串路径
+            items.append({"name": entry.rsplit("/", 1)[-1], "path": entry, "kind": "file"})
+        elif isinstance(entry, dict):                    # fs_list：带类型和大小
+            name_ = entry.get("name") or ""
+            items.append({
+                "name": name_,
+                "path": ("%s/%s" % (base.rstrip("/"), name_)) if base else name_,
+                "kind": entry.get("type") or "file",
+                "size": entry.get("size"),
+            })
+    if not items:
+        return None
+    return {"kind": "files", "items": items, "total": result.get("count") or len(items)}

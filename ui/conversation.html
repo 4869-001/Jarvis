@@ -5,7 +5,9 @@
 <title>J.A.R.V.I.S.</title>
 <style>
 /* 配色跟壁纸里的球体走同一套琥珀金（wallpaper.html 的 cHot/cGold/cAmb/cDeep）。
-   以前面板是青色的，和桌面上那颗橙色的球体像两个不同的产品。
+   文档 §4.1 给每个状态指定了青/紫/琥珀/暖白，这里刻意不照做——面板和桌面上那颗球
+   必须看着是同一个东西。状态改用**亮度和脉冲节奏**区分，只有 error 和 sleeping
+   离开琥珀家族，因为这两个本来就该跳出来。
 
    毛玻璃由宿主的 NSVisualEffectView 提供，这里只叠一层深色调；圆角靠 NSWindow 裁。
    --tint 的透明度由宿主按滑块推过来（opacity 事件），不要写死。 */
@@ -13,9 +15,8 @@
   --hot:       #fff3d0;
   --gold:      #ffc46a;
   --amber:     #ff8c1a;
-  --deep:      #ff4d08;
 
-  --tint:      0.62;                      /* 暗色衬底的强度，宿主会覆盖 */
+  --tint:      0.62;
   --bg:        rgba(9, 6, 3, var(--tint));
   --line:      rgba(255, 140, 26, 0.17);
   --line-lit:  rgba(255, 168, 60, 0.42);
@@ -25,9 +26,10 @@
   --warn:      #ffb020;
   --bad:       #ff6a4d;
   --ok:        #b6e06a;
+  --sleep:     #6b6259;
 
-  /* 低透明度时文字直接压在壁纸上，没有衬底就糊。一层极淡的暗描边比加背景块干净。 */
   --halo:      0 1px 3px rgba(0, 0, 0, 0.75);
+  --mono:      "SF Mono", ui-monospace, Menlo, monospace;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -42,13 +44,7 @@ html, body {
   user-select: none;
 }
 
-#shell {
-  position: relative;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg);
-}
+#shell { position: relative; height: 100%; display: flex; flex-direction: column; background: var(--bg); }
 
 /* 顶部那层暖光，呼应球体的 halo。纯装饰，不吃点击。 */
 #shell::before {
@@ -60,139 +56,133 @@ html, body {
 }
 
 /* ── 顶栏 ───────────────────────────────────────────── */
-/* 左边 78px 留给系统的红绿灯按钮，别被内容压住 */
+/* 左边 78px 留给系统的红绿灯按钮。收起时整个窗口就剩这一条，
+   所以它的高度由 JS 量出来传给宿主，两边永远不会对不上。 */
 header {
-  position: relative;
-  flex: none;
-  height: 46px;
-  padding: 0 10px 0 78px;
-  display: flex;
-  align-items: center;
-  gap: 9px;
+  position: relative; flex: none;
+  height: 56px; padding: 0 8px 0 78px;
+  display: flex; align-items: center; gap: 8px;
   border-bottom: 1px solid var(--line);
   -webkit-app-region: drag;
 }
 
 #dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--bad);
-  box-shadow: 0 0 9px currentColor;
-  transition: background 0.3s;
-  flex: none;
+  width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: var(--amber); box-shadow: 0 0 9px currentColor;
+  transition: background 0.25s;
 }
-#dot.on   { background: var(--amber); }
-#dot.busy { background: var(--gold); animation: pulse 1.1s ease-in-out infinite; }
-@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.25 } }
+/* 八个状态全靠亮度 + 节奏区分，不换色系 */
+#dot[data-state="listening"]    { background: var(--hot);  animation: pulse 0.7s ease-in-out infinite; }
+#dot[data-state="transcribing"] { background: var(--gold); animation: pulse 0.7s ease-in-out infinite; }
+#dot[data-state="thinking"]     { background: var(--amber);animation: breathe 2.0s ease-in-out infinite; }
+#dot[data-state="executing"]    { background: #ffa640;     animation: pulse 1.2s ease-in-out infinite; }
+#dot[data-state="speaking"]     { background: var(--text); }
+#dot[data-state="sleeping"]     { background: var(--sleep); box-shadow: none; }
+#dot[data-state="error"]        { background: var(--bad); }
+#dot[data-state="offline"]      { background: var(--bad); opacity: 0.6; }
+@keyframes pulse   { 0%,100% { opacity: 1 } 50% { opacity: 0.2 } }
+@keyframes breathe { 0%,100% { opacity: 1; transform: scale(1) } 50% { opacity: 0.45; transform: scale(0.8) } }
 
-/* 和壁纸底部那行遥测同一种排版：等宽、大字距、暖色 */
 #brand {
-  font: 600 11px/1 "SF Mono", ui-monospace, monospace;
-  letter-spacing: 0.24em;
-  color: var(--gold);
-  text-shadow: 0 0 12px rgba(255, 140, 26, 0.45);
+  font: 600 11px/1 var(--mono); letter-spacing: 0.24em; color: var(--gold);
+  text-shadow: 0 0 12px rgba(255, 140, 26, 0.45); flex: none;
 }
 
+/* 状态文字。后端可以用 detail 覆盖成"正在打开 Safari"这种具体动作 */
 #status {
-  flex: 1;
-  font: 10px/1 "SF Mono", ui-monospace, monospace;
-  letter-spacing: 0.12em;
-  color: var(--text-dim);
+  flex: 1; min-width: 0;
+  font: 10px/1 var(--mono); letter-spacing: 0.1em; color: var(--text-dim);
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
 }
 #status::before { content: '· '; opacity: 0.45; }
 
+/* 音频动态条。收音和播报时都动，其余时候塌成一条静线 */
+#bars { display: flex; align-items: center; gap: 2px; height: 16px; flex: none; }
+#bars i {
+  display: block; width: 2px; height: 2px; border-radius: 1px;
+  background: var(--gold); opacity: 0.5;
+  transition: height 0.08s linear, opacity 0.08s linear;
+}
+
 header button {
-  -webkit-app-region: no-drag;
-  flex: none;
+  -webkit-app-region: no-drag; flex: none;
   background: none; border: 1px solid var(--line); border-radius: 5px;
-  color: var(--text-dim); font-size: 11px; padding: 3px 8px; cursor: pointer;
+  color: var(--text-dim); font-size: 11px; padding: 3px 7px; cursor: pointer;
   transition: color 0.15s, border-color 0.15s;
 }
 header button:hover { color: var(--gold); border-color: var(--line-lit); }
-header button.icon { padding: 3px 7px; font-size: 12px; line-height: 1.2; }
-header button.icon.open { color: var(--amber); border-color: var(--line-lit); }
+header button.on { color: var(--amber); border-color: var(--line-lit); }
 
 /* ── 透明度滑块 ─────────────────────────────────────── */
-/* 收在顶栏下面，点 ◐ 才展开。常驻一个滑块太吵，而这是个调一次就不动的设置。 */
 #opacity {
-  -webkit-app-region: no-drag;
-  flex: none;
-  display: none;
-  align-items: center;
-  gap: 9px;
-  padding: 7px 14px;
-  border-bottom: 1px solid var(--line);
-  background: rgba(255, 140, 26, 0.035);
+  -webkit-app-region: no-drag; flex: none; display: none;
+  align-items: center; gap: 9px; padding: 7px 14px;
+  border-bottom: 1px solid var(--line); background: rgba(255, 140, 26, 0.035);
 }
 #opacity.on { display: flex; }
-#opacity label {
-  font: 10px/1 "SF Mono", ui-monospace, monospace;
-  letter-spacing: 0.14em; color: var(--text-dim); flex: none;
-}
-#opacity output {
-  font: 10px/1 "SF Mono", ui-monospace, monospace;
-  color: var(--gold); width: 34px; text-align: right; flex: none;
-}
+#opacity label { font: 10px/1 var(--mono); letter-spacing: 0.14em; color: var(--text-dim); flex: none; }
+#opacity output { font: 10px/1 var(--mono); color: var(--gold); width: 34px; text-align: right; flex: none; }
 #opacity input[type=range] {
   flex: 1; -webkit-appearance: none; height: 3px; border-radius: 2px;
   background: linear-gradient(to right, var(--amber) 0%, var(--gold) 100%);
   opacity: 0.75; cursor: pointer;
 }
 #opacity input[type=range]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 12px; height: 12px; border-radius: 50%;
-  background: var(--hot); border: none;
-  box-shadow: 0 0 8px rgba(255, 140, 26, 0.9);
+  -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%;
+  background: var(--hot); border: none; box-shadow: 0 0 8px rgba(255, 140, 26, 0.9);
 }
 
 /* ── 消息区 ─────────────────────────────────────────── */
+#body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #log {
-  position: relative;
-  flex: 1;
-  overflow-y: auto;
-  padding: 14px 16px 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  user-select: text;
+  flex: 1; overflow-y: auto; padding: 14px 16px 8px;
+  display: flex; flex-direction: column; gap: 12px; user-select: text;
 }
 #log::-webkit-scrollbar { width: 6px; }
 #log::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
 
-.msg { max-width: 92%; }
+.msg { max-width: 92%; position: relative; }
 .msg.user { align-self: flex-end; }
 .msg.user .body {
-  background: rgba(255, 140, 26, 0.11);
-  border: 1px solid var(--line);
-  border-radius: 12px 12px 3px 12px;
-  padding: 7px 11px;
-  white-space: pre-wrap;
-  word-break: break-word;
+  background: rgba(255, 140, 26, 0.11); border: 1px solid var(--line);
+  border-radius: 12px 12px 3px 12px; padding: 7px 11px;
+  white-space: pre-wrap; word-break: break-word;
 }
-.msg.assistant .body {
-  white-space: pre-wrap;
-  word-break: break-word;
-  text-shadow: var(--halo);
+.msg.assistant .body { white-space: pre-wrap; word-break: break-word; text-shadow: var(--halo); }
+
+/* 流式光标。收完就摘掉，别让它一直闪着像还在生成 */
+.msg.assistant.streaming .body::after {
+  content: '▍'; color: var(--amber); animation: blink 1s steps(2) infinite; margin-left: 1px;
 }
-/* 中文字幕。Jarvis 讲英文，这行是给眼睛看的，所以弱化处理，
+@keyframes blink { 0%,49% { opacity: 1 } 50%,100% { opacity: 0 } }
+
+/* 中文字幕。Jarvis 讲英文，这行是给眼睛看的，所以弱化，
    但不能弱到看不清——它常常是用户唯一真正读的那行。 */
 .msg.assistant .zh {
-  margin-top: 5px;
-  padding-left: 9px;
+  margin-top: 5px; padding-left: 9px;
   border-left: 2px solid rgba(255, 140, 26, 0.35);
-  font-size: 12.5px;
-  color: rgba(255, 220, 180, 0.72);
-  text-shadow: var(--halo);
-  white-space: pre-wrap;
-  word-break: break-word;
+  font-size: 12.5px; color: rgba(255, 220, 180, 0.72); text-shadow: var(--halo);
+  white-space: pre-wrap; word-break: break-word;
 }
 .msg.assistant .zh:empty { display: none; }
-
-.msg.assistant .body code {
-  font: 12px "SF Mono", ui-monospace, monospace;
-  background: rgba(255, 200, 130, 0.09);
+.msg .body code {
+  font: 12px var(--mono); background: rgba(255, 200, 130, 0.09);
   padding: 1px 4px; border-radius: 3px;
 }
+
+/* 消息操作行。默认只留时间，悬停才露出按钮——常驻会把对话弄得很吵。 */
+.acts {
+  display: flex; gap: 10px; align-items: center; margin-top: 4px;
+  font: 10px/1 var(--mono); color: rgba(255, 196, 130, 0.3);
+}
+.msg.user .acts { justify-content: flex-end; }
+.acts button {
+  background: none; border: none; padding: 0; cursor: pointer;
+  font: inherit; color: rgba(255, 196, 130, 0.4);
+  opacity: 0; transition: opacity 0.15s, color 0.15s;
+}
+.msg:hover .acts button { opacity: 1; }
+.acts button:hover { color: var(--gold); }
 
 /* 思维链：默认收起，点一下展开 */
 .reasoning {
@@ -204,81 +194,130 @@ header button.icon.open { color: var(--amber); border-color: var(--line-lit); }
 
 /* ── 工具卡片 ───────────────────────────────────────── */
 .tool {
-  display: flex; align-items: flex-start; gap: 7px;
-  font: 11.5px/1.5 "SF Mono", ui-monospace, monospace;
-  color: var(--text-dim);
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 6px 9px;
-  align-self: flex-start;
-  max-width: 92%;
-  background: rgba(255, 140, 26, 0.04);
+  align-self: stretch; border: 1px solid var(--line); border-radius: 8px;
+  background: rgba(255, 140, 26, 0.04); overflow: hidden;
 }
-.tool .mark { color: var(--gold); flex: none; }
-.tool.ok   .mark { color: var(--ok); }
-.tool.fail .mark { color: var(--bad); }
-.tool.fail { color: rgba(255, 106, 77, 0.85); }
-.tool .what { word-break: break-word; }
+.tool-head {
+  display: flex; align-items: baseline; gap: 7px; padding: 7px 10px;
+  font: 11.5px/1.5 var(--mono); color: var(--text-dim);
+}
+.tool-head .mark { color: var(--gold); flex: none; width: 1em; }
+.tool.ok      .mark { color: var(--ok); }
+.tool.fail    .mark { color: var(--bad); }
+.tool.cancel  .mark { color: var(--text-dim); }
+.tool-head .what { color: var(--text); flex: none; }
+.tool-head .target {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; text-align: left;              /* 路径太长时保住尾部的文件名 */
+}
+.tool-head .ms { flex: none; opacity: 0.6; }
+
+/* 执行步骤。只记真实发生过的系统动作，不编造"正在校验权限"这种看不见的步骤。 */
+.steps { padding: 0 10px 8px 27px; font: 11px/1.7 var(--mono); color: var(--text-dim); }
+.steps div::before { content: '● '; color: var(--warn); }
+.steps div.done::before { content: '✓ '; color: var(--ok); }
+.steps div.fail::before { content: '✗ '; color: var(--bad); }
+
+/* 文件结果：可多选，选中后底部两个动作才有意义 */
+.files { border-top: 1px solid var(--line); }
+.file {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer;
+  font-size: 12px; border-bottom: 1px solid rgba(255, 140, 26, 0.07);
+}
+.file:hover { background: rgba(255, 140, 26, 0.07); }
+.file.sel { background: rgba(255, 140, 26, 0.13); }
+.file .tick { flex: none; width: 12px; color: var(--amber); opacity: 0; }
+.file.sel .tick { opacity: 1; }
+.file .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file .p {
+  flex: none; max-width: 45%; font: 10px var(--mono); color: rgba(255,196,130,0.35);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
+}
+.file-acts { display: flex; gap: 8px; padding: 8px 10px; }
+.file-acts button {
+  flex: 1; padding: 5px; border-radius: 6px; cursor: pointer; font-size: 11.5px;
+  border: 1px solid var(--line); background: rgba(255, 200, 130, 0.06); color: var(--text);
+}
+.file-acts button:hover:not(:disabled) { background: rgba(255, 200, 130, 0.14); border-color: var(--line-lit); }
+.file-acts button:disabled { opacity: 0.35; cursor: default; }
 
 /* ── 确认框 ─────────────────────────────────────────── */
+/* 文档 §11.2：必须写清动作、目标、完整路径、能不能撤。
+   「是否允许 Jarvis 执行操作？」这种问法等于没问。 */
 .confirm {
-  border: 1px solid rgba(255, 176, 32, 0.45);
-  background: rgba(255, 176, 32, 0.08);
-  border-radius: 9px; padding: 10px 12px;
-  align-self: stretch;
+  border: 1px solid rgba(255, 176, 32, 0.45); background: rgba(255, 176, 32, 0.08);
+  border-radius: 9px; padding: 10px 12px; align-self: stretch;
 }
 .confirm .head {
-  font: 600 11px/1 "SF Mono", ui-monospace, monospace;
-  color: var(--warn); letter-spacing: 0.14em; margin-bottom: 6px;
+  font: 600 11px/1 var(--mono); color: var(--warn);
+  letter-spacing: 0.14em; margin-bottom: 8px;
 }
-.confirm .what { margin-bottom: 8px; word-break: break-word; }
-.confirm pre {
-  font: 11px/1.5 "SF Mono", ui-monospace, monospace;
-  color: var(--text-dim);
-  background: rgba(0,0,0,0.32); border-radius: 5px;
-  padding: 6px 8px; margin-bottom: 8px;
-  max-height: 140px; overflow: auto; white-space: pre-wrap; word-break: break-all;
-}
+.confirm dl { display: grid; grid-template-columns: 4em 1fr; gap: 4px 8px; margin-bottom: 9px; }
+.confirm dt { font: 10px/1.6 var(--mono); color: var(--text-dim); }
+.confirm dd { font-size: 12px; word-break: break-all; }
+.confirm dd.mono { font: 11px/1.6 var(--mono); color: rgba(255, 220, 180, 0.85); }
+.confirm dd.no-undo { color: var(--bad); }
 .confirm .row { display: flex; gap: 8px; }
 .confirm button {
-  flex: 1; padding: 6px; border-radius: 6px; cursor: pointer;
-  border: 1px solid var(--line); background: rgba(255, 200, 130, 0.06);
-  color: var(--text); font-size: 12px;
+  flex: 1; padding: 6px; border-radius: 6px; cursor: pointer; font-size: 12px;
+  border: 1px solid var(--line); background: rgba(255, 200, 130, 0.06); color: var(--text);
 }
 .confirm button.yes { border-color: rgba(255, 176, 32, 0.55); color: var(--warn); }
 .confirm button:hover { background: rgba(255, 200, 130, 0.14); }
-.confirm.done { opacity: 0.45; }
+.confirm.done { opacity: 0.5; }
 .confirm.done .row { display: none; }
 
-.notice {
-  font-size: 11.5px; color: var(--text-dim); text-align: center; padding: 2px;
-  text-shadow: var(--halo);
-}
+.notice { font-size: 11.5px; color: var(--text-dim); text-align: center; padding: 2px; text-shadow: var(--halo); }
 .notice.bad { color: var(--bad); }
+.notice .link { color: var(--gold); cursor: pointer; text-decoration: underline; margin: 0 4px; }
 
-/* 空会话时的说明。省得每次打开都盯着一片黑想"它能干嘛" */
-#empty {
-  margin: auto; text-align: center; color: rgba(255, 196, 130, 0.34);
-  font-size: 11.5px; line-height: 2;
-  text-shadow: var(--halo);
-}
+/* ── 空状态 ─────────────────────────────────────────── */
+#empty { margin: auto; text-align: center; padding: 0 18px; }
 #empty b {
-  display: block; font: 600 11px/1 "SF Mono", ui-monospace, monospace;
-  letter-spacing: 0.22em; color: var(--gold); margin-bottom: 10px;
-  text-shadow: 0 0 14px rgba(255, 140, 26, 0.5);
+  display: block; font: 600 11px/1 var(--mono); letter-spacing: 0.22em;
+  color: var(--gold); margin-bottom: 10px; text-shadow: 0 0 14px rgba(255, 140, 26, 0.5);
 }
-#empty .mem { display: block; margin-top: 8px; color: rgba(255, 196, 130, 0.28); }
+#empty p { color: rgba(255, 196, 130, 0.34); font-size: 11.5px; line-height: 1.9; text-shadow: var(--halo); }
+#empty .chips { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
+#empty .chips button {
+  padding: 7px 11px; border-radius: 8px; cursor: pointer; font-size: 12px; text-align: left;
+  border: 1px solid var(--line); background: rgba(255, 200, 130, 0.04); color: rgba(255,230,196,0.75);
+}
+#empty .chips button:hover { border-color: var(--line-lit); color: var(--text); background: rgba(255, 140, 26, 0.1); }
+#empty .mem { display: block; margin-top: 12px; color: rgba(255, 196, 130, 0.26); font: 10px var(--mono); }
 #empty .mem:empty { display: none; }
 
-/* ── 输入区 ─────────────────────────────────────────── */
-footer {
-  position: relative;
-  flex: none;
-  border-top: 1px solid var(--line);
-  padding: 9px 12px 11px;
+/* ── 睡眠遮罩 ───────────────────────────────────────── */
+#sleepmask {
+  position: absolute; inset: 0; display: none; z-index: 5;
+  flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  background: rgba(6, 5, 4, 0.72); cursor: pointer;
 }
-#composer { display: flex; gap: 8px; align-items: flex-end; }
+#sleepmask.on { display: flex; }
+#sleepmask .z { font-size: 26px; color: var(--sleep); }
+#sleepmask .t { font: 11px/1 var(--mono); letter-spacing: 0.2em; color: rgba(255,196,130,0.4); }
+#sleepmask .h { font-size: 11.5px; color: rgba(255,196,130,0.3); }
 
+/* ── 输入区 ─────────────────────────────────────────── */
+footer { position: relative; flex: none; border-top: 1px solid var(--line); padding: 9px 12px 11px; }
+
+/* 停止条。thinking / executing / speaking 期间常驻，
+   比"发送按钮偷偷变成方块"清楚得多。 */
+#stopbar {
+  display: none; align-items: center; gap: 8px; margin-bottom: 8px;
+  padding: 6px 10px; border-radius: 8px;
+  border: 1px solid rgba(255, 176, 32, 0.35); background: rgba(255, 176, 32, 0.07);
+  font: 11px/1.4 var(--mono); color: var(--warn);
+}
+#stopbar.on { display: flex; }
+#stopbar .txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#stopbar button {
+  flex: none; padding: 3px 9px; border-radius: 5px; cursor: pointer; font: inherit;
+  border: 1px solid rgba(255, 176, 32, 0.5); background: none; color: var(--warn);
+}
+#stopbar button:hover { background: rgba(255, 176, 32, 0.18); }
+
+#composer { display: flex; gap: 8px; align-items: flex-end; }
 #mic {
   flex: none; width: 34px; height: 34px; border-radius: 9px; cursor: pointer;
   border: 1px solid var(--line); background: rgba(255, 200, 130, 0.05);
@@ -286,68 +325,47 @@ footer {
 }
 #mic:hover { color: var(--gold); border-color: var(--line-lit); }
 #mic.on {
-  border-color: rgba(255, 140, 26, 0.75); color: var(--hot);
-  background: rgba(255, 140, 26, 0.2);
-  box-shadow: 0 0 14px rgba(255, 140, 26, 0.45);
-  animation: pulse 1.1s ease-in-out infinite;
+  border-color: rgba(255, 140, 26, 0.75); color: var(--hot); background: rgba(255, 140, 26, 0.2);
+  box-shadow: 0 0 14px rgba(255, 140, 26, 0.45); animation: pulse 1.1s ease-in-out infinite;
 }
-
-/* 听写中的实时文本，贴在输入框上方，收句后会变成一条正式消息 */
-#hearing {
-  display: none;
-  margin-bottom: 8px; padding: 7px 11px;
-  border: 1px dashed rgba(255, 140, 26, 0.5); border-radius: 9px;
-  font-size: 12.5px; color: var(--text); min-height: 32px;
-  background: rgba(255, 140, 26, 0.05);
-}
-#hearing.on { display: block; }
-#hearing b {
-  color: var(--amber); font: 600 10px/1 "SF Mono", ui-monospace, monospace;
-  letter-spacing: 0.16em; margin-right: 8px;
-}
-/* 一直没听到人声时的倒计时，到点宿主会自动关麦 */
-#hearing .idle { float: right; color: var(--text-dim); font: 10px/1.4 "SF Mono", monospace; }
-#hearing .idle:empty { display: none; }
 
 #input {
-  flex: 1;
-  background: rgba(255, 200, 130, 0.05);
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  color: var(--text);
-  font: 13px/1.5 inherit;
-  padding: 8px 10px;
-  resize: none;
-  max-height: 140px;
-  outline: none;
-  user-select: text;
+  flex: 1; background: rgba(255, 200, 130, 0.05); border: 1px solid var(--line);
+  border-radius: 9px; color: var(--text); font: 13px/1.5 inherit; padding: 8px 10px;
+  resize: none; max-height: 120px; outline: none; user-select: text;
 }
 #input:focus { border-color: var(--line-lit); }
 #input::placeholder { color: rgba(255, 196, 130, 0.3); }
+#input.hearing { border-color: rgba(255, 140, 26, 0.6); background: rgba(255, 140, 26, 0.07); }
 
 #send {
   flex: none; width: 34px; height: 34px; border-radius: 9px; cursor: pointer;
   border: 1px solid var(--line-lit); background: rgba(255, 140, 26, 0.14);
   color: var(--gold); font-size: 15px; line-height: 1;
+  transition: opacity 0.15s;
 }
-#send:hover { background: rgba(255, 140, 26, 0.26); }
-#send.stop { border-color: rgba(255, 106, 77, 0.55); background: rgba(255, 106, 77, 0.14); color: var(--bad); }
+#send:hover:not(:disabled) { background: rgba(255, 140, 26, 0.26); }
+#send:disabled { opacity: 0.3; cursor: default; }
 
-#hint {
-  font: 10px/1 "SF Mono", ui-monospace, monospace;
-  color: rgba(255, 196, 130, 0.24);
-  margin-top: 6px; text-align: right;
-}
+#hint { font: 10px/1 var(--mono); color: rgba(255, 196, 130, 0.24); margin-top: 6px; text-align: right; }
+
+/* 收起态：除了顶栏什么都不显示。窗口本身也会被宿主缩到顶栏高度。 */
+body.collapsed #opacity,
+body.collapsed #body,
+body.collapsed footer { display: none; }
 </style>
 </head>
 <body>
 <div id="shell">
   <header>
-    <span id="dot"></span>
+    <span id="dot" data-state="offline"></span>
     <span id="brand">J.A.R.V.I.S.</span>
     <span id="status">连接中</span>
-    <button id="btn-opacity" class="icon" title="面板透明度">◐</button>
-    <button id="btn-new" title="清空上下文（⌘⇧N）">新会话</button>
+    <span id="bars"><i></i><i></i><i></i><i></i><i></i></span>
+    <button id="btn-opacity" title="面板透明度">◐</button>
+    <button id="btn-sleep" title="睡眠：停止聆听与后台任务">☾</button>
+    <button id="btn-new" title="新会话（⌘⇧N）">＋</button>
+    <button id="btn-collapse" title="收起面板">⌃</button>
   </header>
 
   <div id="opacity">
@@ -356,47 +374,68 @@ footer {
     <output id="opacity-value">82%</output>
   </div>
 
-  <div id="log">
-    <div id="empty">
-      <b>AT YOUR SERVICE</b>
-      打开应用 · 查找与读写文件 · 读剪贴板<br>
-      联网搜索 · 抓取网页 · 查看本机状态
-      <span class="mem" id="empty-memory"></span>
+  <div id="body">
+    <div id="log"></div>
+    <div id="sleepmask">
+      <div class="z">☾</div>
+      <div class="t">SLEEPING</div>
+      <div class="h">已停止聆听与后台任务 · 点这里唤醒</div>
     </div>
   </div>
 
   <footer>
-    <div id="hearing"><b>LISTENING</b><span id="hearing-idle" class="idle"></span><span id="hearing-text">…</span></div>
+    <div id="stopbar"><span class="txt">正在处理…</span><button id="btn-stop">停止 (Esc)</button></div>
     <div id="composer">
       <button id="mic" title="说话（⌥V）">🎙</button>
       <textarea id="input" rows="1" placeholder="说点什么…" autofocus></textarea>
-      <button id="send" title="发送">↑</button>
+      <button id="send" title="发送" disabled>↑</button>
     </div>
-    <div id="hint">Enter 发送 · ⇧Enter 换行 · ⌥V 说话 · Esc 收起</div>
+    <div id="hint">Enter 发送 · ⇧Enter 换行 · ⌥V 说话 · Esc 停止/收起</div>
   </footer>
 </div>
 
 <script>
 'use strict';
 
-const log     = document.getElementById('log');
-const input   = document.getElementById('input');
-const sendBtn = document.getElementById('send');
-const dot     = document.getElementById('dot');
-const statusEl= document.getElementById('status');
-const micBtn  = document.getElementById('mic');
-const hearing = document.getElementById('hearing');
-const hearingText = document.getElementById('hearing-text');
-const hearingIdle = document.getElementById('hearing-idle');
+const $ = (id) => document.getElementById(id);
+const log = $('log'), input = $('input'), sendBtn = $('send'), dot = $('dot'),
+      statusEl = $('status'), micBtn = $('mic'), stopbar = $('stopbar'),
+      sleepmask = $('sleepmask'), bars = [...$('bars').children];
 
-let connected = false;
-let busy      = false;
-let current   = null;   // 正在流式接收的那条 assistant 消息
+/* 唯一真相。UI 的每一处显示都从这里推导，不各自记一份——
+   以前 busy/connected/listening 三个布尔各管一摊，停止之后总有一处没复位。 */
+const S = {
+  connected: false,
+  state: 'offline',      // idle listening transcribing thinking executing speaking sleeping error offline
+  detail: '',
+  sleeping: false,
+  collapsed: false,
+  listening: false,
+  hasMessages: false,
+  textBeforeVoice: '',   // 开麦前输入框里已有的内容，转写要接在它后面
+  pendingConfirm: null,  // 未回答的确认卡片，Esc 优先关它
+};
 
-function post(payload) {
+const STATUS_TEXT = {
+  idle: '准备就绪', listening: '正在聆听', transcribing: '正在识别',
+  thinking: '正在思考', executing: '正在执行', speaking: '正在回复',
+  sleeping: '睡眠模式', error: '出错了', offline: '未连接',
+};
+/* 这三个状态说明"有任务在跑"，停止条和 Esc 的行为都看它 */
+const BUSY = new Set(['thinking', 'executing', 'speaking']);
+
+function post(action, extra) {
+  const payload = Object.assign({ action: action }, extra || {});
   if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.jarvis) {
     window.webkit.messageHandlers.jarvis.postMessage(payload);
   }
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
 }
 
 /* 只有本来就贴着底部时才自动滚——用户翻历史时别把他拽回去 */
@@ -405,18 +444,127 @@ function scroll(force) {
   if (force || nearBottom) log.scrollTop = log.scrollHeight;
 }
 
-const EMPTY_HTML = log.innerHTML;
-
-function hideEmpty() {
-  const node = document.getElementById('empty');
-  if (node) node.remove();
+function clock() {
+  const d = new Date();
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
 
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
+/* ── 渲染唯一入口 ───────────────────────────────────── */
+
+function render() {
+  const busy = BUSY.has(S.state);
+  dot.dataset.state = S.state;
+  statusEl.textContent = S.detail || STATUS_TEXT[S.state] || S.state;
+
+  stopbar.classList.toggle('on', busy && !S.sleeping);
+  if (busy) stopbar.querySelector('.txt').textContent = S.detail || STATUS_TEXT[S.state];
+
+  micBtn.classList.toggle('on', S.listening);
+  input.classList.toggle('hearing', S.listening);
+  sleepmask.classList.toggle('on', S.sleeping);
+  $('btn-sleep').classList.toggle('on', S.sleeping);
+
+  input.disabled = S.sleeping;
+  input.placeholder = S.sleeping ? '先唤醒 Jarvis…' : '说点什么…';
+  sendBtn.disabled = S.sleeping || !input.value.trim();
+}
+
+function setState(state, detail) {
+  S.state = state;
+  S.detail = detail || '';
+  render();
+}
+
+/* ── 空状态 ─────────────────────────────────────────── */
+/* 三个快捷指令来自文档 §6：点一下等于把这句话填进输入框并立刻发送。 */
+const CHIPS = [
+  '找一下桌面上的 Markdown 文档',
+  '打开 Safari，再看看我这台 Mac 现在状态怎么样',
+  '把桌面上的 Jarvis-temp-test.txt 重命名成 test-renamed.txt',
+];
+
+function showEmpty() {
+  log.innerHTML = '';
+  const box = el('div'); box.id = 'empty';
+  box.appendChild(el('b', null, 'AT YOUR SERVICE'));
+  const p = el('p');
+  p.innerHTML = '打开应用 · 查找与读写文件 · 读剪贴板<br>联网搜索 · 抓取网页 · 查看本机状态';
+  box.appendChild(p);
+  const chips = el('div', 'chips');
+  CHIPS.forEach((text) => {
+    const b = el('button', null, text);
+    b.addEventListener('click', () => { input.value = text; render(); submit(); });
+    chips.appendChild(b);
+  });
+  box.appendChild(chips);
+  const mem = el('span', 'mem'); mem.id = 'empty-memory';
+  box.appendChild(mem);
+  log.appendChild(box);
+  applyMemoryCount();
+}
+
+let memoryCount = 0;
+function applyMemoryCount() {
+  const node = $('empty-memory');
+  if (node) node.textContent = memoryCount ? '长期记忆 ' + memoryCount + ' 条' : '';
+}
+
+/* 第一条消息出现后空状态永久隐藏，直到新会话 */
+function hideEmpty() {
+  const node = $('empty');
+  if (node) node.remove();
+  S.hasMessages = true;
+}
+
+/* ── 消息 ───────────────────────────────────────────── */
+
+function actionsRow(getText, resend) {
+  const row = el('div', 'acts');
+  row.appendChild(el('span', null, clock()));
+  const copy = el('button', null, '复制');
+  copy.addEventListener('click', () => {
+    navigator.clipboard.writeText(getText()).then(
+      () => { copy.textContent = '已复制'; setTimeout(() => { copy.textContent = '复制'; }, 1200); },
+      () => { copy.textContent = '复制失败'; });
+  });
+  row.appendChild(copy);
+  if (resend) {
+    const again = el('button', null, '重新发送');
+    again.addEventListener('click', () => { input.value = getText(); render(); submit(); });
+    row.appendChild(again);
+  }
+  return row;
+}
+
+function addUserMessage(text) {
+  hideEmpty();
+  const msg = el('div', 'msg user');
+  msg.appendChild(el('div', 'body', text));
+  msg.appendChild(actionsRow(() => text, true));
+  log.appendChild(msg);
+  scroll(true);
+}
+
+let current = null;      // 正在流式接收的那条 assistant 消息
+
+function ensureAssistant() {
+  if (current) return current;
+  hideEmpty();
+  const msg = el('div', 'msg assistant streaming');
+  const reasoning = el('div', 'reasoning');
+  reasoning.style.display = 'none';
+  reasoning.addEventListener('click', () => reasoning.classList.toggle('open'));
+  const body = el('div', 'body'), zh = el('div', 'zh');
+  msg.append(reasoning, body, zh);
+  msg.appendChild(actionsRow(() => body.textContent + (zh.textContent ? '\n' + zh.textContent : ''), false));
+  log.appendChild(msg);
+  current = { msg, body, reasoning, zh };
+  return current;
+}
+
+function endStreaming() {
+  if (current) current.msg.classList.remove('streaming');
+  current = null;
 }
 
 function addNotice(text, bad) {
@@ -427,45 +575,140 @@ function addNotice(text, bad) {
   return node;
 }
 
-function setBusy(value) {
-  busy = value;
-  sendBtn.textContent = value ? '■' : '↑';
-  sendBtn.classList.toggle('stop', value);
-  sendBtn.title = value ? '停止' : '发送';
+/* ── 工具卡片 ───────────────────────────────────────── */
+
+const toolNodes = new Map();
+
+function addToolCard(event) {
+  hideEmpty();
+  const card = el('div', 'tool');
+  const head = el('div', 'tool-head');
+  head.appendChild(el('span', 'mark', '●'));
+  head.appendChild(el('span', 'what', event.action || event.name));
+  head.appendChild(el('span', 'target', event.target || ''));
+  head.appendChild(el('span', 'ms', ''));
+  card.appendChild(head);
+  const steps = el('div', 'steps');
+  card.appendChild(steps);
+  log.appendChild(card);
+  toolNodes.set(event.id, { card, head, steps });
+  endStreaming();          // 工具之后模型会另起一段
+  scroll();
+  return toolNodes.get(event.id);
 }
 
-function setStatus(text, kind) {
-  statusEl.textContent = text;
-  dot.className = kind || '';
+/* 步骤只记真实发生过的事。文档 §10.2 说得很清楚：
+   只展示可验证的系统动作，不展示模型的私有思维过程——
+   所以这里不会出现"正在校验工具权限"这种没人能验证的步骤。 */
+function addStep(id, text, cls) {
+  const node = toolNodes.get(id);
+  if (!node) return;
+  const step = el('div', cls || '', text);
+  node.steps.appendChild(step);
+  scroll();
+  return step;
 }
 
-/* ── 透明度 ─────────────────────────────────────────── */
-/* 滑块只负责把值交给宿主：毛玻璃层的 alpha 只有 AppKit 能调。
-   宿主改完会回一条 opacity 事件，页面按它更新暗色衬底和滑块位置，
-   于是"宿主存的值"永远是唯一真相，不会和界面对不上。 */
+function finishTool(event) {
+  const node = toolNodes.get(event.id);
+  if (!node) return;
+  const cancelled = !!event.declined;
+  node.card.classList.add(cancelled ? 'cancel' : (event.success ? 'ok' : 'fail'));
+  node.head.querySelector('.mark').textContent = cancelled ? '—' : (event.success ? '✓' : '✗');
+  if (event.ms) node.head.querySelector('.ms').textContent = event.ms + 'ms';
+  if (!event.success) addStep(event.id, event.summary || '执行失败', 'fail');
+  else if (node.steps.childElementCount === 0) addStep(event.id, '完成', 'done');
+  if (event.payload && event.payload.kind === 'files') renderFiles(node.card, event.payload);
+  toolNodes.delete(event.id);
+  scroll();
+}
 
-const opacityPanel = document.getElementById('opacity');
-const opacityRange = document.getElementById('opacity-range');
-const opacityValue = document.getElementById('opacity-value');
-const opacityBtn   = document.getElementById('btn-opacity');
+function renderFiles(card, payload) {
+  const wrap = el('div', 'files');
+  const selected = new Set();
 
-opacityBtn.addEventListener('click', () => {
-  const open = opacityPanel.classList.toggle('on');
-  opacityBtn.classList.toggle('open', open);
-});
+  payload.items.forEach((item) => {
+    const row = el('div', 'file');
+    row.appendChild(el('span', 'tick', '✓'));
+    row.appendChild(el('span', 'n', item.name || item.path));
+    row.appendChild(el('span', 'p', item.path));
+    row.addEventListener('click', () => {
+      if (selected.has(item.path)) { selected.delete(item.path); row.classList.remove('sel'); }
+      else { selected.add(item.path); row.classList.add('sel'); }
+      sync();
+    });
+    wrap.appendChild(row);
+  });
 
-opacityRange.addEventListener('input', () => {
-  const value = opacityRange.value / 100;
-  applyTint(value);
-  post({ action: 'set_opacity', value: value });
-});
+  const acts = el('div', 'file-acts');
+  const reveal = el('button', null, '在访达中显示');
+  const open = el('button', null, '打开所选');
+  acts.append(reveal, open);
+  wrap.appendChild(acts);
 
-/* 暗色衬底跟着走，但不是线性的：毛玻璃淡下去之后文字直接压在壁纸上，
-   衬底如果也归零就没法看了，所以最低留一点。 */
-function applyTint(value) {
-  const tint = 0.12 + 0.58 * value;
-  document.documentElement.style.setProperty('--tint', tint.toFixed(3));
-  opacityValue.textContent = Math.round(value * 100) + '%';
+  // 一条都没选时两个按钮都是灰的——否则"打开所选"要么无声无息，要么得猜用户想开哪个
+  function sync() {
+    const none = selected.size === 0;
+    reveal.disabled = none; open.disabled = none;
+    open.textContent = none ? '打开所选' : '打开所选 (' + selected.size + ')';
+  }
+  reveal.addEventListener('click', () =>
+    selected.forEach((path) => post('open_path', { path: path, reveal: true })));
+  open.addEventListener('click', () =>
+    selected.forEach((path) => post('open_path', { path: path, reveal: false })));
+  sync();
+
+  if (payload.total > payload.items.length) {
+    const more = el('div', 'file');
+    more.style.cursor = 'default';
+    more.appendChild(el('span', 'tick'));
+    more.appendChild(el('span', 'n', '共 ' + payload.total + ' 条，只列出前 ' + payload.items.length + ' 条'));
+    wrap.insertBefore(more, acts);
+  }
+  card.appendChild(wrap);
+}
+
+/* ── 确认框 ─────────────────────────────────────────── */
+
+function renderConfirm(event) {
+  hideEmpty();
+  const card = el('div', 'confirm');
+  card.appendChild(el('div', 'head', '需要确认 · 风险 ' + (event.risk || 'L2')));
+
+  const dl = el('dl');
+  const pair = (label, value, cls) => {
+    if (!value) return;
+    dl.appendChild(el('dt', null, label));
+    dl.appendChild(el('dd', cls, value));
+  };
+  pair('操作', event.action || event.name);
+  pair('目标', event.target || '（未给出）', 'mono');
+  // 撤法写不出来就直说。含糊的安慰比没有更危险。
+  pair('可恢复', event.recover || '无法自动撤销', event.recover ? '' : 'no-undo');
+  card.appendChild(dl);
+
+  const row = el('div', 'row');
+  const no = el('button', null, '取消');
+  const yes = el('button', 'yes', '确认执行');
+  row.append(no, yes);
+  card.appendChild(row);
+
+  const answer = (approved) => {
+    if (S.pendingConfirm !== entry) return;
+    S.pendingConfirm = null;
+    post('confirm', { request_id: event.request_id, approved: approved });
+    card.classList.add('done');
+    card.querySelector('.head').textContent = approved ? '已确认执行' : '已取消，未做任何修改';
+    addStep(event.id, approved ? '你确认了这次操作' : '你取消了这次操作', approved ? 'done' : 'fail');
+  };
+  const entry = { answer: answer };
+  S.pendingConfirm = entry;
+
+  yes.addEventListener('click', () => answer(true));
+  no.addEventListener('click', () => answer(false));
+
+  log.appendChild(card);
+  scroll(true);
 }
 
 /* ── 发送 ───────────────────────────────────────────── */
@@ -473,118 +716,115 @@ function applyTint(value) {
 function submit() {
   const text = input.value.trim();
   if (!text) return;
-  if (!connected) { addNotice('大脑未连接，稍等或从菜单栏重启大脑', true); return; }
+  if (S.sleeping) { addNotice('Jarvis 在睡眠中，先点顶栏的 ☾ 唤醒', true); return; }
+  if (!S.connected) { addNotice('大脑未连接，稍等或从菜单栏重启大脑', true); return; }
 
-  hideEmpty();
-  const msg = el('div', 'msg user');
-  msg.appendChild(el('div', 'body', text));
-  log.appendChild(msg);
+  // 文档 §7.2：上一任务还在跑就先取消它，再发新的
+  if (BUSY.has(S.state)) post('cancel');
 
+  addUserMessage(text);
   input.value = '';
   input.style.height = 'auto';
-  current = null;
-  setBusy(true);
-  scroll(true);
-  post({ action: 'submit', text: text });
+  endStreaming();
+  setState('thinking');
+  post('submit', { text: text });
 }
 
-sendBtn.addEventListener('click', () => {
-  if (busy) post({ action: 'cancel' });
-  else submit();
+sendBtn.addEventListener('click', submit);
+$('btn-stop').addEventListener('click', stopTask);
+
+function stopTask() {
+  post('cancel');
+  endStreaming();
+  setState(S.connected ? 'idle' : 'offline');
+}
+
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  render();
 });
 
 input.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     submit();
-  } else if (event.key === 'Escape') {
-    event.preventDefault();
-    post({ action: 'close' });
   }
 });
 
-/* 输入框跟着内容长高 */
-input.addEventListener('input', () => {
-  input.style.height = 'auto';
-  input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+/* ── 顶栏按钮 ───────────────────────────────────────── */
+
+$('btn-new').addEventListener('click', () => post('new_session'));
+$('btn-sleep').addEventListener('click', () => post('sleep', { sleeping: !S.sleeping }));
+sleepmask.addEventListener('click', () => post('sleep', { sleeping: false }));
+micBtn.addEventListener('click', () => post('voice_toggle'));
+
+$('btn-collapse').addEventListener('click', () => setCollapsed(!S.collapsed));
+
+/* 收起后只剩顶栏。高度由这里量、传给宿主去缩窗口——
+   写死一个数字迟早会和 CSS 对不上，差一点就切掉顶栏或露出半行内容。 */
+function setCollapsed(collapsed) {
+  S.collapsed = collapsed;
+  document.body.classList.toggle('collapsed', collapsed);
+  $('btn-collapse').textContent = collapsed ? '⌄' : '⌃';
+  $('btn-collapse').title = collapsed ? '展开面板' : '收起面板';
+  post('collapse', { collapsed: collapsed, header: document.querySelector('header').offsetHeight });
+  if (!collapsed) input.focus();
+}
+
+/* ── 透明度 ─────────────────────────────────────────── */
+/* 滑块只负责把值交给宿主：毛玻璃层的 alpha 只有 AppKit 能调。
+   宿主改完回一条 opacity 事件，页面按它更新暗色衬底和滑块位置，
+   于是"宿主存的值"永远是唯一真相，不会和界面对不上。 */
+const opacityRange = $('opacity-range'), opacityValue = $('opacity-value');
+$('btn-opacity').addEventListener('click', () => {
+  const open = $('opacity').classList.toggle('on');
+  $('btn-opacity').classList.toggle('on', open);
 });
-
-document.getElementById('btn-new').addEventListener('click', () => {
-  post({ action: 'new_session' });
+opacityRange.addEventListener('input', () => {
+  const value = opacityRange.value / 100;
+  applyTint(value);
+  post('set_opacity', { value: value });
 });
-
-micBtn.addEventListener('click', () => post({ action: 'voice_toggle' }));
-
-/* ── 收音状态 ───────────────────────────────────────── */
-/* 一直没听到人声时宿主会到点自动关麦。这里把那个倒计时显出来，
-   否则麦克风自己灭掉会像是出了故障。听到第一个字就不再倒计时。 */
-
-let idleTimeout = 30;      // 由 ready 事件里的 voice_input.idle_timeout 覆盖
-let idleTicker = null;
-
-function stopIdleCountdown() {
-  if (idleTicker) { clearInterval(idleTicker); idleTicker = null; }
-  hearingIdle.textContent = '';
+/* 暗色衬底跟着走，但不是线性的：毛玻璃淡下去之后文字直接压在壁纸上，
+   衬底如果也归零就没法看了，所以最低留一点。 */
+function applyTint(value) {
+  document.documentElement.style.setProperty('--tint', (0.12 + 0.58 * value).toFixed(3));
+  opacityValue.textContent = Math.round(value * 100) + '%';
 }
 
-function startIdleCountdown() {
-  stopIdleCountdown();
-  if (!(idleTimeout > 0)) return;
-  const deadline = Date.now() + idleTimeout * 1000;
-  const tick = () => {
-    const left = Math.ceil((deadline - Date.now()) / 1000);
-    if (left <= 0) { stopIdleCountdown(); return; }
-    hearingIdle.textContent = left + 's';
-  };
-  tick();
-  idleTicker = setInterval(tick, 250);
-}
-
-function setListening(on) {
-  micBtn.classList.toggle('on', on);
-  hearing.classList.toggle('on', on);
-  if (on) { hearingText.textContent = '…'; startIdleCountdown(); }
-  else stopIdleCountdown();
-}
-
-/* 语音识别出来的那句，作为普通用户消息渲染 */
-function addUserBubble(text) {
-  hideEmpty();
-  const msg = el('div', 'msg user');
-  msg.appendChild(el('div', 'body', text));
-  log.appendChild(msg);
-  scroll(true);
-}
-
+/* ── 键盘 ───────────────────────────────────────────── */
+/* 文档 §12 的 Esc 优先级：确认框 > 停止任务 > 收起面板。
+   顺序不能反——任务跑着的时候按 Esc 却把面板收了，是最容易吓到人的一种。 */
 document.addEventListener('keydown', (event) => {
   if (event.metaKey && event.shiftKey && event.key.toLowerCase() === 'n') {
     event.preventDefault();
-    post({ action: 'new_session' });
+    post('new_session');
+    return;
   }
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  if (S.pendingConfirm) { S.pendingConfirm.answer(false); return; }
+  if (S.listening) { post('voice_toggle'); return; }
+  if (BUSY.has(S.state)) { stopTask(); return; }
+  post('close');
 });
 
 window.__jarvisFocusInput = () => input.focus();
 
+/* 顶栏动态条。宿主限流到 15Hz 才推过来，这里只管画。
+   每根条给一个固定的高度系数，看着像频谱而不是五根一起上下。 */
+const BAR_GAIN = [0.55, 0.85, 1.0, 0.8, 0.5];
+window.__jarvisLevel = (level) => {
+  bars.forEach((bar, i) => {
+    const height = 2 + Math.min(1, level * BAR_GAIN[i] * 2.2) * 12;
+    bar.style.height = height.toFixed(1) + 'px';
+    bar.style.opacity = (0.35 + Math.min(1, level * 2) * 0.65).toFixed(2);
+  });
+};
+function resetBars() { bars.forEach((b) => { b.style.height = '2px'; b.style.opacity = '0.35'; }); }
+
 /* ── 接收 ───────────────────────────────────────────── */
-
-function ensureAssistant() {
-  if (current) return current;
-  hideEmpty();
-  const msg = el('div', 'msg assistant');
-  const reasoning = el('div', 'reasoning');
-  reasoning.style.display = 'none';
-  reasoning.addEventListener('click', () => reasoning.classList.toggle('open'));
-  const body = el('div', 'body');
-  const zh = el('div', 'zh');
-  msg.appendChild(reasoning);
-  msg.appendChild(body);
-  msg.appendChild(zh);
-  log.appendChild(msg);
-  current = { msg, body, reasoning, zh };
-  return current;
-}
-
-const toolNodes = new Map();
 
 function handle(event) {
   switch (event.type) {
@@ -595,67 +835,79 @@ function handle(event) {
       break;
 
     case 'connection':
-      connected = !!event.connected;
-      setStatus(connected ? '就绪' : '未连接', connected ? 'on' : '');
-      if (!connected) { setBusy(false); setListening(false); current = null; }
+      S.connected = !!event.connected;
+      if (!S.connected) {
+        endStreaming();
+        S.listening = false;
+        resetBars();
+        setState('offline');
+        showDisconnected();
+      } else {
+        setState('idle');
+      }
       break;
 
-    case 'ready': {
-      connected = true;
-      setStatus(event.configured ? (event.model || '就绪') : '缺 API Key',
-                event.configured ? 'on' : '');
-      if (event.voice_input && typeof event.voice_input.idle_timeout === 'number') {
-        idleTimeout = event.voice_input.idle_timeout;
-      }
-      const memory = document.getElementById('empty-memory');
-      if (memory && event.memory) {
-        memory.textContent = event.memory.enabled && event.memory.count
-          ? '长期记忆 ' + event.memory.count + ' 条'
-          : '';
-      }
+    case 'ready':
+      S.connected = true;
+      memoryCount = (event.memory && event.memory.count) || 0;
+      applyMemoryCount();
+      setState('idle', event.configured ? (event.model || '') : '缺 API Key');
       if (!event.configured) {
         const notice = addNotice('还没配 DeepSeek API Key，点这里打开配置文件', true);
         notice.style.cursor = 'pointer';
-        notice.addEventListener('click', () => post({ action: 'open_config' }));
+        notice.addEventListener('click', () => post('open_config'));
       }
       break;
-    }
 
-    /* 这里的 state 已由宿主合成过：收音 > 播报 > 大脑状态 */
+    /* 宿主已经把状态合成过了：睡眠 > 识别 > 收音 > 播报 > 大脑状态 */
     case 'state':
-      if (event.state === 'listening') {
-        setStatus('在听', 'busy');
-      } else if (event.state === 'thinking' || event.state === 'speaking') {
-        setBusy(true);
-        setStatus(event.state === 'thinking' ? '思考中' : '回复中', 'busy');
-      } else if (event.state === 'idle') {
-        setStatus(connected ? '就绪' : '未连接', connected ? 'on' : '');
-      }
+      setState(event.state, event.detail);
+      if (!BUSY.has(event.state) && event.state !== 'speaking') resetBars();
+      break;
+
+    case 'sleep':
+      S.sleeping = !!event.sleeping;
+      if (S.sleeping) { endStreaming(); S.listening = false; resetBars(); }
+      render();
+      addNotice(S.sleeping ? '已进入睡眠：不再聆听，后台任务已停止' : '已唤醒');
       break;
 
     case 'listening':
-      setListening(!!event.active);
+      S.listening = !!event.active;
+      if (S.listening) S.textBeforeVoice = input.value;
+      else resetBars();
+      render();
       break;
 
+    case 'transcribing':
+      // 麦克风已关，还在等最终文本。输入框里保留已识别的部分。
+      S.listening = false;
+      resetBars();
+      render();
+      break;
+
+    /* 实时转写直接落进输入框（文档 §8.1）。这样识别失败时，
+       已经听到的那半句还留在手边可以改，而不是凭空消失。 */
     case 'transcript_partial':
-      hearingText.textContent = event.text || '…';
-      if (event.text) stopIdleCountdown();
+      input.value = S.textBeforeVoice + (event.text || '');
+      input.dispatchEvent(new Event('input'));
       break;
 
     case 'transcript_final':
-      setListening(false);
-      addUserBubble(event.text);
-      current = null;
-      setBusy(true);
+      S.listening = false;
+      input.value = '';
+      input.style.height = 'auto';
+      addUserMessage(event.text);
+      endStreaming();
+      setState('thinking');
       break;
 
     case 'transcript_empty':
-      setListening(false);
-      addNotice('没听清');
-      break;
-
-    case 'speak_failed':
-      addNotice('播报失败：' + (event.message || ''), true);
+      S.listening = false;
+      input.value = S.textBeforeVoice;
+      input.dispatchEvent(new Event('input'));
+      setState(S.connected ? 'idle' : 'offline');
+      addNotice('没听清，再说一次或直接打字');
       break;
 
     case 'assistant_reasoning_delta': {
@@ -677,60 +929,51 @@ function handle(event) {
       break;
 
     case 'assistant_done':
-      current = null;
+      endStreaming();
       break;
 
-    case 'tool_started': {
-      hideEmpty();
-      const node = el('div', 'tool');
-      node.appendChild(el('span', 'mark', '⚙'));
-      node.appendChild(el('span', 'what', event.summary || event.name));
-      log.appendChild(node);
-      toolNodes.set(event.id, node);
-      current = null;                 // 工具之后模型会另起一段
-      scroll();
+    case 'tool_started':
+      addToolCard(event);
       break;
-    }
-
-    case 'tool_result': {
-      const node = toolNodes.get(event.id);
-      if (!node) break;
-      node.classList.add(event.success ? 'ok' : 'fail');
-      node.querySelector('.mark').textContent = event.success ? '✓' : '✗';
-      if (!event.success && event.summary) node.querySelector('.what').textContent = event.summary;
-      else if (event.ms) node.querySelector('.what').textContent += '  ' + event.ms + 'ms';
-      toolNodes.delete(event.id);
-      break;
-    }
 
     case 'tool_confirm_request':
+      addStep(event.id, '等待你确认');
       renderConfirm(event);
       break;
 
+    case 'tool_result':
+      finishTool(event);
+      break;
+
+    case 'speak_failed':
+      addNotice('播报失败：' + (event.message || ''), true);
+      break;
+
     case 'turn_cancelled':
-      setBusy(false);
-      current = null;
-      addNotice('已取消');
+      endStreaming();
+      setState(S.connected ? 'idle' : 'offline');
+      addNotice('已停止');
       break;
 
     case 'turn_done':
-      setBusy(false);
-      current = null;
+      endStreaming();
       break;
 
     case 'session_reset':
-      log.innerHTML = EMPTY_HTML;
       toolNodes.clear();
-      current = null;
-      setBusy(false);
-      setListening(false);
+      S.pendingConfirm = null;
+      endStreaming();
+      S.hasMessages = false;
+      showEmpty();
+      setState(S.connected ? 'idle' : 'offline');
       // 清的是这一轮的上下文，长期记忆还在——不写清楚会以为记忆也没了
-      addNotice('上下文已清空（长期记忆保留）');
+      addNotice('新会话已开始（长期记忆保留）');
       break;
 
     case 'error':
-      current = null;
-      setBusy(false);
+      endStreaming();
+      S.pendingConfirm = null;
+      setState(S.connected ? 'idle' : 'offline');
       addNotice(event.message || '未知错误', true);
       break;
 
@@ -740,34 +983,15 @@ function handle(event) {
   }
 }
 
-function renderConfirm(event) {
-  hideEmpty();
-  const card = el('div', 'confirm');
-  card.appendChild(el('div', 'head', '需要确认 · ' + (event.risk || 'L2')));
-  card.appendChild(el('div', 'what', event.summary || event.name));
-
-  const args = event.arguments || {};
-  if (Object.keys(args).length) {
-    card.appendChild(el('pre', null, JSON.stringify(args, null, 2)));
-  }
-
-  const row = el('div', 'row');
-  const yes = el('button', 'yes', '允许');
-  const no  = el('button', null, '拒绝');
-  row.appendChild(no);
-  row.appendChild(yes);
-  card.appendChild(row);
-
-  const answer = (approved) => {
-    post({ action: 'confirm', request_id: event.request_id, approved: approved });
-    card.classList.add('done');
-    card.querySelector('.head').textContent = approved ? '已允许' : '已拒绝';
-  };
-  yes.addEventListener('click', () => answer(true));
-  no.addEventListener('click',  () => answer(false));
-
-  log.appendChild(card);
-  scroll(true);
+/* 断线不能只丢一行字：得给出下一步能点的东西（文档 §15.1） */
+function showDisconnected() {
+  const node = addNotice('', true);
+  node.appendChild(el('span', null, '连接已中断，Jarvis Brain 没有响应。'));
+  const retry = el('span', 'link', '重新连接');
+  retry.addEventListener('click', () => { post('restart_brain'); node.remove(); });
+  const diag = el('span', 'link', '查看诊断');
+  diag.addEventListener('click', () => post('open_log'));
+  node.append(retry, diag);
 }
 
 window.__jarvisReceive = (raw) => {
@@ -776,7 +1000,9 @@ window.__jarvisReceive = (raw) => {
   try { handle(event); } catch (e) { console.error('handle failed', e, event); }
 };
 
-setStatus('连接中', '');
+showEmpty();
+resetBars();
+render();
 </script>
 </body>
 </html>

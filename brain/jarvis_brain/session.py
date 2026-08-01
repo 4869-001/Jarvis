@@ -9,6 +9,7 @@ import queue
 import threading
 import time
 import traceback
+import uuid
 
 from . import tts
 from .memory import STORE as MEMORY
@@ -171,6 +172,8 @@ class SessionCoordinator:
         self._worker = None
         self._cancel = threading.Event()
         self._state = "idle"
+        self._state_detail = None
+        self.session_id = uuid.uuid4().hex[:12]
 
         # 等宿主回话的两类阻塞：确认弹窗、原生工具执行
         self._pending = {}              # id -> {"event": Event, "value": any}
@@ -198,11 +201,19 @@ class SessionCoordinator:
 
     # ------------------------------------------------------------ 状态
 
-    def set_state(self, state):
-        if state == self._state:
+    def set_state(self, state, detail=None):
+        """detail 是给顶栏显示的具体动作（"正在打开 Safari"），比通用状态文案有用得多。
+
+        去重要连 detail 一起比：同为 executing 但换了工具时必须重发，
+        否则顶栏会一直停在上一个工具的名字上。
+        """
+        if (state, detail) == (self._state, self._state_detail):
             return
-        self._state = state
-        self.emit({"type": "state", "state": state})
+        self._state, self._state_detail = state, detail
+        message = {"type": "state", "state": state}
+        if detail:
+            message["detail"] = detail
+        self.emit(message)
 
     @property
     def busy(self):
@@ -241,10 +252,12 @@ class SessionCoordinator:
                 slot["event"].set()
 
     def reset(self):
+        """清的是这一轮的上下文。长期记忆不动——那是跨会话的东西。"""
         self.cancel()
         self.history = []
+        self.session_id = uuid.uuid4().hex[:12]
         self.set_state("idle")
-        self.emit({"type": "session_reset"})
+        self.emit({"type": "session_reset", "session_id": self.session_id})
 
     def resolve_pending(self, request_id, value):
         with self._pending_lock:
@@ -434,7 +447,6 @@ class SessionCoordinator:
             # 模型在调工具前先说了句话（"我查一下"），这句该现在就播出去
             self._flush_speech()
 
-            self.set_state("thinking")
             for index, call in enumerate(tool_calls):
                 result = self._execute(call["name"], call["arguments"], call["id"] or ("call_%d" % index))
                 self.history.append({
@@ -443,6 +455,9 @@ class SessionCoordinator:
                     "content": json.dumps(result, ensure_ascii=False)[:16000],
                 })
             self._trim()
+            # 工具跑完了，接下来是等模型消化结果——这段是 thinking，不是 executing。
+            # 不切回去的话顶栏会一直挂着最后一个工具名，看着像卡死了。
+            self.set_state("thinking")
 
         self.emit({"type": "error", "message": "工具调用超过 %d 轮，已中止。" % max_rounds})
 
@@ -461,15 +476,22 @@ class SessionCoordinator:
             return {"error": "参数解析失败：%s" % exc}
 
         summary = registry.describe(name, arguments)
+        # 顶栏显示的是"正在打开 Safari"这种具体动作，不是笼统的"正在执行"
+        self.set_state("executing", summary)
         self.emit({"type": "tool_started", "id": call_id, "name": name,
-                   "arguments": arguments, "risk": tool["risk"], "summary": summary})
+                   "arguments": arguments, "risk": tool["risk"], "summary": summary,
+                   "action": registry.action_of(name),
+                   "target": registry.target_of(name, arguments)})
 
         if registry.needs_confirmation(tool) and name not in self.auto_approve:
+            self.set_state("executing", "等待你确认：%s" % summary)
             approved = self._ask_confirmation(call_id, name, arguments, tool["risk"], summary)
             if not approved:
                 self.emit({"type": "tool_result", "id": call_id, "name": name,
-                           "success": False, "summary": "用户拒绝了这次操作"})
+                           "success": False, "declined": True,
+                           "summary": "已取消，未做任何修改"})
                 return {"error": "用户拒绝执行", "declined": True}
+            self.set_state("executing", summary)
 
         started = time.time()
         try:
@@ -489,16 +511,27 @@ class SessionCoordinator:
             result = {"result": result}
 
         ok = "error" not in result
-        self.emit({"type": "tool_result", "id": call_id, "name": name, "success": ok,
-                   "summary": result.get("error") or summary,
-                   "ms": int((time.time() - started) * 1000)})
+        event = {"type": "tool_result", "id": call_id, "name": name, "success": ok,
+                 "summary": result.get("error") or summary,
+                 "ms": int((time.time() - started) * 1000)}
+        # 认得出形状的结果额外给 UI 一份结构化数据，好画成可点的卡片。
+        # 认不出就没有这个字段，UI 自动退回纯文字摘要——不强求每个工具都有卡片。
+        payload = registry.ui_payload(name, arguments, result)
+        if payload:
+            event["payload"] = payload
+        self.emit(event)
         return result
 
     def _ask_confirmation(self, call_id, name, arguments, risk, summary):
         request_id = "confirm_" + call_id
+        # 确认框必须回答四件事：干什么、对谁干、能不能撤、风险多高。
+        # 只给一句"是否允许执行操作"等于没问——用户没有可判断的依据。
         value = self._wait_for_host(request_id, {
             "type": "tool_confirm_request", "id": call_id, "request_id": request_id,
             "name": name, "arguments": arguments, "risk": risk, "summary": summary,
+            "action": registry.action_of(name),
+            "target": registry.target_of(name, arguments),
+            "recover": (registry.BY_NAME.get(name) or {}).get("recover") or "",
         }, timeout=180)
         if value.get("cancelled"):
             raise Cancelled()

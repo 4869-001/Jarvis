@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>J.A.R.V.I.S. · Optimized</title>
+<style>
+/* 配色同 wallpaper.html 琥珀金；毛玻璃由宿主提供，--tint 可推。 */
+:root {
+  --hot:#fff3d0; --gold:#ffc46a; --amber:#ff8c1a; --deep:#ff4d08;
+  --tint:0.62; --bg:rgba(9,6,3,var(--tint));
+  --line:rgba(255,140,26,0.17); --line-lit:rgba(255,168,60,0.42);
+  --text:#ffe6c4; --text-dim:rgba(255,196,130,0.52);
+  --warn:#ffb020; --bad:#ff6a4d; --ok:#b6e06a;
+  --cyan:#5fd9e0; --purple:#a78bfa; --warm:#ffe8c9; --gray:#6b6b6b;
+  --halo:0 1px 3px rgba(0,0,0,0.75);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:transparent;overflow:hidden;
+  font:13px/1.6 -apple-system,"PingFang SC","Helvetica Neue",sans-serif;
+  color:var(--text);-webkit-font-smoothing:antialiased;user-select:none}
+#shell{position:relative;height:100%;display:flex;flex-direction:column;background:var(--bg)}
+#shell::before{content:'';position:absolute;inset:0 0 auto;height:220px;
+  background:radial-gradient(ellipse 120% 100% at 50% 0%,rgba(255,140,26,0.13) 0%,rgba(255,77,8,0.05) 45%,transparent 75%);
+  pointer-events:none}
+
+/* ── 顶栏 ── */
+header{position:relative;flex:none;height:46px;padding:0 10px 0 78px;display:flex;
+  align-items:center;gap:9px;border-bottom:1px solid var(--line);-webkit-app-region:drag}
+#dot{width:6px;height:6px;border-radius:50%;background:var(--bad);box-shadow:0 0 9px currentColor;transition:background 0.3s;flex:none}
+#dot.on{background:var(--amber)}
+#dot.listening{background:var(--cyan);animation:pulse 1.1s ease-in-out infinite}
+#dot.thinking{background:var(--purple);animation:pulse 1.1s ease-in-out infinite}
+#dot.executing{background:var(--amber);animation:pulse 1.1s ease-in-out infinite}
+#dot.speaking{background:var(--warm);animation:pulse 1.1s ease-in-out infinite}
+#dot.sleeping{background:var(--gray)}
+#dot.error{background:var(--bad);animation:pulse 0.6s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.25}}
+#brand{font:600 11px/1 "SF Mono",ui-monospace,monospace;letter-spacing:0.24em;color:var(--gold);
+  text-shadow:0 0 12px rgba(255,140,26,0.45);flex:none}
+#waveform{display:none;align-items:center;gap:2px;height:16px;flex:none}
+#waveform.on{display:flex}
+#waveform span{width:2px;background:var(--cyan);border-radius:1px;animation:wave 0.9s ease-in-out infinite}
+#waveform span:nth-child(1){height:6px;animation-delay:0s}
+#waveform span:nth-child(2){height:10px;animation-delay:0.15s}
+#waveform span:nth-child(3){height:14px;animation-delay:0.3s}
+#waveform span:nth-child(4){height:10px;animation-delay:0.45s}
+#waveform span:nth-child(5){height:6px;animation-delay:0.6s}
+@keyframes wave{0%,100%{transform:scaleY(1)}50%{transform:scaleY(1.8)}}
+#status{flex:1;font:10px/1 "SF Mono",ui-monospace,monospace;letter-spacing:0.12em;color:var(--text-dim);
+  overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#status::before{content:'· ';opacity:0.45}
+header button{-webkit-app-region:no-drag;flex:none;background:none;border:1px solid var(--line);
+  border-radius:5px;color:var(--text-dim);font-size:11px;padding:3px 8px;cursor:pointer;
+  transition:color 0.15s,border-color 0.15s}
+header button:hover{color:var(--gold);border-color:var(--line-lit)}
+header button.icon{padding:3px 7px;font-size:12px;line-height:1.2}
+header button.icon.open{color:var(--amber);border-color:var(--line-lit)}
+
+/* ── 透明度面板 ── */
+#opacity{-webkit-app-region:no-drag;flex:none;display:none;align-items:center;gap:9px;
+  padding:7px 14px;border-bottom:1px solid var(--line);background:rgba(255,140,26,0.035)}
+#opacity.on{display:flex}
+#opacity label{font:10px/1 "SF Mono",ui-monospace,monospace;letter-spacing:0.14em;color:var(--text-dim);flex:none}
+#opacity output{font:10px/1 "SF Mono",ui-monospace,monospace;color:var(--gold);width:34px;text-align:right;flex:none}
+#opacity input[type=range]{flex:1;-webkit-appearance:none;height:3px;border-radius:2px;
+  background:linear-gradient(to right,var(--amber) 0%,var(--gold) 100%);opacity:0.75;cursor:pointer}
+#opacity input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;
+  border-radius:50%;background:var(--hot);border:none;box-shadow:0 0 8px rgba(255,140,26,0.9)}
+
+/* ── 消息区 ── */
+#log{position:relative;flex:1;overflow-y:auto;padding:14px 16px 8px;display:flex;flex-direction:column;gap:12px;user-select:text}
+#log::-webkit-scrollbar{width:6px}
+#log::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+
+.msg{max-width:92%;position:relative}
+.msg.user{align-self:flex-end}
+.msg.user .body{background:rgba(255,140,26,0.11);border:1px solid var(--line);border-radius:12px 12px 3px 12px;
+  padding:7px 11px;white-space:pre-wrap;word-break:break-word}
+.msg.assistant .body{white-space:pre-wrap;word-break:break-word;text-shadow:var(--halo)}
+.msg.assistant .zh{margin-top:5px;padding-left:9px;border-left:2px solid rgba(255,140,26,0.35);
+  font-size:12.5px;color:rgba(255,220,180,0.72);text-shadow:var(--halo);white-space:pre-wrap;word-break:break-word}
+.msg.assistant .zh:empty{display:none}
+.msg.assistant .body code{font:12px "SF Mono",ui-monospace,monospace;background:rgba(255,200,130,0.09);padding:1px 4px;border-radius:3px}
+.msg .actions{display:none;position:absolute;top:-8px;right:-4px;gap:4px;background:rgba(9,6,3,0.85);
+  border:1px solid var(--line);border-radius:6px;padding:2px;z-index:5}
+.msg:hover .actions{display:flex}
+.msg .actions button{background:none;border:none;cursor:pointer;color:var(--text-dim);font-size:11px;padding:2px 5px;border-radius:4px}
+.msg .actions button:hover{color:var(--gold);background:rgba(255,140,26,0.12)}
+.cursor{display:inline-block;width:7px;height:14px;background:var(--gold);margin-left:2px;
+  vertical-align:text-bottom;animation:blink 1s steps(2) infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+
+/* 思维链 */
+.reasoning{font-size:11.5px;color:var(--text-dim);border-left:2px solid var(--line);padding-left:9px;
+  margin-bottom:6px;white-space:pre-wrap;max-height:3.4em;overflow:hidden;cursor:pointer}
+.reasoning.open{max-height:none}
+.reasoning::before{content:'▸ 思维链';font:600 9px/1 "SF Mono",monospace;letter-spacing:0.12em;display:block;margin-bottom:3px;opacity:0.6}
+
+/* 工具卡片：文件搜索结果 */
+.tool{border:1px solid var(--line);border-radius:9px;padding:10px 12px;background:rgba(255,140,26,0.04);
+  align-self:stretch;max-width:100%}
+.tool .head{font:600 11px/1 "SF Mono",ui-monospace,monospace;color:var(--gold);letter-spacing:0.14em;margin-bottom:8px}
+.tool .items{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
+.tool .item{display:flex;align-items:center;gap:8px;padding:7px 9px;border:1px solid var(--line);
+  border-radius:7px;cursor:pointer;transition:border-color 0.15s,background 0.15s;background:rgba(255,200,130,0.03)}
+.tool .item:hover{border-color:var(--line-lit)}
+.tool .item.sel{border-color:var(--amber);background:rgba(255,140,26,0.12)}
+.tool .item .sel-mark{width:12px;height:12px;border:1px solid var(--line-lit);border-radius:3px;flex:none;
+  display:flex;align-items:center;justify-content:center;font-size:9px;color:transparent;transition:all 0.15s}
+.tool .item.sel .sel-mark{background:var(--amber);color:#0a0603;border-color:var(--amber)}
+.tool .item .fmeta{flex:1;min-width:0}
+.tool .item .fname{font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tool .item .fpath{font:10px/1.3 "SF Mono",ui-monospace,monospace;color:var(--text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tool .item .fsize{font:10px/1 "SF Mono",monospace;color:var(--text-dim);flex:none}
+.tool .row{display:flex;gap:8px}
+.tool .row button{flex:1;padding:6px;border-radius:6px;cursor:pointer;border:1px solid var(--line);
+  background:rgba(255,200,130,0.06);color:var(--text);font-size:12px;transition:background 0.15s,border-color 0.15s}
+.tool .row button:hover{background:rgba(255,200,130,0.14);border-color:var(--line-lit)}
+.tool .row button.primary{border-color:rgba(255,140,26,0.55);color:var(--gold)}
+
+/* 执行步骤 */
+.steps{border-left:2px solid var(--line);padding-left:10px;font:11.5px/1.9 "SF Mono",ui-monospace,monospace;color:var(--text-dim)}
+.steps .step{display:flex;align-items:center;gap:7px}
+.steps .step .mark{width:12px;text-align:center;flex:none}
+.steps .step.done{color:var(--ok)}
+.steps .step.doing{color:var(--gold)}
+.steps .step.doing .mark{animation:pulse 0.8s ease-in-out infinite}
+
+/* 确认框 */
+.confirm{border:1px solid rgba(255,176,32,0.45);background:rgba(255,176,32,0.08);border-radius:9px;padding:10px 12px;align-self:stretch}
+.confirm .head{font:600 11px/1 "SF Mono",ui-monospace,monospace;color:var(--warn);letter-spacing:0.14em;margin-bottom:6px}
+.confirm .what{margin-bottom:8px;word-break:break-word;font-size:12.5px}
+.confirm pre{font:11px/1.5 "SF Mono",ui-monospace,monospace;color:var(--text-dim);background:rgba(0,0,0,0.32);
+  border-radius:5px;padding:6px 8px;margin-bottom:8px;max-height:140px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+.confirm .row{display:flex;gap:8px}
+.confirm button{flex:1;padding:6px;border-radius:6px;cursor:pointer;border:1px solid var(--line);
+  background:rgba(255,200,130,0.06);color:var(--text);font-size:12px}
+.confirm button.yes{border-color:rgba(255,176,32,0.55);color:var(--warn)}
+.confirm button:hover{background:rgba(255,200,130,0.14)}
+.confirm.done{opacity:0.45}
+.confirm.done .row{display:none}
+
+.notice{font-size:11.5px;color:var(--text-dim);text-align:center;padding:2px;text-shadow:var(--halo)}
+.notice.bad{color:var(--bad)}
+
+/* 空状态 + 快捷指令 */
+#empty{margin:auto;text-align:center;color:rgba(255,196,130,0.34);font-size:11.5px;line-height:2;text-shadow:var(--halo)}
+#empty b{display:block;font:600 11px/1 "SF Mono",ui-monospace,monospace;letter-spacing:0.22em;
+  color:var(--gold);margin-bottom:12px;text-shadow:0 0 14px rgba(255,140,26,0.5)}
+#shortcuts{display:flex;gap:8px;margin-top:14px;justify-content:center;flex-wrap:wrap}
+#shortcuts button{background:rgba(255,140,26,0.06);border:1px solid var(--line);border-radius:9px;
+  color:var(--text-dim);font-size:11.5px;padding:8px 12px;cursor:pointer;transition:all 0.15s;
+  display:flex;align-items:center;gap:6px}
+#shortcuts button:hover{color:var(--gold);border-color:var(--line-lit);background:rgba(255,140,26,0.12)}
+#shortcuts button .ico{font-size:13px}
+
+/* ── 输入区 ── */
+footer{position:relative;flex:none;border-top:1px solid var(--line);padding:9px 12px 11px}
+
+/* 停止任务条 */
+#stop-bar{display:none;align-items:center;gap:9px;margin-bottom:8px;padding:7px 11px;
+  border:1px solid rgba(255,106,77,0.4);border-radius:9px;background:rgba(255,106,77,0.08);font-size:12px}
+#stop-bar.on{display:flex}
+#stop-bar .stop-text{flex:1;color:rgba(255,220,180,0.85)}
+#stop-bar .stop-text b{color:var(--bad);font:600 10px/1 "SF Mono",monospace;letter-spacing:0.12em;margin-right:6px}
+#stop-bar button{flex:none;background:none;border:1px solid rgba(255,106,77,0.55);border-radius:6px;
+  color:var(--bad);font-size:11px;padding:4px 10px;cursor:pointer}
+#stop-bar button:hover{background:rgba(255,106,77,0.15)}
+
+/* 语音实时转写 */
+#hearing{display:none;margin-bottom:8px;padding:7px 11px;border:1px dashed rgba(255,140,26,0.5);
+  border-radius:9px;font-size:12.5px;color:var(--text);min-height:32px;background:rgba(255,140,26,0.05)}
+#hearing.on{display:block}
+#hearing b{color:var(--amber);font:600 10px/1 "SF Mono",ui-monospace,monospace;letter-spacing:0.16em;margin-right:8px}
+#hearing .idle{float:right;color:var(--text-dim);font:10px/1.4 "SF Mono",monospace}
+#hearing .idle:empty{display:none}
+
+#composer{display:flex;gap:8px;align-items:flex-end}
+#mic{flex:none;width:34px;height:34px;border-radius:9px;cursor:pointer;border:1px solid var(--line);
+  background:rgba(255,200,130,0.05);color:var(--text-dim);font-size:15px;line-height:1}
+#mic:hover{color:var(--gold);border-color:var(--line-lit)}
+#mic.on{border-color:rgba(95,217,224,0.75);color:var(--cyan);background:rgba(95,217,224,0.12);
+  box-shadow:0 0 14px rgba(95,217,224,0.35);animation:pulse 1.1s ease-in-out infinite}
+#input{flex:1;background:rgba(255,200,130,0.05);border:1px solid var(--line);border-radius:9px;
+  color:var(--text);font:13px/1.5 inherit;padding:8px 10px;resize:none;max-height:120px;outline:none;user-select:text}
+#input:focus{border-color:var(--line-lit)}
+#input::placeholder{color:rgba(255,196,130,0.3)}
+#send{flex:none;width:34px;height:34px;border-radius:9px;cursor:pointer;border:1px solid var(--line-lit);
+  background:rgba(255,140,26,0.14);color:var(--gold);font-size:15px;line-height:1}
+#send:hover{background:rgba(255,140,26,0.26)}
+#send.stop{border-color:rgba(255,106,77,0.55);background:rgba(255,106,77,0.14);color:var(--bad)}
+#hint{font:10px/1 "SF Mono",ui-monospace,monospace;color:rgba(255,196,130,0.24);margin-top:6px;text-align:right}
+
+/* ── 睡眠遮罩 ── */
+#sleep-mask{display:none;position:absolute;inset:0;background:rgba(9,6,3,0.82);backdrop-filter:blur(8px);
+  z-index:20;align-items:center;justify-content:center;flex-direction:column;gap:14px}
+#sleep-mask.on{display:flex}
+#sleep-mask .sleep-icon{font-size:44px;opacity:0.6}
+#sleep-mask .sleep-text{font:600 12px/1 "SF Mono",ui-monospace,monospace;letter-spacing:0.2em;color:var(--gray)}
+#sleep-mask button{background:rgba(255,140,26,0.1);border:1px solid var(--line-lit);border-radius:9px;
+  color:var(--gold);font-size:12px;padding:8px 20px;cursor:pointer}
+#sleep-mask button:hover{background:rgba(255,140,26,0.2)}
+
+/* ── 异常恢复 ── */
+#error-banner{display:none;align-items:center;gap:9px;padding:9px 14px;border-bottom:1px solid rgba(255,106,77,0.4);
+  background:rgba(255,106,77,0.1);font-size:12px;color:rgba(255,220,180,0.9)}
+#error-banner.on{display:flex}
+#error-banner .err-text{flex:1}
+#error-banner button{flex:none;background:none;border:1px solid rgba(255,106,77,0.55);border-radius:6px;
+  color:var(--bad);font-size:11px;padding:4px 10px;cursor:pointer}
+#error-banner button:hover{background:rgba(255,106,77,0.15)}
+
+/* 收起模式：只保留 64px 顶部栏 */
+#shell.collapsed #log,
+#shell.collapsed footer,
+#shell.collapsed #opacity { display: none; }
+#shell.collapsed { height: 46px; overflow: hidden; }
+</style>
+</head>
+<body>
+<div id="shell">
+  <div id="error-banner"><span class="err-text">连接已中断 · Jarvis Brain 没有响应</span>
+    <button id="btn-reconnect">重新连接</button><button id="btn-diag">查看诊断</button></div>
+
+  <header>
+    <span id="dot"></span>
+    <span id="brand">J.A.R.V.I.S.</span>
+    <div id="waveform"><span></span><span></span><span></span><span></span><span></span></div>
+    <span id="status">连接中</span>
+    <button id="btn-opacity" class="icon" title="面板透明度">◐</button>
+    <button id="btn-sleep" class="icon" title="睡眠">💤</button>
+    <button id="btn-new" title="清空上下文（⌘⇧N）">新会话</button>
+    <button id="btn-collapse" class="icon" title="收起">—</button>
+  </header>
+
+  <div id="opacity">
+    <label>OPACITY</label>
+    <input id="opacity-range" type="range" min="0" max="100" step="1" value="82">
+    <output id="opacity-value">82%</output>
+  </div>
+
+  <div id="log">
+    <div id="empty">
+      <b>AT YOUR SERVICE</b>
+      打开应用 · 查找与读写文件 · 读剪贴板<br>
+      联网搜索 · 抓取网页 · 查看本机状态
+      <div id="shortcuts">
+        <button data-cmd="查找桌面上的 Jarvis 架构文档"><span class="ico">🔍</span>查找桌面文件</button>
+        <button data-cmd="帮我打开 Safari 并访问 apple.com"><span class="ico">🚀</span>打开应用与网页</button>
+        <button data-cmd="把桌面上的 Jarvis-temp-test.txt 移到废纸篓"><span class="ico">⚠️</span>体验高风险权限确认</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <div id="stop-bar"><span class="stop-text"><b id="stop-state">THINKING</b><span id="stop-detail">正在思考</span></span>
+      <button id="btn-stop">停止任务</button></div>
+    <div id="hearing"><b>LISTENING</b><span id="hearing-idle" class="idle"></span><span id="hearing-text">…</span></div>
+    <div id="composer">
+      <button id="mic" title="说话（⌥V）">🎙</button>
+      <textarea id="input" rows="1" placeholder="说点什么…" autofocus></textarea>
+      <button id="send" title="发送">↑</button>
+    </div>
+    <div id="hint">Enter 发送 · ⇧Enter 换行 · ⌥V 说话 · Esc 停止/收起</div>
+  </footer>
+
+  <div id="sleep-mask">
+    <div class="sleep-icon">💤</div>
+    <div class="sleep-text">JARVIS 已休眠</div>
+    <button id="btn-wake">唤醒 Jarvis</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+const log      = document.getElementById('log');
+const input    = document.getElementById('input');
+const sendBtn  = document.getElementById('send');
+const dot      = document.getElementById('dot');
+const statusEl = document.getElementById('status');
+const micBtn   = document.getElementById('mic');
+const hearing  = document.getElementById('hearing');
+const hearingText = document.getElementById('hearing-text');
+const hearingIdle = document.getElementById('hearing-idle');
+const stopBar  = document.getElementById('stop-bar');
+const stopState = document.getElementById('stop-state');
+const stopDetail = document.getElementById('stop-detail');
+const sleepMask = document.getElementById('sleep-mask');
+const errorBanner = document.getElementById('error-banner');
+const shell    = document.getElementById('shell');
+const waveform = document.getElementById('waveform');
+
+let connected = false;
+let busy      = false;
+let sleeping  = false;
+let current   = null;   // 正在流式接收的 assistant 消息
+let curState  = 'idle';
+
+function post(payload) {
+  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.jarvis) {
+    window.webkit.messageHandlers.jarvis.postMessage(payload);
+  }
+}
+
+function scroll(force) {
+  const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+  if (force || nearBottom) log.scrollTop = log.scrollHeight;
+}
+
+const EMPTY_HTML = log.innerHTML;
+
+function hideEmpty() {
+  const node = document.getElementById('empty');
+  if (node) node.remove();
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function addNotice(text, bad) {
+  hideEmpty();
+  const node = el('div', 'notice' + (bad ? ' bad' : ''), text);
+  log.appendChild(node);
+  scroll();
+  return node;
+}
+
+/* ── 状态机（8 状态）── */
+const STATE_META = {
+  idle:        { label: '准备就绪',   dot: 'on',        busy: false, wave: false },
+  listening:   { label: '正在聆听',   dot: 'listening', busy: false, wave: true  },
+  transcribing:{ label: '正在识别',   dot: 'listening', busy: true,  wave: true  },
+  thinking:    { label: '正在思考',   dot: 'thinking',  busy: true,  wave: false },
+  executing:   { label: '正在执行',   dot: 'executing', busy: true,  wave: false },
+  speaking:    { label: '正在回复',   dot: 'speaking',  busy: true,  wave: false },
+  sleeping:    { label: '睡眠模式',   dot: 'sleeping',  busy: false, wave: false },
+  error:       { label: '出错了',     dot: 'error',     busy: false, wave: false }
+};
+
+function setState(state, detail) {
+  curState = state;
+  const meta = STATE_META[state] || STATE_META.idle;
+  dot.className = meta.dot;
+  statusEl.textContent = detail || meta.label;
+  busy = meta.busy;
+  sendBtn.textContent = busy ? '■' : '↑';
+  sendBtn.classList.toggle('stop', busy);
+  sendBtn.title = busy ? '停止' : '发送';
+  waveform.classList.toggle('on', meta.wave);
+  // 停止任务条：thinking/executing/speaking 时显示
+  const showStop = (state === 'thinking' || state === 'executing' || state === 'speaking');
+  stopBar.classList.toggle('on', showStop);
+  if (showStop) {
+    stopState.textContent = state.toUpperCase();
+    stopDetail.textContent = detail || meta.label;
+  }
+  // 睡眠遮罩
+  sleepMask.classList.toggle('on', state === 'sleeping');
+  sleeping = (state === 'sleeping');
+}
+
+function setBusy(value) { setState(value ? 'thinking' : 'idle'); }
+function setStatus(text, kind) {
+  statusEl.textContent = text;
+  dot.className = kind || '';
+}
+
+/* ── 透明度 ── */
+const opacityPanel = document.getElementById('opacity');
+const opacityRange = document.getElementById('opacity-range');
+const opacityValue = document.getElementById('opacity-value');
+const opacityBtn   = document.getElementById('btn-opacity');
+
+opacityBtn.addEventListener('click', () => {
+  const open = opacityPanel.classList.toggle('on');
+  opacityBtn.classList.toggle('open', open);
+});
+opacityRange.addEventListener('input', () => {
+  const value = opacityRange.value / 100;
+  applyTint(value);
+  post({ action: 'set_opacity', value: value });
+});
+function applyTint(value) {
+  const tint = 0.12 + 0.58 * value;
+  document.documentElement.style.setProperty('--tint', tint.toFixed(3));
+  opacityValue.textContent = Math.round(value * 100) + '%';
+}
+
+/* ── 消息操作（复制/重发/朗读）── */
+function addMsgActions(msg, text, role) {
+  const actions = el('div', 'actions');
+  const copyBtn = el('button', null, '⧉');
+  copyBtn.title = '复制';
+  copyBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    navigator.clipboard && navigator.clipboard.writeText(text).catch(()=>{});
+  });
+  actions.appendChild(copyBtn);
+  if (role === 'user') {
+    const resendBtn = el('button', null, '↻');
+    resendBtn.title = '重新发送';
+    resendBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      input.value = text;
+      input.dispatchEvent(new Event('input'));
+      submit();
+    });
+    actions.appendChild(resendBtn);
+  }
+  if (role === 'assistant') {
+    const speakBtn = el('button', null, '🔊');
+    speakBtn.title = '朗读';
+    speakBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (window.speechSynthesis) {
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = 'zh-CN';
+        speechSynthesis.speak(u);
+      }
+    });
+    actions.appendChild(speakBtn);
+  }
+  msg.appendChild(actions);
+}
+
+/* ── 发送 ── */
+function submit() {
+  const text = input.value.trim();
+  if (!text) return;
+  if (sleeping) { addNotice('Jarvis 正在休眠，请先唤醒', true); return; }
+  if (!connected) { addNotice('大脑未连接，稍等或从菜单栏重启大脑', true); return; }
+
+  hideEmpty();
+  const msg = el('div', 'msg user');
+  const body = el('div', 'body', text);
+  msg.appendChild(body);
+  addMsgActions(msg, text, 'user');
+  log.appendChild(msg);
+
+  input.value = '';
+  input.style.height = 'auto';
+  current = null;
+  setState('thinking', '正在思考');
+  scroll(true);
+  post({ action: 'submit', text: text });
+}
+
+sendBtn.addEventListener('click', () => {
+  if (busy) { post({ action: 'cancel' }); setState('idle'); addNotice('已取消'); }
+  else submit();
+});
+
+input.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    submit();
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    handleEscape();
+  }
+});
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+});
+
+/* ── Esc 优先级：确认窗 > 停止任务 > 收起 ── */
+function handleEscape() {
+  const confirmCard = log.querySelector('.confirm:not(.done)');
+  if (confirmCard) {
+    // 有关闭中的确认框 → 关闭它（拒绝）
+    const noBtn = confirmCard.querySelector('.row button:not(.yes)');
+    if (noBtn) noBtn.click();
+    return;
+  }
+  if (busy || curState === 'listening' || curState === 'transcribing') {
+    post({ action: 'cancel' });
+    setListening(false);
+    setState('idle');
+    addNotice('已停止');
+    return;
+  }
+  // 无任务 → 收起
+  toggleCollapse();
+}
+
+document.addEventListener('keydown', (event) => {
+  if (event.metaKey && event.shiftKey && event.key.toLowerCase() === 'n') {
+    event.preventDefault();
+    post({ action: 'new_session' });
+    newSession();
+  }
+});
+
+/* ── 新会话 ── */
+function newSession() {
+  log.innerHTML = EMPTY_HTML;
+  current = null;
+  setState('idle');
+  setListening(false);
+  addNotice('上下文已清空（长期记忆保留）');
+}
+document.getElementById('btn-new').addEventListener('click', () => {
+  post({ action: 'new_session' });
+  newSession();
+});
+
+/* ── 睡眠/唤醒 ── */
+document.getElementById('btn-sleep').addEventListener('click', () => {
+  post({ action: 'sleep' });
+  setState('sleeping');
+});
+document.getElementById('btn-wake').addEventListener('click', () => {
+  post({ action: 'wake' });
+  setState('idle');
+});
+
+/* ── 收起 ── */
+function toggleCollapse() {
+  shell.classList.toggle('collapsed');
+  const btn = document.getElementById('btn-collapse');
+  const collapsed = shell.classList.contains('collapsed');
+  btn.textContent = collapsed ? '+' : '—';
+  post({ action: 'panel_collapsed', collapsed: collapsed });
+}
+document.getElementById('btn-collapse').addEventListener('click', toggleCollapse);
+
+/* ── 异常恢复 ── */
+function showError(msg) {
+  errorBanner.classList.add('on');
+  if (msg) errorBanner.querySelector('.err-text').textContent = msg;
+  setState('error');
+}
+document.getElementById('btn-reconnect').addEventListener('click', () => {
+  errorBanner.classList.remove('on');
+  post({ action: 'reconnect' });
+  setState('idle');
+  addNotice('正在重新连接…');
+});
+document.getElementById('btn-diag').addEventListener('click', () => {
+  post({ action: 'open_diagnostics' });
+});
+
+/* ── 快捷指令 ── */
+document.querySelectorAll('#shortcuts button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    input.value = btn.dataset.cmd;
+    input.dispatchEvent(new Event('input'));
+    submit();
+  });
+});
+
+/* ── 停止任务 ── */
+document.getElementById('btn-stop').addEventListener('click', () => {
+  post({ action: 'cancel' });
+  setState('idle');
+  addNotice('已停止');
+});
+
+/* ── 收音状态 ── */
+let idleTimeout = 30;
+let idleTicker = null;
+
+function stopIdleCountdown() {
+  if (idleTicker) { clearInterval(idleTicker); idleTicker = null; }
+  hearingIdle.textContent = '';
+}
+function startIdleCountdown() {
+  stopIdleCountdown();
+  if (!(idleTimeout > 0)) return;
+  const deadline = Date.now() + idleTimeout * 1000;
+  const tick = () => {
+    const left = Math.ceil((deadline - Date.now()) / 1000);
+    if (left <= 0) { stopIdleCountdown(); return; }
+    hearingIdle.textContent = left + 's';
+  };
+  tick();
+  idleTicker = setInterval(tick, 250);
+}
+function setListening(on) {
+  micBtn.classList.toggle('on', on);
+  hearing.classList.toggle('on', on);
+  if (on) { hearingText.textContent = '…'; startIdleCountdown(); }
+  else stopIdleCountdown();
+}
+micBtn.addEventListener('click', () => {
+  if (sleeping) { addNotice('Jarvis 正在休眠，请先唤醒', true); return; }
+  post({ action: 'voice_toggle' });
+});
+
+function addUserBubble(text) {
+  hideEmpty();
+  const msg = el('div', 'msg user');
+  const body = el('div', 'body', text);
+  msg.appendChild(body);
+  addMsgActions(msg, text, 'user');
+  log.appendChild(msg);
+  scroll(true);
+}
+
+/* ── 接收 ── */
+function ensureAssistant() {
+  if (current) return current;
+  hideEmpty();
+  const msg = el('div', 'msg assistant');
+  const reasoning = el('div', 'reasoning');
+  reasoning.style.display = 'none';
+  reasoning.addEventListener('click', () => reasoning.classList.toggle('open'));
+  const body = el('div', 'body');
+  const zh = el('div', 'zh');
+  msg.appendChild(reasoning);
+  msg.appendChild(body);
+  msg.appendChild(zh);
+  log.appendChild(msg);
+  current = { msg, body, reasoning, zh, text: '' };
+  return current;
+}
+
+function addCursor() {
+  const cur = ensureAssistant();
+  removeCursor();
+  const c = el('span', 'cursor');
+  cur.body.appendChild(c);
+}
+function removeCursor() {
+  if (current) {
+    const c = current.body.querySelector('.cursor');
+    if (c) c.remove();
+  }
+}
+
+/* ── 文件搜索工具卡片 ── */
+function renderFileSearch(items, toolCallId) {
+  hideEmpty();
+  const card = el('div', 'tool');
+  card.appendChild(el('div', 'head', '找到 ' + items.length + ' 个文件'));
+  const itemsBox = el('div', 'items');
+  const selected = new Set();
+  items.forEach((it, idx) => {
+    const item = el('div', 'item');
+    const selMark = el('span', 'sel-mark', '✓');
+    const fmeta = el('div', 'fmeta');
+    fmeta.appendChild(el('div', 'fname', it.name));
+    fmeta.appendChild(el('div', 'fpath', it.path));
+    const fsize = el('span', 'fsize', it.size || '');
+    item.appendChild(selMark);
+    item.appendChild(fmeta);
+    item.appendChild(fsize);
+    item.addEventListener('click', () => {
+      if (selected.has(idx)) { selected.delete(idx); item.classList.remove('sel'); }
+      else { selected.add(idx); item.classList.add('sel'); }
+    });
+    itemsBox.appendChild(item);
+  });
+  card.appendChild(itemsBox);
+  const row = el('div', 'row');
+  const revealBtn = el('button', null, '在访达中显示');
+  const openBtn = el('button', 'primary', '打开所选文件');
+  revealBtn.addEventListener('click', () => {
+    post({ action: 'file_reveal', indices: [...selected], toolCallId: toolCallId });
+    addNotice('已在访达中显示 ' + selected.size + ' 个文件');
+  });
+  openBtn.addEventListener('click', () => {
+    post({ action: 'file_open', indices: [...selected], toolCallId: toolCallId });
+    addNotice('已打开 ' + selected.size + ' 个文件');
+  });
+  row.appendChild(revealBtn);
+  row.appendChild(openBtn);
+  card.appendChild(row);
+  log.appendChild(card);
+  scroll(true);
+}
+
+/* ── 执行步骤 ── */
+function renderSteps(steps) {
+  hideEmpty();
+  const box = el('div', 'steps');
+  steps.forEach(s => {
+    const step = el('div', 'step' + (s.done ? ' done' : s.doing ? ' doing' : ''));
+    step.appendChild(el('span', 'mark', s.done ? '✓' : s.doing ? '●' : '○'));
+    step.appendChild(el('span', 'text', s.text));
+    box.appendChild(step);
+  });
+  log.appendChild(box);
+  scroll();
+  return box;
+}
+
+/* ── 确认框 ── */
+function renderConfirm(event) {
+  hideEmpty();
+  const card = el('div', 'confirm');
+  card.appendChild(el('div', 'head', '需要确认 · ' + (event.risk || 'L2')));
+  card.appendChild(el('div', 'what', event.summary || event.name));
+  const args = event.arguments || {};
+  if (Object.keys(args).length) {
+    card.appendChild(el('pre', null, JSON.stringify(args, null, 2)));
+  }
+  const row = el('div', 'row');
+  const yes = el('button', 'yes', '允许');
+  const no  = el('button', null, '拒绝');
+  row.appendChild(no);
+  row.appendChild(yes);
+  card.appendChild(row);
+  const answer = (approved) => {
+    post({ action: 'confirm', request_id: event.request_id, approved: approved });
+    card.classList.add('done');
+    card.querySelector('.head').textContent = approved ? '已允许' : '已拒绝';
+    if (!approved) addNotice('未执行任何文件修改');
+  };
+  yes.addEventListener('click', () => answer(true));
+  no.addEventListener('click',  () => answer(false));
+  log.appendChild(card);
+  scroll(true);
+}
+
+/* ── 宿主事件处理 ── */
+const toolNodes = new Map();
+
+function handle(event) {
+  switch (event.type) {
+    case 'opacity':
+      opacityRange.value = Math.round((event.value || 0) * 100);
+      applyTint(event.value || 0);
+      break;
+    case 'connection':
+      connected = !!event.connected;
+      if (!connected) { setState('error'); showError('连接已中断 · Jarvis Brain 没有响应'); setListening(false); current = null; }
+      else { errorBanner.classList.remove('on'); setState('idle'); }
+      break;
+    case 'ready':
+      connected = true;
+      setState('idle', event.configured ? (event.model || '就绪') : '缺 API Key');
+      if (event.voice_input && typeof event.voice_input.idle_timeout === 'number') idleTimeout = event.voice_input.idle_timeout;
+      break;
+    case 'state':
+      setState(event.state, event.detail);
+      break;
+    case 'listening':
+      setListening(!!event.active);
+      if (event.active) setState('listening');
+      break;
+    case 'transcript_partial':
+      hearingText.textContent = event.text || '…';
+      if (event.text) stopIdleCountdown();
+      break;
+    case 'transcript_final':
+      setListening(false);
+      addUserBubble(event.text);
+      current = null;
+      setState('thinking');
+      break;
+    case 'transcript_empty':
+      setListening(false);
+      addNotice('没听清');
+      break;
+    case 'assistant_reasoning_delta': {
+      const node = ensureAssistant().reasoning;
+      node.style.display = '';
+      node.textContent += event.text;
+      scroll();
+      break;
+    }
+    case 'assistant_delta':
+      ensureAssistant().body.textContent += event.text;
+      ensureAssistant().text += event.text;
+      addCursor();
+      scroll();
+      break;
+    case 'assistant_delta_zh':
+      ensureAssistant().zh.textContent += event.text;
+      scroll();
+      break;
+    case 'assistant_done': {
+      removeCursor();
+      if (current) {
+        addMsgActions(current.msg, current.text, 'assistant');
+      }
+      current = null;
+      break;
+    }
+    case 'tool_started': {
+      hideEmpty();
+      const node = el('div', 'tool');
+      node.appendChild(el('span', 'mark', '⚙'));
+      node.appendChild(el('span', 'what', event.summary || event.name));
+      log.appendChild(node);
+      toolNodes.set(event.id, node);
+      current = null;
+      scroll();
+      break;
+    }
+    case 'tool_result': {
+      const node = toolNodes.get(event.id);
+      if (node) {
+        node.classList.add(event.success ? 'ok' : 'fail');
+        node.querySelector('.mark').textContent = event.success ? '✓' : '✗';
+        if (!event.success && event.summary) node.querySelector('.what').textContent = event.summary;
+        else if (event.ms) node.querySelector('.what').textContent += '  ' + event.ms + 'ms';
+        toolNodes.delete(event.id);
+      }
+      if (event.tool === 'file.search' && event.items) renderFileSearch(event.items, event.id);
+      break;
+    }
+    case 'tool_steps':
+      renderSteps(event.steps || []);
+      break;
+    case 'tool_confirm_request':
+      renderConfirm(event);
+      break;
+    case 'turn_cancelled':
+      setState('idle');
+      current = null;
+      addNotice('已取消');
+      break;
+    case 'turn_done':
+      setState('idle');
+      current = null;
+      break;
+    case 'session_reset':
+      newSession();
+      break;
+    case 'error':
+      current = null;
+      setState('error');
+      addNotice(event.message || '未知错误', true);
+      break;
+    case 'log':
+      addNotice(event.message || '');
+      break;
+  }
+}
+
+window.__jarvisReceive = (raw) => {
+  let event;
+  try { event = JSON.parse(raw); } catch (e) { return; }
+  try { handle(event); } catch (e) { console.error('handle failed', e, event); }
+};
+
+/* ── JarvisUI 全局接口（宿主调用）── */
+window.JarvisUI = {
+  setState: (s, detail) => setState(s, detail),
+  setStatus: (t) => { statusEl.textContent = t; },
+  appendUserMessage: (t) => addUserBubble(t),
+  appendAssistantMessage: (t) => {
+    const cur = ensureAssistant();
+    cur.body.textContent += t;
+    cur.text += t;
+    addMsgActions(cur.msg, cur.text, 'assistant');
+    current = null;
+  },
+  appendAssistantDelta: (t, done) => {
+    ensureAssistant().body.textContent += t;
+    ensureAssistant().text += t;
+    addCursor();
+    if (done) { removeCursor(); current = null; }
+  },
+  setSleeping: (on) => setState(on ? 'sleeping' : 'idle'),
+  setMicLevel: (v) => { /* 可驱动波形幅度 */ },
+  showToast: (t) => addNotice(t),
+  cancel: () => { post({ action: 'cancel' }); setState('idle'); },
+  reset: () => newSession()
+};
+
+window.__jarvisFocusInput = () => input.focus();
+
+setState('idle', '连接中');
+
+/* ── Demo 模式：独立预览（无宿主）时自动播放完整对话流，展示所有组件 ── */
+const IS_DEMO = !(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.jarvis);
+if (IS_DEMO && !new URLSearchParams(location.search).has('nodemo')) {
+  connected = true;
+  setState('idle', '准备就绪');
+
+  const wait = (ms) => new Promise(r => setTimeout(r, ms));
+  (async () => {
+    await wait(1600);
+
+    // 1. 用户消息（模拟点快捷指令）
+    hideEmpty();
+    addUserBubble('帮我查找桌面上的 Jarvis 架构文档');
+    setState('thinking', '正在思考');
+    await wait(1300);
+
+    // 2. 思维链
+    handle({ type: 'assistant_reasoning_delta', text: '用户要查找桌面上的 Jarvis 架构文档。\n需要调用 file.search 工具搜索 Desktop 目录，关键词：Jarvis、架构。' });
+    await wait(1600);
+
+    // 3. 流式回复（带光标）
+    setState('speaking', '正在回复');
+    const reply = '找到 3 个相关文件，已为你列出，点击可选中后操作。';
+    for (let i = 0; i < reply.length; i++) {
+      handle({ type: 'assistant_delta', text: reply[i] });
+      await wait(42);
+    }
+    await wait(300);
+    handle({ type: 'assistant_delta_zh', text: '已为你找到 3 个相关文件，点击选中后可打开或在访达中显示。' });
+    await wait(400);
+    handle({ type: 'assistant_done' });
+
+    // 4. 文件搜索工具卡片（可点选）
+    setState('executing', '正在搜索文件');
+    await wait(700);
+    renderFileSearch([
+      { name: 'Jarvis架构建议评审-Claude.md', path: '/Users/frankwoo/Desktop/Jarvis架构建议评审-Claude.md', size: '128 KB' },
+      { name: 'Jarvis桌面助手技术架构与实践建议.md', path: '/Users/frankwoo/Desktop/Jarvis桌面助手技术架构与实践建议.md', size: '96 KB' },
+      { name: 'jarvis-hud.html', path: '/Users/frankwoo/Desktop/jarvis-hud.html', size: '12 KB' }
+    ], 'tool_001');
+    await wait(2200);
+
+    // 5. 执行步骤（✓✓●）
+    renderSteps([
+      { text: '校验工具权限', done: true },
+      { text: '检查目标路径', done: true },
+      { text: '打开所选文件', doing: true }
+    ]);
+    await wait(1600);
+
+    // 6. 高风险确认框
+    setState('executing', '等待确认');
+    renderConfirm({
+      risk: 'L3',
+      summary: '将 ~/Desktop/Jarvis-temp-test.txt 移到废纸篓',
+      arguments: { from: '~/Desktop/Jarvis-temp-test.txt', to: 'Trash', recoverable: true },
+      request_id: 'req_001'
+    });
+    await wait(2600);
+
+    // 7. 恢复 idle
+    setState('idle', '准备就绪');
+  })();
+}
+</script>
+</body>
+</html>
