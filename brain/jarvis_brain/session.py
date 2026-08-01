@@ -87,6 +87,9 @@ User: "how's my Mac doing"
 - File-changing operations already prompt the user for confirmation; don't ask again.
 - If the user declines a tool call, accept it. Don't retry it with different wording.
 - You may call several tools at once, but don't pad.
+- Music: when the user asks to play music, open NetEase, or just says "放音乐" /
+  "听歌" / "放首歌", call music_play_favorite — don't just open the app.
+  The user's preferred playlist is 「我喜欢的音乐」.
 
 Environment: {env}
 Current time: {now}"""

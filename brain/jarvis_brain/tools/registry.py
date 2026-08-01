@@ -13,8 +13,10 @@ Python 子进程去发 Apple Events 或调 NSWorkspace，授权弹窗归属会�
 L2 起需要用户确认。
 """
 from . import fs as fs_impl
+from . import music as music_impl
 from . import shell as shell_impl
 from . import web as web_impl
+from .music import music_play_favorite
 
 CONFIRM_FROM = "L2"
 _ORDER = {"L0": 0, "L1": 1, "L2": 2, "L3": 3, "L4": 4}
@@ -89,6 +91,10 @@ TOOLS = [
               "description": "play_pause 播放/暂停切换，next 下一首，previous 上一首",
           }},
           "L1", "native", required=["action"]),
+
+    _tool("music_play_favorite", "打开网易云音乐并直接播放「我喜欢的音乐」歌单。"
+          "用户说「放音乐」「听歌」「打开网易云」时优先使用这个工具。",
+          {}, "L1", "python", music_play_favorite),
 
     # ------------------------------------------------ 文件（Brain 执行）
     _tool("fs_list", "列出目录内容。",
@@ -173,6 +179,7 @@ def describe(name, arguments):
         "fs_write": "写入文件 {path}",
         "fs_move": "把 {source} 移动到 {destination}",
         "media_control": "媒体控制：{action}",
+        "music_play_favorite": "打开网易云音乐，播放「我喜欢的音乐」",
         "web_search": "联网搜索「{query}」",
         "web_fetch": "抓取网页 {url}",
         "shell_run": "执行命令：{command}",
