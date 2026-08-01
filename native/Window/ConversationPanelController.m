@@ -5,6 +5,8 @@
 
 static NSString *const kBridgeName = @"jarvis";
 static NSString *const kOpacityDefaultsKey = @"JarvisPanelOpacity";
+static NSString *const kHeightDefaultsKey  = @"JarvisPanelExpandedHeight";
+static NSString *const kFrameAutosaveName  = @"JarvisConversationPanel";
 static const CGFloat kPanelWidth  = 460.0;
 static const CGFloat kPanelHeight = 620.0;
 static const CGFloat kScreenMargin = 24.0;
@@ -109,7 +111,7 @@ static const CGFloat kMinExpandedHeight = 200.0;
     [container addSubview:self.webView positioned:NSWindowAbove relativeTo:self.blur];
 
     self.panel.contentView = container;
-    self.panel.frameAutosaveName = @"JarvisConversationPanel";
+    self.panel.frameAutosaveName = kFrameAutosaveName;
     [self applyOpacity];
 
     [self positionAtDefaultCorner];
@@ -121,14 +123,17 @@ static const CGFloat kMinExpandedHeight = 200.0;
 /// 默认贴主屏右下角。用户拖过之后 frameAutosaveName 会接管，不再重定位。
 - (void)positionAtDefaultCorner {
     if ([self.panel setFrameUsingName:self.panel.frameAutosaveName]) {
-        // 上次退出时如果是收起状态，自动保存下来的就是一条顶栏。
-        // 面板永远以展开状态启动，所以这里要把它撑回去，不然打开是个空壳。
-        if (self.panel.frame.size.height < kMinExpandedHeight) {
+        // 面板永远以展开状态启动。存下来的可能是收起态（甚至已被 minSize 钳成 360），
+        // 所以判据是"小于等于 minSize"，不能只判"小于 200"——那样钳过的值会漏网。
+        if (self.panel.frame.size.height <= self.panel.minSize.height) {
+            CGFloat saved = [[NSUserDefaults standardUserDefaults] doubleForKey:kHeightDefaultsKey];
+            CGFloat height = saved >= kMinExpandedHeight ? saved : kPanelHeight;
             NSRect frame = self.panel.frame;
-            frame.origin.y -= (kPanelHeight - frame.size.height);
-            frame.size.height = kPanelHeight;
+            frame.origin.y -= (height - frame.size.height);
+            frame.size.height = height;
             [self.panel setFrame:frame display:NO];
         }
+        self.expandedHeight = self.panel.frame.size.height;
         return;
     }
     NSScreen *screen = [NSScreen mainScreen] ?: [NSScreen screens].firstObject;
@@ -186,8 +191,13 @@ static const CGFloat kMinExpandedHeight = 200.0;
 
     CGFloat target;
     if (collapsed) {
-        if (self.expandedHeight < kMinExpandedHeight) self.expandedHeight = frame.size.height;
+        if (frame.size.height >= kMinExpandedHeight) self.expandedHeight = frame.size.height;
+        [[NSUserDefaults standardUserDefaults] setDouble:self.expandedHeight forKey:kHeightDefaultsKey];
         target = MAX(32.0, headerHeight) + chrome;
+        // 收起期间关掉窗口尺寸自动保存。开着的话保存下来的就是这条 56px 的顶栏，
+        // 下次启动 setFrameUsingName 把它读回来、又被 minSize 钳到 360，
+        // 面板于是以一个不高不矮的空壳启动——这条排查起来很费劲，因为看着"只是变矮了"。
+        self.panel.frameAutosaveName = @"";
     } else {
         target = self.expandedHeight >= kMinExpandedHeight ? self.expandedHeight : kPanelHeight;
     }
@@ -202,6 +212,8 @@ static const CGFloat kMinExpandedHeight = 200.0;
     frame.origin.y += frame.size.height - target;
     frame.size.height = target;
     [self.panel setFrame:frame display:YES animate:NO];
+
+    if (!collapsed) self.panel.frameAutosaveName = kFrameAutosaveName;   // 重新开始记尺寸
 }
 
 #pragma mark - 显示
@@ -287,6 +299,11 @@ static const CGFloat kMinExpandedHeight = 200.0;
               headerHeight:[header isKindOfClass:[NSNumber class]] ? header.doubleValue : 56.0];
     } else if ([action isEqualToString:@"sleep"]) {
         [self.delegate conversationPanel:self didRequestSleep:[body[@"sleeping"] boolValue]];
+    } else if ([action isEqualToString:@"speak"]) {
+        NSString *text = body[@"text"];
+        if ([text isKindOfClass:[NSString class]] && text.length) {
+            [self.delegate conversationPanel:self didRequestSpeak:text];
+        }
     } else if ([action isEqualToString:@"open_path"]) {
         NSString *path = body[@"path"];
         if ([path isKindOfClass:[NSString class]] && path.length) {

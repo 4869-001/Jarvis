@@ -211,6 +211,8 @@ class BrainServer:
                 "result": message.get("result"),
                 "error": message.get("error"),
             })
+        elif kind == "speak_text":
+            self.session.speak_text(message.get("text"))
         elif kind == "ping":
             self.emit({"type": "pong", "t": time.time()})
         elif kind == "reload_config":

@@ -424,7 +424,8 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 - (void)brainProcess:(BrainProcessManager *)manager isRunning:(BOOL)running detail:(NSString *)detail {
     if (running) return;                       // 真正的"就绪"以 IPC 连上为准
     [self.statusItem updateBrainStatus:(detail ?: @"已停止") healthy:NO];
-    self.brainState = @"idle";
+    // 大脑没了不是"闲着"，是这一轮失败了。悄悄回 idle 会让人以为任务正常结束。
+    self.brainState = @"error";
     [self refreshUIState];
     if (detail) [self.conversation pushEvent:@{@"type": @"error", @"message": detail}];
 }
@@ -579,6 +580,11 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 
 - (void)conversationPanel:(ConversationPanelController *)panel didRequestSleep:(BOOL)sleeping {
     [self setSleepMode:sleeping];
+}
+
+- (void)conversationPanel:(ConversationPanelController *)panel didRequestSpeak:(NSString *)text {
+    if (self.sleeping) return;
+    [self.brain send:@{@"type": @"speak_text", @"text": text}];
 }
 
 /// 文件卡片上的「在访达中显示 / 打开」。走 NSWorkspace 而不是 open(1)：

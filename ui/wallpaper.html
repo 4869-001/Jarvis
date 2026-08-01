@@ -97,6 +97,13 @@ const CORE = (function(){
   const cDeep = new THREE.Color(0xff6a0e);
   const tmp   = new THREE.Color();
 
+  /* 分层渐入渐出的相位映射：把 stateMix 的某段区间映射到 0..1。
+     各动效按不同阈值启动（涟漪最先 → 光点 → 波纹 → 喷射粒子），
+     形成"波浪式"激活；回到 idle 时反向渐出，不再瞬时消失。 */
+  function phaseOf(mix, start, end) {
+    return Math.max(0, Math.min(1, (mix - start) / (end - start)));
+  }
+
   function radialTex(stops){
     const c = document.createElement('canvas'); c.width = c.height = 128;
     const x = c.getContext('2d');
@@ -516,12 +523,22 @@ const CORE = (function(){
     const micro  = Math.sin(t * 2.7) * 0.25;
     const b = 0.5 + 0.5 * breath;
 
-    // -- 交互状态混合（平滑过渡） --
+    // -- 交互状态混合（丝滑过渡：放慢 + ease-in-out + 分层渐入渐出） --
     const st = FX.state || 'idle';
-    // 朝目标缓动，约 0.5s 到位；idle 时回落到 0（纯呼吸）。
     const stTarget = (st === 'idle') ? 0 : 1;
-    FX.stateMix += (stTarget - FX.stateMix) * Math.min(1, dt * 5);
-    const stMix = FX.stateMix;
+    // 放缓速率（dt*5 → dt*2.2），约 1.2s 到位，过渡更从容
+    FX.stateMix += (stTarget - FX.stateMix) * Math.min(1, dt * 2.2);
+    const stMixRaw = FX.stateMix;
+    // ease-in-out cubic：起步和收尾都柔，没有"骤起骤停"的硬感
+    const stMix = stMixRaw < 0.5
+      ? 4 * stMixRaw * stMixRaw * stMixRaw
+      : 1 - Math.pow(-2 * stMixRaw + 2, 3) / 2;
+    // 分层渐入渐出：涟漪最先，光点次之，波纹再次，喷射粒子最后；
+    // 回到 idle 时反向渐出（喷射先停 → 波纹 → 光点 → 涟漪最后暗下）
+    const ripplePhase = phaseOf(stMix, 0.00, 0.50);
+    const flowPhase   = phaseOf(stMix, 0.15, 0.65);
+    const wavePhase   = phaseOf(stMix, 0.35, 0.85);
+    const ejectPhase  = phaseOf(stMix, 0.55, 1.00);
     // 状态驱动参数
     let stSpin=0, stCore=0, stHalo=0, stPulse=0, stSpeed=0;
     if(st==='listening'){ stCore=0.35;stHalo=0.30;stPulse=0.25;stSpeed=1.3; }

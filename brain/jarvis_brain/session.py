@@ -314,6 +314,14 @@ class SessionCoordinator:
         for piece in tts.split_sentences(remainder, max_chars=self._speech_max_chars):
             self._speech_queue.put((self._generation, piece))
 
+    def speak_text(self, text):
+        """用户点了某条消息的「朗读」。走同一个串行 worker，
+        所以它会排在正在播的队列后面，不会两段声音叠着放。"""
+        if not self._tts_enabled or not (text or "").strip():
+            return
+        for piece in tts.split_sentences(text, max_chars=self._speech_max_chars):
+            self._speech_queue.put((self._generation, piece))
+
     def _abandon_speech(self):
         """作废这一轮所有还没播的句子，并让宿主停掉正在播的。"""
         self._generation += 1

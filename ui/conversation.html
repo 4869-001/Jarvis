@@ -483,7 +483,7 @@ const CHIPS = [
   '把桌面上的 Jarvis-temp-test.txt 重命名成 test-renamed.txt',
 ];
 
-function showEmpty() {
+function showEmpty(note) {
   log.innerHTML = '';
   const box = el('div'); box.id = 'empty';
   box.appendChild(el('b', null, 'AT YOUR SERVICE'));
@@ -499,10 +499,12 @@ function showEmpty() {
   box.appendChild(chips);
   const mem = el('span', 'mem'); mem.id = 'empty-memory';
   box.appendChild(mem);
+  if (note) box.appendChild(el('span', 'mem', note));
   log.appendChild(box);
   applyMemoryCount();
 }
 
+let errorTimer = null;
 let memoryCount = 0;
 function applyMemoryCount() {
   const node = $('empty-memory');
@@ -518,7 +520,7 @@ function hideEmpty() {
 
 /* ── 消息 ───────────────────────────────────────────── */
 
-function actionsRow(getText, resend) {
+function actionsRow(getText, resend, speak) {
   const row = el('div', 'acts');
   row.appendChild(el('span', null, clock()));
   const copy = el('button', null, '复制');
@@ -532,6 +534,12 @@ function actionsRow(getText, resend) {
     const again = el('button', null, '重新发送');
     again.addEventListener('click', () => { input.value = getText(); render(); submit(); });
     row.appendChild(again);
+  }
+  if (speak) {
+    const read = el('button', null, '朗读');
+    // 念的是英文正文。中文那行只是给眼睛看的字幕，念出来会中英各说一遍。
+    read.addEventListener('click', () => post('speak', { text: speak() }));
+    row.appendChild(read);
   }
   return row;
 }
@@ -556,7 +564,9 @@ function ensureAssistant() {
   reasoning.addEventListener('click', () => reasoning.classList.toggle('open'));
   const body = el('div', 'body'), zh = el('div', 'zh');
   msg.append(reasoning, body, zh);
-  msg.appendChild(actionsRow(() => body.textContent + (zh.textContent ? '\n' + zh.textContent : ''), false));
+  msg.appendChild(actionsRow(
+      () => body.textContent + (zh.textContent ? '\n' + zh.textContent : ''),
+      false, () => body.textContent));
   log.appendChild(msg);
   current = { msg, body, reasoning, zh };
   return current;
@@ -567,8 +577,10 @@ function endStreaming() {
   current = null;
 }
 
+/* 提示不调 hideEmpty：「没听清」「播报失败」这类是系统提示，不是对话内容。
+   一进面板就撞上一条提示，不该把快捷指令连带清掉。
+   只有真正的消息（用户 / 回复 / 工具卡片）才让空状态退场。 */
 function addNotice(text, bad) {
-  hideEmpty();
   const node = el('div', 'notice' + (bad ? ' bad' : ''), text);
   log.appendChild(node);
   scroll();
@@ -964,17 +976,23 @@ function handle(event) {
       S.pendingConfirm = null;
       endStreaming();
       S.hasMessages = false;
-      showEmpty();
+      // 说明写进空状态里，而不是作为一条提示追加——追加会把刚恢复的空状态又顶掉。
+      // 「长期记忆保留」这句必须有，否则会以为新会话把记忆也清了。
+      showEmpty('新会话已开始 · 长期记忆保留');
       setState(S.connected ? 'idle' : 'offline');
-      // 清的是这一轮的上下文，长期记忆还在——不写清楚会以为记忆也没了
-      addNotice('新会话已开始（长期记忆保留）');
       break;
 
+    /* 文档 §4.1 的 error 是"当前任务失败"，展示完错误再回 idle。
+       以前这里直接回 idle，等于状态表里写了 error 却永远到不了。 */
     case 'error':
       endStreaming();
       S.pendingConfirm = null;
-      setState(S.connected ? 'idle' : 'offline');
       addNotice(event.message || '未知错误', true);
+      setState('error');
+      clearTimeout(errorTimer);
+      errorTimer = setTimeout(() => {
+        if (S.state === 'error') setState(S.connected ? 'idle' : 'offline');
+      }, 4000);
       break;
 
     case 'log':

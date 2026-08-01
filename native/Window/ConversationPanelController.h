@@ -18,6 +18,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)conversationPanelDidRequestRestartBrain:(ConversationPanelController *)panel;
 - (void)conversationPanelDidRequestVoiceToggle:(ConversationPanelController *)panel;
 - (void)conversationPanel:(ConversationPanelController *)panel didRequestSleep:(BOOL)sleeping;
+/// 用户点了某条回复的「朗读」
+- (void)conversationPanel:(ConversationPanelController *)panel didRequestSpeak:(NSString *)text;
 /// 用户在文件卡片上点了「在访达中显示」或「打开」
 - (void)conversationPanel:(ConversationPanelController *)panel
           didRequestOpen:(NSString *)path reveal:(BOOL)reveal;
