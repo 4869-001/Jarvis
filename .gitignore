@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+voices/.venv/
+
+# macOS
+.DS_Store
+
+# Build artifacts
+native/build/
+*.app
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Runtime state (user-specific)
+~/.jarvis/

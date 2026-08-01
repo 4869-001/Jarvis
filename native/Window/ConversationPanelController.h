@@ -1,0 +1,39 @@
+//
+//  ConversationPanelController —— 对话面板（第二个 WKWebView）。
+//
+//  用 NSPanel + NonactivatingPanel：平时不抢焦点，只有主动唤出时才激活并成为
+//  key window，好让输入框能收键盘。面板浮在普通窗口之上、跟随所有 Space。
+//
+
+#import <Cocoa/Cocoa.h>
+
+NS_ASSUME_NONNULL_BEGIN
+
+@class ConversationPanelController;
+
+@protocol ConversationPanelDelegate <NSObject>
+- (void)conversationPanel:(ConversationPanelController *)panel didSubmitText:(NSString *)text;
+- (void)conversationPanelDidRequestCancel:(ConversationPanelController *)panel;
+- (void)conversationPanelDidRequestNewSession:(ConversationPanelController *)panel;
+- (void)conversationPanelDidRequestRestartBrain:(ConversationPanelController *)panel;
+- (void)conversationPanelDidRequestVoiceToggle:(ConversationPanelController *)panel;
+- (void)conversationPanel:(ConversationPanelController *)panel
+   didAnswerConfirmation:(NSString *)requestID
+                approved:(BOOL)approved;
+@end
+
+@interface ConversationPanelController : NSObject
+
+@property (nonatomic, weak) id<ConversationPanelDelegate> delegate;
+@property (nonatomic, readonly) BOOL isVisible;
+
+- (void)show;
+- (void)hide;
+- (void)toggle;
+
+/// 把一条 Brain 事件转发给页面。页面还没加载完时会先攒着。
+- (void)pushEvent:(NSDictionary *)event;
+
+@end
+
+NS_ASSUME_NONNULL_END
