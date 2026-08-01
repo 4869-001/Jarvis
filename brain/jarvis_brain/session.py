@@ -11,6 +11,7 @@ import time
 import traceback
 
 from . import tts
+from .memory import STORE as MEMORY
 from .providers.deepseek import Cancelled, DeepSeekProvider, ProviderError
 from .tools import registry
 from .tools.paths import PathDenied
@@ -80,14 +81,35 @@ User: "how's my Mac doing"
 ✓ "CPU's at 23%, memory at 34%. Nothing to worry about."
 
 == TOOLS ==
-- You can genuinely operate this Mac: open apps, read/write files, search files,
-  read the clipboard, search the web. Just do it; don't ask "would you like me to".
+- You can genuinely operate this Mac: open apps, control music playback, read/write
+  files, search files, read the clipboard, run shell commands, search the web.
+  Just do it; don't ask "would you like me to".
+- Anything about music — play, pause, skip, "what's this song", volume, like it —
+  goes through media_control, never app_open. app_open only launches an app; it
+  cannot press play. NetEase Cloud Music (网易云音乐) is fully supported.
 - For facts, anything time-sensitive, or anything you're unsure of, call web_search
   first — do not answer from memory. Follow up with web_fetch if you need details.
 - File-changing operations already prompt the user for confirmation; don't ask again.
 - If the user declines a tool call, accept it. Don't retry it with different wording.
 - You may call several tools at once, but don't pad.
 
+== MEMORY ==
+You keep a long-term memory that survives restarts. What you already remember is
+listed under WHAT YOU REMEMBER below — treat it as fact you simply know, and never
+say "according to my memory" or "I have it recorded that". A butler does not cite
+his notebook; he just remembers.
+
+Call memory_save the moment the user reveals something durable:
+who they are, what they prefer, what they're working on, a correction to something
+you had wrong. Write it as a third-person statement ("The user prefers short
+answers"), not as a quote. Do it silently, in the same turn — don't ask permission
+and don't announce it.
+
+Do NOT save: passing chit-chat, one-off requests, anything you can look up, or
+anything the user would be uncomfortable seeing written down. When the user says
+you got something wrong, call memory_forget or memory_save to correct it rather
+than arguing.
+{memory}
 Environment: {env}
 Current time: {now}"""
 
@@ -157,9 +179,11 @@ class SessionCoordinator:
         self.tool_ctx = {
             "fs_roots": cfg["tools"]["fs_roots"],
             "allow_shell": cfg["tools"]["allow_shell"],
+            "shell_unrestricted": cfg["tools"].get("shell_unrestricted", False),
             "max_output_chars": cfg["tools"]["max_output_chars"],
             "search": cfg["search"],
         }
+        self.auto_approve = set(cfg["tools"].get("auto_approve") or [])
 
         # 播报：一个串行 worker 保证句子按顺序合成、按顺序发给宿主。
         # generation 用来作废被取消那一轮还在队列里的句子。
@@ -199,7 +223,7 @@ class SessionCoordinator:
         self.history.append({"role": "user", "content": text})
         self._trim()
 
-        self._worker = threading.Thread(target=self._run_turn, args=(message_id,), daemon=True)
+        self._worker = threading.Thread(target=self._run_turn, args=(message_id, text), daemon=True)
         self._worker.start()
 
     def cancel(self):
@@ -293,10 +317,10 @@ class SessionCoordinator:
 
     # ------------------------------------------------------------ 主循环
 
-    def _run_turn(self, message_id):
+    def _run_turn(self, message_id, query=""):
         try:
             self.set_state("thinking")
-            self._loop(message_id)
+            self._loop(message_id, self._memory_block(query))
         except Cancelled:
             self.emit({"type": "turn_cancelled", "id": message_id})
         except ProviderError as exc:
@@ -309,7 +333,7 @@ class SessionCoordinator:
             self.set_state("idle")
             self.emit({"type": "turn_done", "id": message_id})
 
-    def _loop(self, message_id):
+    def _loop(self, message_id, memory_block=""):
         max_rounds = self.cfg["session"]["max_tool_rounds"]
 
         for round_index in range(max_rounds + 1):
@@ -319,7 +343,8 @@ class SessionCoordinator:
             # 提醒贴在最后一条：工具结果常常是中文（文件名、工具摘要），
             # 隔着这些内容，开头的系统提示压不住格式，模型会整段滑回中文。
             # 这条只在请求里出现，不进 history。
-            messages = [self._system_message()] + self.history + [self._format_reminder()]
+            messages = ([self._system_message(memory_block)] + self.history
+                        + [self._format_reminder()])
             tools = registry.openai_schema() if round_index < max_rounds else None
 
             english_parts = []
@@ -402,7 +427,7 @@ class SessionCoordinator:
         self.emit({"type": "tool_started", "id": call_id, "name": name,
                    "arguments": arguments, "risk": tool["risk"], "summary": summary})
 
-        if registry.needs_confirmation(tool):
+        if registry.needs_confirmation(tool) and name not in self.auto_approve:
             approved = self._ask_confirmation(call_id, name, arguments, tool["risk"], summary)
             if not approved:
                 self.emit({"type": "tool_result", "id": call_id, "name": name,
@@ -472,14 +497,27 @@ class SessionCoordinator:
 
     # ------------------------------------------------------------ 杂项
 
-    def _system_message(self):
+    def _system_message(self, memory_block=""):
         env = "macOS %s / %s / 用户主目录 %s" % (
             platform.mac_ver()[0] or platform.release(),
             platform.machine(),
             self.cfg["tools"]["fs_roots"][0] if self.cfg["tools"]["fs_roots"] else "~",
         )
+        memory = ("\n== WHAT YOU REMEMBER ==\n%s\n" % memory_block) if memory_block else "\n"
         return {"role": "system", "content": SYSTEM_PROMPT.format(
-            marker=ZH_MARKER, env=env, now=time.strftime("%Y-%m-%d %H:%M:%S %A"))}
+            marker=ZH_MARKER, env=env, memory=memory,
+            now=time.strftime("%Y-%m-%d %H:%M:%S %A"))}
+
+    def _memory_block(self, query):
+        """本轮要注入的记忆。检索失败绝不能拖垮一轮对话——记忆是加分项，不是依赖项。"""
+        memory_cfg = self.cfg.get("memory") or {}
+        if not memory_cfg.get("enabled", True):
+            return ""
+        try:
+            return MEMORY.context_block(query, int(memory_cfg.get("max_recall") or 8))
+        except Exception as exc:
+            self.log("记忆检索失败（本轮跳过）：%s" % exc)
+            return ""
 
     def _format_reminder(self):
         return {"role": "system", "content":

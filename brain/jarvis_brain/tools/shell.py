@@ -1,7 +1,11 @@
 """shell_run —— 默认关闭，开了也每次确认。
 
-这是整套工具里唯一无法用 Schema 约束语义的口子，所以它必须同时满足三条：
+这是整套工具里唯一无法用 Schema 约束语义的口子，所以默认要同时满足三条：
 配置里显式打开、每次弹确认、命中黑名单直接拒。
+
+tools.shell_unrestricted = true 会摘掉第三条（黑名单），剩下的两道闸还在。
+摘掉它就等于把终端的权限交给模型，不可逆操作也拦不住了——这是用户明确要求
+"和 CLI 一样"时才该开的档位。
 """
 import os
 import re
@@ -29,18 +33,24 @@ def shell_run(args, ctx):
     if not command:
         return {"error": "缺少 command"}
 
-    for pattern, why in BLOCKED:
-        if pattern.search(command):
-            return {"error": "命令被拦截（%s），不执行：%s" % (why, command)}
+    if not ctx.get("shell_unrestricted"):
+        for pattern, why in BLOCKED:
+            if pattern.search(command):
+                return {"error": "命令被拦截（%s），不执行：%s。"
+                                 "确实需要就把 ~/.jarvis/config.json 的 "
+                                 "tools.shell_unrestricted 改成 true。" % (why, command)}
 
     cwd = os.path.expanduser(args.get("cwd") or "~")
     if not os.path.isdir(cwd):
         cwd = os.path.expanduser("~")
 
+    # 放开限制后跑的往往是构建、安装这类长命令，120s 的上限不够用
+    ceiling = 600 if ctx.get("shell_unrestricted") else 120
     try:
         proc = subprocess.run(
             ["/bin/zsh", "-c", command],
-            capture_output=True, text=True, timeout=min(int(args.get("timeout") or 30), 120),
+            capture_output=True, text=True,
+            timeout=min(int(args.get("timeout") or 30), ceiling),
             cwd=cwd,
         )
     except subprocess.TimeoutExpired:

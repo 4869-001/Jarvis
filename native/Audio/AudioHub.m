@@ -31,6 +31,17 @@
 #pragma mark - 权限
 
 - (void)requestPermission:(void (^)(BOOL, NSString *))completion {
+    // 已经问过就同步答复。requestAccess 即使在已授权时也要走一趟 XPC，
+    // 而这段延迟正好卡在用户按下开麦键到麦克风真的打开之间。
+    AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+    if (status != AVAuthorizationStatusNotDetermined) {
+        BOOL granted = (status == AVAuthorizationStatusAuthorized);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(granted, granted ? nil :
+                       @"麦克风未授权。系统设置 → 隐私与安全性 → 麦克风，勾上 Jarvis。");
+        });
+        return;
+    }
     [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
         dispatch_async(dispatch_get_main_queue(), ^{
             completion(granted, granted ? nil :

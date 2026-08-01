@@ -4,9 +4,11 @@
 #import <WebKit/WebKit.h>
 
 static NSString *const kBridgeName = @"jarvis";
+static NSString *const kOpacityDefaultsKey = @"JarvisPanelOpacity";
 static const CGFloat kPanelWidth  = 460.0;
 static const CGFloat kPanelHeight = 620.0;
 static const CGFloat kScreenMargin = 24.0;
+static const CGFloat kDefaultOpacity = 0.82;
 
 #pragma mark - 面板窗口
 
@@ -23,6 +25,7 @@ static const CGFloat kScreenMargin = 24.0;
 @interface ConversationPanelController () <WKScriptMessageHandler, WKNavigationDelegate>
 @property (nonatomic, strong) ConversationPanel *panel;
 @property (nonatomic, strong) WKWebView *webView;
+@property (nonatomic, strong) NSVisualEffectView *blur;
 @property (nonatomic, assign) BOOL pageReady;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *pendingEvents;
 @end
@@ -32,6 +35,8 @@ static const CGFloat kScreenMargin = 24.0;
 - (instancetype)init {
     if ((self = [super init])) {
         _pendingEvents = [NSMutableArray array];
+        NSNumber *saved = [[NSUserDefaults standardUserDefaults] objectForKey:kOpacityDefaultsKey];
+        _panelOpacity = saved ? MAX(0.0, MIN(1.0, saved.doubleValue)) : kDefaultOpacity;
     }
     return self;
 }
@@ -86,15 +91,22 @@ static const CGFloat kScreenMargin = 24.0;
 
     // 毛玻璃必须由 AppKit 做：WKWebView 关掉 drawsBackground 后，CSS 的
     // backdrop-filter 没有可模糊的内容，窗口就只是半透明，后面的字看得一清二楚。
-    NSVisualEffectView *blur = [[NSVisualEffectView alloc] initWithFrame:frame];
-    blur.material = NSVisualEffectMaterialUnderWindowBackground;
-    blur.blendingMode = NSVisualEffectBlendingModeBehindWindow;
-    blur.state = NSVisualEffectStateActive;
-    blur.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    [blur addSubview:self.webView];
+    self.blur = [[NSVisualEffectView alloc] initWithFrame:frame];
+    self.blur.material = NSVisualEffectMaterialUnderWindowBackground;
+    self.blur.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+    self.blur.state = NSVisualEffectStateActive;
+    self.blur.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-    self.panel.contentView = blur;
+    // 毛玻璃和网页是**兄弟**，不是父子。调透明度改的是 blur.alphaValue，
+    // 如果网页是它的子视图，文字会跟着一起淡掉——那就成了"调可读性"而不是"调透明度"。
+    NSView *container = [[NSView alloc] initWithFrame:frame];
+    container.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [container addSubview:self.blur];
+    [container addSubview:self.webView positioned:NSWindowAbove relativeTo:self.blur];
+
+    self.panel.contentView = container;
     self.panel.frameAutosaveName = @"JarvisConversationPanel";
+    [self applyOpacity];
 
     [self positionAtDefaultCorner];
 
@@ -111,6 +123,25 @@ static const CGFloat kScreenMargin = 24.0;
     frame.origin.x = NSMaxX(visible) - frame.size.width - kScreenMargin;
     frame.origin.y = NSMinY(visible) + kScreenMargin;
     [self.panel setFrame:frame display:NO];
+}
+
+#pragma mark - 透明度
+
+- (void)setPanelOpacity:(CGFloat)panelOpacity {
+    _panelOpacity = MAX(0.0, MIN(1.0, panelOpacity));
+    [[NSUserDefaults standardUserDefaults] setDouble:_panelOpacity forKey:kOpacityDefaultsKey];
+    [self applyOpacity];
+}
+
+/// 两件事一起动，缺一样都不像"变透明"：
+///   毛玻璃层的 alpha —— 决定背后的东西糊到什么程度；
+///   页面里那层暗色 —— 决定文字底下有多少衬底。
+/// 只调前者，浅色壁纸下文字会糊；只调后者，背后永远是一块磨砂。
+- (void)applyOpacity {
+    self.blur.alphaValue = _panelOpacity;
+    // 全透明时索性把整层摘掉，省一次离屏合成
+    self.blur.hidden = (_panelOpacity <= 0.01);
+    [self pushEvent:@{@"type": @"opacity", @"value": @(_panelOpacity)}];
 }
 
 #pragma mark - 显示
@@ -190,6 +221,9 @@ static const CGFloat kScreenMargin = 24.0;
                        didAnswerConfirmation:requestID
                                     approved:[body[@"approved"] boolValue]];
         }
+    } else if ([action isEqualToString:@"set_opacity"]) {
+        NSNumber *value = body[@"value"];
+        if ([value isKindOfClass:[NSNumber class]]) self.panelOpacity = value.doubleValue;
     } else if ([action isEqualToString:@"close"]) {
         [self hide];
     } else if ([action isEqualToString:@"open_config"]) {
@@ -204,6 +238,8 @@ static const CGFloat kScreenMargin = 24.0;
     NSArray *queued = [self.pendingEvents copy];
     [self.pendingEvents removeAllObjects];
     for (NSDictionary *event in queued) [self deliver:event];
+    // 页面自己不知道上次调到了几，由这边告诉它——滑块和暗色衬底才不会和实际错位
+    [self deliver:@{@"type": @"opacity", @"value": @(self.panelOpacity)}];
 }
 
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {

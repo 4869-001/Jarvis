@@ -41,6 +41,7 @@ static const uint32_t kHotKeyVoice = 2;
 @property (nonatomic, copy)   NSString *uiState;
 @property (nonatomic, assign) NSUInteger messageCounter;
 @property (nonatomic, assign) BOOL voiceEnabled;
+@property (nonatomic, copy)   NSDictionary *voiceConfig;
 @end
 
 @implementation AppDelegate
@@ -49,6 +50,7 @@ static const uint32_t kHotKeyVoice = 2;
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];   // 无 Dock 图标
+    [self terminateOtherInstances];
 
     self.brainState = @"idle";
     self.uiState = @"idle";
@@ -65,6 +67,7 @@ static const uint32_t kHotKeyVoice = 2;
     [self.statusItem install];
 
     self.tools = [[NativeToolExecutor alloc] init];
+    [self checkAccessibilityTrust];
 
     self.player = [[SpeechPlayer alloc] init];
     self.player.delegate = self;
@@ -179,23 +182,61 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
         [self.brain send:@{@"type": @"cancel"}];
     }
 
-    if (!self.voice) [self buildVoiceControllerWithConfig:nil];
+    if (!self.voice) [self buildVoiceControllerWithConfig:self.voiceConfig];
+    // 每次开麦都重取一遍应用名——用户想说的那个应用往往是刚打开的那个
+    self.voice.contextualStrings = [self contextualStringsFromConfig:self.voiceConfig];
     [self.conversation show];
     [self.voice start];
 }
 
 - (void)buildVoiceControllerWithConfig:(NSDictionary *)config {
     NSString *locale = config[@"locale"] ?: @"zh-CN";
-    NSNumber *silence = config[@"silence_timeout"];
-    NSNumber *maxSeconds = config[@"max_seconds"];
-    NSNumber *onDevice = config[@"prefer_on_device"];
 
-    self.voice = [[VoiceInputController alloc]
-                  initWithLocale:locale
-                  silenceTimeout:silence ? silence.doubleValue : 1.6
-                      maxSeconds:maxSeconds ? maxSeconds.doubleValue : 30.0
-                  preferOnDevice:onDevice ? onDevice.boolValue : YES];
+    JarvisVoiceOptions options = {
+        .silenceTimeout  = [self seconds:config[@"silence_timeout"] fallback:0.9],
+        .finalWait       = [self seconds:config[@"final_wait"]      fallback:0.6],
+        .idleTimeout     = [self seconds:config[@"idle_timeout"]    fallback:30.0],
+        .maxSeconds      = [self seconds:config[@"max_seconds"]     fallback:60.0],
+        .preferOnDevice  = config[@"prefer_on_device"] ? [config[@"prefer_on_device"] boolValue] : YES,
+        .addsPunctuation = config[@"punctuation"] ? [config[@"punctuation"] boolValue] : YES,
+    };
+
+    self.voice = [[VoiceInputController alloc] initWithLocale:locale options:options];
     self.voice.delegate = self;
+    self.voice.contextualStrings = [self contextualStringsFromConfig:config];
+
+    // 先把识别器建起来。冷启动第一次开麦要现加载语言资源，能明显感觉到卡一下；
+    // 在这儿暖掉，用户按 ⌥V 时就是即时的。
+    [self.voice prewarm];
+}
+
+- (NSTimeInterval)seconds:(id)value fallback:(NSTimeInterval)fallback {
+    return [value isKindOfClass:[NSNumber class]] ? [value doubleValue] : fallback;
+}
+
+/// 喂给识别器的专有名词。
+///
+/// 这是提高识别准确率最划算的一招：识别器对"贾维斯""网易云音乐"这类专名
+/// 本来最容易听错，提前告诉它有这些词之后基本一次听对。
+/// 词表 = 唤醒词与固定术语 + 当前在跑的应用名（用户提到的应用几乎都在这里面）。
+- (NSArray<NSString *> *)contextualStringsFromConfig:(NSDictionary *)config {
+    NSMutableOrderedSet<NSString *> *words = [NSMutableOrderedSet orderedSet];
+    [words addObjectsFromArray:@[@"贾维斯", @"Jarvis", @"J.A.R.V.I.S.",
+                                 @"网易云音乐", @"访达", @"剪贴板", @"截图",
+                                 @"终端", @"系统设置", @"下一首", @"上一首"]];
+
+    NSArray *extra = config[@"contextual_strings"];
+    if ([extra isKindOfClass:[NSArray class]]) {
+        for (id item in extra) {
+            if ([item isKindOfClass:[NSString class]] && [item length]) [words addObject:item];
+        }
+    }
+
+    for (NSRunningApplication *app in [NSWorkspace sharedWorkspace].runningApplications) {
+        if (app.activationPolicy != NSApplicationActivationPolicyRegular) continue;
+        if (app.localizedName.length) [words addObject:app.localizedName];
+    }
+    return words.array;
 }
 
 #pragma mark - 唤醒词
@@ -357,6 +398,7 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
         NSDictionary *voiceConfig = event[@"voice_input"];
         if ([voiceConfig isKindOfClass:[NSDictionary class]]) {
             self.voiceEnabled = [voiceConfig[@"enabled"] boolValue];
+            self.voiceConfig = voiceConfig;
             [self buildVoiceControllerWithConfig:voiceConfig];
         }
         NSDictionary *wakeConfig = event[@"wake_word"];
@@ -366,6 +408,45 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
     }
 
     [self.conversation pushEvent:event];
+}
+
+/// 只允许一个实例活着。
+///
+/// 每个实例都会拉起自己的 Brain，两个 Brain 抢同一个 `~/.jarvis/brain.sock`：
+/// 后绑定的顶掉先绑定的，宿主连上就被踢、踢了又重连，面板一直显示「未连接」。
+/// 日志里的样子是 brain.log 疯狂刷「宿主已连接 / 宿主断开 / Bad file descriptor」。
+///
+/// 多出来的实例主要有两个来源：从访达或系统设置里双击了 Jarvis.app；
+/// 以及 `launchctl bootout` 是异步的，旧进程还没死 bootstrap 就拉起了新的，
+/// 旧的从此脱离 launchd 管理，永远不会退。**新的赢**——它才是 launchd 认的那个。
+- (void)terminateOtherInstances {
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if (bundleID.length == 0) return;
+
+    pid_t mine = [[NSProcessInfo processInfo] processIdentifier];
+    for (NSRunningApplication *app in
+         [NSRunningApplication runningApplicationsWithBundleIdentifier:bundleID]) {
+        if (app.processIdentifier == mine) continue;
+        NSLog(@"[jarvis] 发现另一个实例 pid=%d，终止它（一个 socket 只能有一个主人）",
+              app.processIdentifier);
+        if (![app terminate]) [app forceTerminate];
+    }
+}
+
+/// 辅助功能权限没了就控制不了播放器（媒体键、GUI 脚本都要它）。
+///
+/// 这个权限**每次重新构建都会失效**：本地是 ad-hoc 签名，TCC 存的是 cdhash，
+/// 二进制一变就对不上。系统设置里的开关看着还是开的，实际已经不作数。
+/// 所以这里不能只在启动时看一眼日志，要主动弹系统那个"打开系统设置"的对话框。
+- (void)checkAccessibilityTrust {
+    if (AXIsProcessTrusted()) {
+        NSLog(@"[jarvis] 辅助功能权限：已授权");
+        return;
+    }
+    NSLog(@"[jarvis] 辅助功能权限：未授权——播放器控制、媒体键都会失败。"
+          @"重新构建过的话要去系统设置里把 J.A.R.V.I.S. 关掉再打开（cdhash 变了）");
+    NSDictionary *options = @{(__bridge NSString *)kAXTrustedCheckOptionPrompt: @YES};
+    AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
 }
 
 - (void)runNativeTool:(NSDictionary *)event {

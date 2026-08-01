@@ -36,8 +36,14 @@ DEFAULTS = {
     "tools": {
         # 文件工具的活动范围。越界一律拒绝，不给模型越权的机会。
         "fs_roots": ["~"],
-        # shell.run 默认关闭。要开自己改这里，且每次仍需确认。
+        # shell_run 默认关闭。要开自己改这里，且每次仍需确认。
         "allow_shell": False,
+        # True 时不再拦 rm -rf / sudo / 关机这类命令，只剩确认弹窗这一道闸。
+        # 想要"和终端里一样"的权限就开它——代价是模型一次判断失误就可能不可逆。
+        "shell_unrestricted": False,
+        # 免确认的工具名单。写进来的工具不再弹确认框，直接执行。
+        # 例：["fs_write", "shell_run"]。空表示所有 L2 及以上都要点确认。
+        "auto_approve": [],
         "max_output_chars": 12000,
     },
     "tts": {
@@ -62,9 +68,27 @@ DEFAULTS = {
     "voice_input": {
         "enabled": True,
         "locale": "zh-CN",          # SFSpeechRecognizer 的语言。本机中英都支持离线
+        # 离线识别快、不联网，但准确率略低于服务端。识别老是差一点就把它设成 false
+        # ——代价是要联网，且每句多 200~400ms。
         "prefer_on_device": True,
-        "silence_timeout": 1.6,     # 静音多久自动结束一句
-        "max_seconds": 30.0,
+        # 说过话之后，静音多久算说完。靠自适应噪声门判定，所以可以比固定阈值时短。
+        "silence_timeout": 0.9,
+        # 收句后再等多久拿识别器的终版结果（终版比最后一版 partial 准，且带标点）。
+        # 等不到就用 partial，不会卡住。
+        "final_wait": 0.6,
+        # 开麦后一直没识别出任何文字就自动关麦，省电省内存。用户要求 30s。
+        "idle_timeout": 30.0,
+        # 单句上限。到点强制收句，防止一直有背景人声时永远关不掉。
+        "max_seconds": 60.0,
+        "punctuation": True,        # 让识别器自己加标点，字幕更好读
+        # 喂给识别器的专有名词，显著提高这些词的召回。应用名会自动补进来。
+        "contextual_strings": [],
+    },
+    "memory": {
+        # 长期记忆：跨会话、跨重启。存在 ~/.jarvis/memory.json，可以直接看、直接改。
+        "enabled": True,
+        # 每轮按当前这句话检索回来的条数上限（identity/preference 类另外常驻）
+        "max_recall": 8,
     },
     "session": {
         # 一轮对话里最多连续调多少次工具，防止模型自己转圈

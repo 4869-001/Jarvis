@@ -13,6 +13,7 @@ Python 子进程去发 Apple Events 或调 NSWorkspace，授权弹窗归属会�
 L2 起需要用户确认。
 """
 from . import fs as fs_impl
+from . import memory_tools as memory_impl
 from . import shell as shell_impl
 from . import web as web_impl
 
@@ -81,6 +82,19 @@ TOOLS = [
     _tool("system_info", "获取本机状态：电量、内存压力、磁盘剩余、当前前台应用、时间。",
           {}, "L0", "native"),
 
+    _tool("media_control",
+          "控制正在播放的音乐/视频：播放、暂停、切歌、调音量、查看当前曲目。"
+          "网易云音乐、Apple Music、Spotify、QQ 音乐和浏览器里的播放都能控。"
+          "注意：app_open 只能把播放器打开，控制播放一律用这个工具。",
+          {"action": {"type": "string",
+                      "enum": ["toggle", "play", "pause", "next", "previous",
+                               "volume_up", "volume_down", "like", "status"],
+                      "description": "toggle 播放/暂停切换，like 把当前歌加入喜欢（仅网易云），"
+                                     "status 查当前在放什么"},
+           "player": _p("指定播放器，如 网易云音乐、spotify、apple music；"
+                        "不填则自动挑当前在放的那个")},
+          "L1", "native", required=["action"]),
+
     # ------------------------------------------------ 文件（Brain 执行）
     _tool("fs_list", "列出目录内容。",
           {"path": _p("目录路径，默认 ~"),
@@ -121,6 +135,39 @@ TOOLS = [
            "max_chars": _p("最多返回多少字符，默认 8000", _INT)},
           "L1", "python", web_impl.web_fetch, required=["url"]),
 
+    # ------------------------------------------------ 长期记忆（Brain 执行）
+    _tool("memory_save",
+          "把一件应当长期记住的事写进记忆，跨会话、跨重启都还在。"
+          "用户介绍自己、说出偏好、交代正在做的事、纠正你之前的认知时，主动调用。"
+          "同一件事再次被提到会就地更新，不会记成两条。",
+          {"text": _p("要记住的一句话，用第三人称陈述，如「用户偏好简短的回答」"),
+           "kind": {"type": "string",
+                    "enum": ["identity", "preference", "project", "fact"],
+                    "description": "identity 用户是谁；preference 偏好习惯；"
+                                   "project 手上在做的事；fact 其他事实。"
+                                   "identity 与 preference 会在每一轮对话中常驻"},
+           "tags": {"type": "array", "items": _STR,
+                    "description": "便于日后检索的关键词，可选"}},
+          "L1", "python", memory_impl.memory_save, required=["text"]),
+
+    _tool("memory_recall",
+          "按关键词检索长期记忆。相关记忆通常已自动附在上下文里，"
+          "只有当你觉得可能还记过别的、但当前上下文没给出时才调用。",
+          {"query": _p("检索关键词"),
+           "limit": _p("最多返回几条，默认 8", _INT)},
+          "L0", "python", memory_impl.memory_recall, required=["query"]),
+
+    _tool("memory_list", "列出全部长期记忆。用户问「你都记得我什么」时用。",
+          {"kind": {"type": "string",
+                    "enum": ["identity", "preference", "project", "fact"],
+                    "description": "只看某一类，不填则全部"}},
+          "L0", "python", memory_impl.memory_list),
+
+    _tool("memory_forget", "删掉一条长期记忆。用户说记错了、或要求忘掉某件事时用。",
+          {"id": _p("记忆 id，来自 memory_list / memory_recall"),
+           "query": _p("没有 id 时，按关键词删掉最匹配的一条")},
+          "L1", "python", memory_impl.memory_forget),
+
     # ------------------------------------------------ 兜底
     _tool("shell_run", "执行一条 zsh 命令。仅在没有任何其他工具能完成时使用；默认被禁用。",
           {"command": _p("命令行"),
@@ -158,6 +205,7 @@ def describe(name, arguments):
         "finder_reveal": "在访达中显示 {path}",
         "clipboard_write": "写入剪贴板",
         "system_notify": "发送通知「{title}」",
+        "media_control": "播放控制：{action}",
         "fs_list": "列出 {path} 的内容",
         "fs_read": "读取 {path}",
         "fs_search": "搜索文件「{query}」",
@@ -165,6 +213,10 @@ def describe(name, arguments):
         "fs_move": "把 {source} 移动到 {destination}",
         "web_search": "联网搜索「{query}」",
         "web_fetch": "抓取网页 {url}",
+        "memory_save": "记住：{text}",
+        "memory_recall": "回忆「{query}」",
+        "memory_list": "翻看长期记忆",
+        "memory_forget": "忘掉一条记忆",
         "shell_run": "执行命令：{command}",
     }
     template = templates.get(name)

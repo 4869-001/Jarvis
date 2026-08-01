@@ -31,6 +31,19 @@ if [[ $RESTART -eq 1 ]]; then
   for label in "$OLD_LABEL" "$LABEL"; do
     launchctl bootout "gui/$(id -u)/${label}" 2>/dev/null || true
   done
+
+  # bootout 是异步的：它返回时进程可能还活着。不等就 bootstrap，launchd 会认新 pid，
+  # 旧进程从此没人管、永远不退——两个实例各拉一个 Brain 抢同一个 socket，
+  # 面板就一直「未连接」。等它真的死透，超时了再强杀。
+  for _ in $(seq 1 30); do
+    pgrep -f "${APP_NAME}.app/Contents/MacOS/${APP_NAME}\$" >/dev/null || break
+    sleep 0.2
+  done
+  if pgrep -f "${APP_NAME}.app/Contents/MacOS/${APP_NAME}\$" >/dev/null; then
+    echo "▸ 旧实例没退干净，强制结束"
+    pkill -9 -f "${APP_NAME}.app/Contents/MacOS/${APP_NAME}\$" || true
+    sleep 0.5
+  fi
 fi
 
 echo "▸ 清理旧构建"
@@ -107,11 +120,27 @@ echo "▸ 打包唤醒词模型"
 mkdir -p "$APP/Contents/Resources/models"
 rsync -a --delete "$ROOT/models/" "$APP/Contents/Resources/models/"
 
-echo "▸ 本地签名"
+# ── 签名 ──────────────────────────────────────────────────────────────
+# 优先用固定身份。ad-hoc 签名的 designated requirement 是 cdhash，二进制一改就变，
+# TCC 里的辅助功能/自动化授权随之作废——而系统设置里开关看着还是开的。
+# 症状是"权限明明给了，播放器还是控制不了"，每次 build 复发一次。
+# 造身份：./native/make-signing-identity.sh
+IDENTITY="Jarvis Local Dev"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
+  # 花括号不能省：紧跟的全角括号是多字节字符，bash 会把它算进变量名，set -u 下直接报错
+  echo "▸ 签名（固定身份：${IDENTITY}）"
+  SIGN_AS="$IDENTITY"
+else
+  echo "▸ 签名（ad-hoc）"
+  echo "  ⚠️  没有固定签名身份，重新构建后辅助功能权限会失效。"
+  echo "     跑一次 ./native/make-signing-identity.sh 可以一劳永逸。"
+  SIGN_AS="-"
+fi
+
 # 嵌入的动态库要先各自签，最后再签整个 bundle，否则 Gatekeeper 会拒
-codesign --force --sign - "$APP/Contents/Frameworks/libonnxruntime.1.27.0.dylib"
-codesign --force --sign - "$APP/Contents/Frameworks/libsherpa-onnx-c-api.dylib"
-codesign --force --deep --sign - "$APP"
+codesign --force --sign "$SIGN_AS" "$APP/Contents/Frameworks/libonnxruntime.1.27.0.dylib"
+codesign --force --sign "$SIGN_AS" "$APP/Contents/Frameworks/libsherpa-onnx-c-api.dylib"
+codesign --force --deep --sign "$SIGN_AS" "$APP"
 
 # ── LaunchAgent ───────────────────────────────────────────────────────
 echo "▸ 安装 LaunchAgent（${LABEL}）"

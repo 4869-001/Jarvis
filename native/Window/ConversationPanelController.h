@@ -27,6 +27,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, weak) id<ConversationPanelDelegate> delegate;
 @property (nonatomic, readonly) BOOL isVisible;
 
+/// 面板不透明度 0…1。0 = 完全清透（只剩文字浮在桌面上），1 = 实心毛玻璃。
+/// 由页面上的滑块驱动，存在 NSUserDefaults 里，重启后保持。
+@property (nonatomic, assign) CGFloat panelOpacity;
+
 - (void)show;
 - (void)hide;
 - (void)toggle;

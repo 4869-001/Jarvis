@@ -1,0 +1,285 @@
+"""Jarvis 的长期记忆。
+
+一句话说清它是什么：**跨会话、跨重启都还在的一小撮事实**。
+`session.history` 是这一轮对话的短期记忆，`new_session` 一按就没；这里存的是
+"这个人是谁、他偏好什么、他手上在做什么"——那些下次开口时理应已经知道的东西。
+
+设计上刻意保守，因为 Brain 只用标准库：
+
+- **没有向量检索。** 用字符/词重叠打分。中文按 2-gram 切、英文按词切，
+  这对"记一句话、下次按关键词捞回来"这个量级（几百条）完全够用，
+  而且零依赖、零加载时间。真正的语义检索要嵌入模型，那会把 Brain 的
+  "纯标准库"这条底线打掉，不值得。
+- **单文件 JSON，整体读写。** 几百条记忆撑死几十 KB。上锁 + 原子替换，
+  避免宿主崩在写一半时把记忆弄丢。
+- **pinned 类别常驻上下文。** identity / preference 是"每一轮都该知道"的，
+  不该靠关键词碰运气召回；其余按当前这句话检索。
+
+写入由模型通过 memory_save 工具显式发起，不做隐式抓取——隐式抓取会把
+闲聊噪音塞满记忆，而且用户无从知道 Jarvis 到底记了什么。
+"""
+import json
+import os
+import re
+import threading
+import time
+import uuid
+
+from . import config
+
+MEMORY_PATH = os.path.join(config.JARVIS_DIR, "memory.json")
+
+# 每一轮都注入的类别。这两类是"关于用户本人"的，检索命不中也必须在场。
+PINNED_KINDS = ("identity", "preference")
+
+KINDS = {
+    "identity":   "用户是谁：姓名、称呼、身份、所在地、设备",
+    "preference": "偏好与习惯：喜欢怎么被回应、常用工具、忌讳",
+    "project":    "手上在做的事：项目、目标、进度",
+    "fact":       "其他值得记住的事实",
+}
+
+# 上下文预算。记忆再有用也不能把 token 吃光——超出就按分数截断。
+MAX_PINNED = 20
+MAX_RECALLED = 8
+MAX_ENTRIES = 500
+MAX_TEXT = 600
+
+_CJK = re.compile(r"[一-鿿]")
+_WORD = re.compile(r"[a-zA-Z0-9_]+")
+_STOP = {
+    "的", "了", "是", "在", "我", "你", "他", "她", "它", "们", "和", "与", "吗", "呢",
+    "a", "an", "the", "is", "are", "was", "were", "to", "of", "and", "or", "in", "on",
+    "for", "it", "i", "you", "my", "me", "that", "this", "with", "do", "does",
+}
+
+
+def _tokens(text):
+    """切成可比对的片段：英文按词、中文按 2-gram。
+
+    中文不做分词——标准库没有词典，2-gram 在"记忆召回"这个精度要求下
+    比按单字比更准（单字重叠率虚高），比装 jieba 便宜得多。
+    """
+    text = (text or "").lower()
+    out = set()
+    for word in _WORD.findall(text):
+        if word not in _STOP and len(word) > 1:
+            out.add(word)
+    run = ""
+    for char in text:
+        if _CJK.match(char):
+            run += char
+        else:
+            run = ""
+            continue
+        if len(run) >= 2:
+            out.add(run[-2:])
+    return out
+
+
+class MemoryStore:
+    def __init__(self, path=MEMORY_PATH):
+        self.path = path
+        self._lock = threading.RLock()
+        self._entries = []
+        self._loaded = False
+
+    # ------------------------------------------------------------ 持久化
+
+    def _load(self):
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                data = data.get("entries") or []
+            self._entries = [e for e in data if isinstance(e, dict) and e.get("text")]
+        except FileNotFoundError:
+            self._entries = []
+        except Exception:
+            # 记忆文件坏了不能让 Brain 起不来。留个副本，从空的重新开始。
+            try:
+                os.replace(self.path, self.path + ".corrupt")
+            except Exception:
+                pass
+            self._entries = []
+
+    def _save(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        tmp = self.path + ".tmp"
+        payload = {"version": 1, "entries": self._entries}
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, self.path)          # 原子替换，崩在中途也不会剩半个文件
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
+
+    # ------------------------------------------------------------ 写
+
+    def save(self, text, kind="fact", tags=None):
+        """新增或就地更新一条。返回 (entry, created)。"""
+        text = (text or "").strip()[:MAX_TEXT]
+        if not text:
+            raise ValueError("记忆内容不能为空")
+        if kind not in KINDS:
+            kind = "fact"
+
+        with self._lock:
+            self._load()
+            existing = self._find_similar(text, kind)
+            now = time.time()
+            if existing:
+                # 同一件事被重复告知就是"更新"，不是"再记一条"——
+                # 否则"我叫 X"改成"我叫 Y"会让两条互相打架，模型只能瞎猜。
+                existing["text"] = text
+                existing["kind"] = kind
+                existing["tags"] = sorted(set(tags or []) | set(existing.get("tags") or []))
+                existing["updated"] = now
+                self._save()
+                return existing, False
+
+            entry = {
+                "id": uuid.uuid4().hex[:8],
+                "text": text,
+                "kind": kind,
+                "tags": sorted(set(tags or [])),
+                "created": now,
+                "updated": now,
+                "used": 0,
+            }
+            self._entries.append(entry)
+            self._evict()
+            self._save()
+            return entry, True
+
+    def forget(self, entry_id=None, query=None):
+        """按 id 精确删，或按关键词删掉最匹配的一条。返回被删的那条。"""
+        with self._lock:
+            self._load()
+            target = None
+            if entry_id:
+                target = next((e for e in self._entries if e["id"] == entry_id), None)
+            elif query:
+                ranked = self._rank(query, self._entries)
+                if ranked and ranked[0][0] > 0:
+                    target = ranked[0][1]
+            if not target:
+                return None
+            self._entries.remove(target)
+            self._save()
+            return target
+
+    def clear(self):
+        with self._lock:
+            self._load()
+            count = len(self._entries)
+            self._entries = []
+            self._save()
+            return count
+
+    # ------------------------------------------------------------ 读
+
+    def all(self, kind=None):
+        with self._lock:
+            self._load()
+            items = [e for e in self._entries if not kind or e["kind"] == kind]
+            return sorted(items, key=lambda e: e["updated"], reverse=True)
+
+    def search(self, query, limit=MAX_RECALLED):
+        with self._lock:
+            self._load()
+            ranked = self._rank(query, self._entries)
+            return [entry for score, entry in ranked[:limit] if score > 0]
+
+    def recall(self, query, limit=MAX_RECALLED):
+        """检索并记一次命中。命中次数用于淘汰时保住常用的那些。"""
+        hits = self.search(query, limit)
+        if hits:
+            with self._lock:
+                for entry in hits:
+                    entry["used"] = entry.get("used", 0) + 1
+                    entry["last_used"] = time.time()
+                self._save()
+        return hits
+
+    def context_block(self, query=None, limit=MAX_RECALLED):
+        """拼成塞进 system prompt 的那段文本。没有记忆就返回空串。"""
+        with self._lock:
+            self._load()
+            if not self._entries:
+                return ""
+
+        pinned = [e for e in self.all() if e["kind"] in PINNED_KINDS][:MAX_PINNED]
+        pinned_ids = {e["id"] for e in pinned}
+        recalled = [e for e in (self.recall(query, limit) if query and limit else [])
+                    if e["id"] not in pinned_ids]
+
+        if not pinned and not recalled:
+            return ""
+
+        lines = []
+        if pinned:
+            lines.append("Known about the user (always true):")
+            lines += ["- [%s] %s" % (e["kind"], e["text"]) for e in pinned]
+        if recalled:
+            if lines:
+                lines.append("")
+            lines.append("Possibly relevant to what was just said:")
+            lines += ["- [%s] %s" % (e["kind"], e["text"]) for e in recalled]
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------ 内部
+
+    def _rank(self, query, entries):
+        query_tokens = _tokens(query)
+        if not query_tokens:
+            return []
+        now = time.time()
+        ranked = []
+        for entry in entries:
+            entry_tokens = _tokens(entry["text"] + " " + " ".join(entry.get("tags") or []))
+            if not entry_tokens:
+                continue
+            overlap = len(query_tokens & entry_tokens)
+            if not overlap:
+                continue
+            # 用 query 的长度归一，短查询不会因为记忆条目长就被稀释
+            score = overlap / float(len(query_tokens))
+            # 新鲜度：一个月内的略微加权，避免陈年旧事压过刚说的事
+            age_days = (now - entry.get("updated", now)) / 86400.0
+            score *= 1.0 + max(0.0, (30.0 - age_days)) / 100.0
+            ranked.append((score, entry))
+        ranked.sort(key=lambda pair: pair[0], reverse=True)
+        return ranked
+
+    def _find_similar(self, text, kind):
+        """找语义上"同一件事"的旧条目。阈值定得高，宁可多记也别错误覆盖。"""
+        new_tokens = _tokens(text)
+        if not new_tokens:
+            return None
+        for entry in self._entries:
+            if entry["kind"] != kind:
+                continue
+            old_tokens = _tokens(entry["text"])
+            if not old_tokens:
+                continue
+            union = len(new_tokens | old_tokens)
+            if union and len(new_tokens & old_tokens) / float(union) >= 0.6:
+                return entry
+        return None
+
+    def _evict(self):
+        """超上限就淘汰：pinned 类别永不淘汰，其余按 (命中次数, 更新时间) 留新留常用。"""
+        if len(self._entries) <= MAX_ENTRIES:
+            return
+        keep = [e for e in self._entries if e["kind"] in PINNED_KINDS]
+        rest = [e for e in self._entries if e["kind"] not in PINNED_KINDS]
+        rest.sort(key=lambda e: (e.get("used", 0), e.get("updated", 0)), reverse=True)
+        self._entries = keep + rest[:max(0, MAX_ENTRIES - len(keep))]
+
+
+STORE = MemoryStore()

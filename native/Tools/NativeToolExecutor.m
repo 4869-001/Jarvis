@@ -1,5 +1,7 @@
 #import "NativeToolExecutor.h"
 
+#import "MediaController.h"
+
 #import <AppKit/AppKit.h>
 #import <UserNotifications/UserNotifications.h>
 #import <IOKit/ps/IOPowerSources.h>
@@ -14,6 +16,10 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
              [@"~/Applications" stringByExpandingTildeInPath]];
 }
 
+@interface NativeToolExecutor ()
+@property (nonatomic, strong) MediaController *media;
+@end
+
 @implementation NativeToolExecutor
 
 + (BOOL)handlesToolNamed:(NSString *)name {
@@ -23,9 +29,15 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
         names = [NSSet setWithArray:@[@"app_open", @"app_quit", @"app_list_running",
                                       @"url_open", @"finder_reveal",
                                       @"clipboard_read", @"clipboard_write",
-                                      @"system_notify", @"system_info"]];
+                                      @"system_notify", @"system_info",
+                                      @"media_control"]];
     });
     return [names containsObject:name];
+}
+
+- (MediaController *)media {
+    if (!_media) _media = [[MediaController alloc] init];
+    return _media;
 }
 
 - (void)execute:(NSString *)name
@@ -41,7 +53,19 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     else if ([name isEqualToString:@"clipboard_write"]) { [self writeClipboard:arguments completion:completion]; }
     else if ([name isEqualToString:@"system_notify"])   { [self notify:arguments completion:completion]; }
     else if ([name isEqualToString:@"system_info"])     { completion([self systemInfo], nil); }
+    else if ([name isEqualToString:@"media_control"])   { [self controlMedia:arguments completion:completion]; }
     else { completion(nil, [NSString stringWithFormat:@"宿主不认识工具 %@", name]); }
+}
+
+#pragma mark - 播放器
+
+- (void)controlMedia:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    NSString *action = arguments[@"action"];
+    if (![action isKindOfClass:[NSString class]] || action.length == 0) {
+        completion(nil, @"缺少 action"); return;
+    }
+    NSString *player = [arguments[@"player"] isKindOfClass:[NSString class]] ? arguments[@"player"] : nil;
+    [self.media perform:action player:player completion:completion];
 }
 
 #pragma mark - 应用

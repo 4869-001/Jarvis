@@ -12,6 +12,7 @@ import threading
 import time
 
 from . import config
+from . import memory
 from . import tts as tts_module
 from .session import SessionCoordinator
 
@@ -127,8 +128,14 @@ class BrainServer:
 
     # ------------------------------------------------------------ 收
 
-    def _serve_client(self, conn):
-        self.emit({
+    def _ready_event(self):
+        """宿主靠这条消息拿到全部运行期配置——语音、唤醒词、记忆规模都在里面。
+        只在一处拼装：以前连接和 reload 各拼一份，加字段时漏掉一边过。"""
+        try:
+            remembered = len(memory.STORE.all())
+        except Exception:
+            remembered = 0
+        return {
             "type": "ready",
             "protocol": PROTOCOL_VERSION,
             "model": self.cfg["deepseek"]["model"],
@@ -137,9 +144,14 @@ class BrainServer:
             "allow_shell": self.cfg["tools"]["allow_shell"],
             "voice_input": self.cfg["voice_input"],
             "wake_word": self.cfg["wake_word"],
+            "memory": {"enabled": (self.cfg.get("memory") or {}).get("enabled", True),
+                       "count": remembered},
             "tts": {"enabled": self.cfg["tts"]["enabled"],
                     "backend": self.cfg["tts"]["backend"]},
-        })
+        }
+
+    def _serve_client(self, conn):
+        self.emit(self._ready_event())
         self.session.set_state("idle")
 
         buffer = b""
@@ -203,16 +215,10 @@ class BrainServer:
         self.session.tool_ctx.update({
             "fs_roots": self.cfg["tools"]["fs_roots"],
             "allow_shell": self.cfg["tools"]["allow_shell"],
+            "shell_unrestricted": self.cfg["tools"].get("shell_unrestricted", False),
             "max_output_chars": self.cfg["tools"]["max_output_chars"],
             "search": self.cfg["search"],
         })
+        self.session.auto_approve = set(self.cfg["tools"].get("auto_approve") or [])
         self.log("配置已重载")
-        self.emit({"type": "ready", "protocol": PROTOCOL_VERSION,
-                   "model": self.cfg["deepseek"]["model"],
-                   "configured": self.session.provider.configured,
-                   "config_path": config.CONFIG_PATH,
-                   "allow_shell": self.cfg["tools"]["allow_shell"],
-                   "voice_input": self.cfg["voice_input"],
-            "wake_word": self.cfg["wake_word"],
-                   "tts": {"enabled": self.cfg["tts"]["enabled"],
-                           "backend": self.cfg["tts"]["backend"]}})
+        self.emit(self._ready_event())
