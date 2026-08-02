@@ -248,6 +248,13 @@ class SessionCoordinator:
 
         # 播报：一个串行 worker 保证句子按顺序合成、按顺序发给宿主。
         # generation 用来作废被取消那一轮还在队列里的句子。
+        # _speech_buffer/_generation/_speech_seen/_repeat_streak 会被两个不同的线程碰：
+        # 当前轮的 worker 线程（_feed_speech/_flush_speech）和处理下一条用户消息的
+        # dispatch 线程（cancel() → _abandon_speech()，同一时刻旧轮可能还没退出）。
+        # 之前没有锁，两边交错写 _speech_buffer 会拼出"Yes, sir?Yes, sir?"这种
+        # 没有分隔符的粘连文本——两句话背靠背拼进了同一个 buffer。用可重入锁是因为
+        # _feed_speech/_flush_speech 内部还会调用 _queue_sentence，同一个锁要能重入。
+        self._speech_lock = threading.RLock()
         self._speech_queue = queue.Queue()
         self._speech_buffer = ""
         self._generation = 0
@@ -359,9 +366,15 @@ class SessionCoordinator:
         slot["value"] = value
         slot["event"].set()
 
-    def _emit_segment(self, message_id, channel, chunk, english_parts, chinese_parts):
+    def _assert_current_turn(self, generation):
+        if self._cancel.is_set() or generation != self._turn_generation:
+            raise Cancelled()
+
+    def _emit_segment(self, message_id, channel, chunk, english_parts, chinese_parts,
+                      generation):
         """英文进正文与播报，中文只进字幕。中文绝不能进 TTS——
         播报的是英文，字幕跟着念一遍会变成中英各说一次。"""
+        self._assert_current_turn(generation)
         if channel == "en":
             english_parts.append(chunk)
             self.emit({"type": "assistant_delta", "id": message_id, "text": chunk})
@@ -370,27 +383,37 @@ class SessionCoordinator:
             chinese_parts.append(chunk)
             self.emit({"type": "assistant_delta_zh", "id": message_id, "text": chunk})
 
-    def _ensure_bilingual(self, message_id, full_text, chinese_text):
+    def _ensure_bilingual(self, message_id, full_text, chinese_text, generation):
         """字幕必须双语——英文和中文缺哪个都不行，这是用户明确要求锁定的规则。
 
         平时模型守格式，两段都有，这里直接原样放行，不产生任何额外请求。
-        只有模型破格式（漏了 {marker} 导致某一段缺失）才会走翻译兜底，独立一次
-        请求，不进 history、不占工具调用轮数。补出来的内容照样走
-        assistant_delta(_zh)/语音，跟正常内容一视同仁——用户不该感觉出"这句是补的"。
+        只有模型破格式才会走翻译兜底，独立一次请求，不进 history、不占工具调用轮数。
         """
-        # 模型压根没触发过 {marker}（一次都没有）时，BilingualSplitter 找不到分隔符，
-        # 会把它见到的所有内容都当成"英文声道"发出去——如果模型这次是整段吐的中文，
-        # full_text 里躺的其实是中文，不是缺了中文字幕，是"英文正文"这个坑本身填错了。
-        # 不纠正的话：这段假英文会被当真英文喂给 TTS，命中 tts.synthesize 的
-        # off_language 检测后直接跳过合成，整轮一句话都不出声——比"语言错了"更糟。
-        # 这里先把误标的内容挪回中文桶，再按"缺英文"正常走下面的翻译兜底。
-        if full_text and not chinese_text and tts.mostly_cjk(full_text):
-            chinese_text = full_text
+        # 模型没触发过 {marker}、或触发得太晚时，BilingualSplitter 会把见到的内容
+        # 当成"英文声道"发出去——如果这段内容其实整体是中文，那不是缺了中文字幕，
+        # 是"英文正文"这个坑本身填错了。这里必须看 full_text 本身的语言，不能只
+        # 看 chinese_text 是否已经非空：模型偶尔会先吐一大段中文（已经被当假英文
+        # 喂过 TTS、被 off_language 静默吞掉），才姗姗来迟地补一个 {marker}，
+        # 这时 chinese_text 也非空，旧逻辑会把它当"两段都有、无需处理"直接放行，
+        # 于是那段被吞掉的语音永远没有机会被翻译回来补播——比"这轮全程没声音"
+        # 这个 bug 报告描述的现象完全对得上。
+        self._assert_current_turn(generation)
+        reset = False
+        replay_speech = False
+        added_english = False
+        added_chinese = False
+        if full_text and tts.mostly_cjk(full_text):
+            # 两个桶可能是同一份中文（分隔符晚到时尤其常见），相同内容不能
+            # 再拼一次，否则中文字幕会原样出现两遍。
+            incoming = full_text.strip()
+            existing = chinese_text.strip()
+            if not existing:
+                chinese_text = incoming
+            elif incoming not in existing and existing not in incoming:
+                chinese_text = (incoming + "\n" + existing).strip()
             full_text = ""
-            # 面板此前已经把这段内容当"英文"实时流过一遍了（改不回去），
-            # 这里至少把它按真实身份补发一份 assistant_delta_zh，
-            # 字幕区域和最终的 text_zh 才对得上，不是内部变量正确、界面上却没有。
-            self.emit({"type": "assistant_delta_zh", "id": message_id, "text": chinese_text})
+            reset = True
+            replay_speech = True
 
         if full_text and chinese_text:
             return full_text, chinese_text
@@ -399,15 +422,42 @@ class SessionCoordinator:
 
         if not full_text:
             translated = self._translate(chinese_text, "en")
+            self._assert_current_turn(generation)
             if translated:
-                self.emit({"type": "assistant_delta", "id": message_id, "text": translated})
-                self._feed_speech(translated)
                 full_text = translated
+                added_english = True
         elif not chinese_text:
             translated = self._translate(full_text, "zh")
+            self._assert_current_turn(generation)
             if translated:
-                self.emit({"type": "assistant_delta_zh", "id": message_id, "text": translated})
                 chinese_text = translated
+                added_chinese = True
+
+        if reset:
+            self._assert_current_turn(generation)
+            # 面板此前已经把错误内容当"英文"实时流过一遍了，没法收回某一条已发的
+            # delta——与其在同一条气泡里再追加更正内容（英文/中文各显示两遍），
+            # 不如让面板整条清空重画成这里算出的最终版本，界面上只留一份干净的。
+            self.emit({"type": "assistant_reset", "id": message_id})
+            if replay_speech:
+                # 错分到英文桶的中文可能已有半句进入合成队列。先作废它，
+                # 再只喂一次翻译后的英文，避免旧中文与新英文粘连或重复播放。
+                self._abandon_speech()
+            if full_text:
+                self.emit({"type": "assistant_delta", "id": message_id, "text": full_text})
+                if replay_speech:
+                    self._feed_speech(full_text)
+            if chinese_text:
+                self.emit({"type": "assistant_delta_zh", "id": message_id, "text": chinese_text})
+        else:
+            # 正常英文缺中文字幕：只补字幕，不能清空重画并把英文重新送进 TTS，
+            # 后者正是“一次回答播两遍”的直接来源。
+            if added_chinese:
+                self.emit({"type": "assistant_delta_zh", "id": message_id,
+                           "text": chinese_text})
+            if added_english:
+                self.emit({"type": "assistant_delta", "id": message_id, "text": full_text})
+                self._feed_speech(full_text)
         return full_text, chinese_text
 
     def _translate(self, text, target):
@@ -451,14 +501,15 @@ class SessionCoordinator:
         """把流式增量攒成整句就送去合成——不等整段说完，听感上快很多。"""
         if not self._tts_enabled:
             return
-        self._speech_buffer += delta
-        sentences = tts.split_sentences(self._speech_buffer, max_chars=self._speech_max_chars)
-        # 最后一段可能还没说完，留在 buffer 里等下一批增量
-        if len(sentences) <= 1:
-            return
-        for sentence in sentences[:-1]:
-            self._queue_sentence(sentence)
-        self._speech_buffer = sentences[-1]
+        with self._speech_lock:
+            self._speech_buffer += delta
+            sentences = tts.split_sentences(self._speech_buffer, max_chars=self._speech_max_chars)
+            # 最后一段可能还没说完，留在 buffer 里等下一批增量
+            if len(sentences) <= 1:
+                return
+            for sentence in sentences[:-1]:
+                self._queue_sentence(sentence)
+            self._speech_buffer = sentences[-1]
 
     def _queue_sentence(self, sentence):
         """入队前查重——长对话里模型偶尔卡进复读循环，同一句反复吐，
@@ -467,47 +518,61 @@ class SessionCoordinator:
         本轮任何位置再次出现同一句都直接丢弃、不进队列；累计撞到两次重复
         （原句 + 2 次重复）便判定模型跑飞并截断生成。原句只会播放一次。
         """
-        norm = _speech_key(sentence)
-        if norm and norm in self._speech_seen:
-            self._repeat_streak += 1
-            self.log("拦截重复播报：%s" % sentence.strip()[:80])
-            if self._repeat_streak >= 2:
-                self._degenerate = True
-            return                                    # 整轮已经播过，不再入队
-        if norm:
-            self._speech_seen.add(norm)
-        self._repeat_streak = 0
-        self._speech_queue.put((self._generation, sentence))
+        with self._speech_lock:
+            norm = _speech_key(sentence)
+            if norm and norm in self._speech_seen:
+                self._repeat_streak += 1
+                self.log("拦截重复播报：%s" % sentence.strip()[:80])
+                if self._repeat_streak >= 2:
+                    self._degenerate = True
+                return                                    # 整轮已经播过，不再入队
+            if norm:
+                self._speech_seen.add(norm)
+            self._repeat_streak = 0
+            self._speech_queue.put((self._generation, sentence))
 
     def _flush_speech(self):
         if not self._tts_enabled:
             return
-        remainder = self._speech_buffer
-        self._speech_buffer = ""
-        if not remainder.strip():
-            return
-        # 收尾这一段也要切：一句话的回复整段都留在 buffer 里，
-        # 不切的话前面 _feed_speech 的分段努力在最常见的情形下等于没做
-        for piece in tts.split_sentences(remainder, max_chars=self._speech_max_chars):
-            self._queue_sentence(piece)
+        with self._speech_lock:
+            remainder = self._speech_buffer
+            self._speech_buffer = ""
+            if not remainder.strip():
+                return
+            # 收尾这一段也要切：一句话的回复整段都留在 buffer 里，
+            # 不切的话前面 _feed_speech 的分段努力在最常见的情形下等于没做
+            for piece in tts.split_sentences(remainder, max_chars=self._speech_max_chars):
+                self._queue_sentence(piece)
 
     def speak_text(self, text):
         """用户点了某条消息的「朗读」。走同一个串行 worker，
         所以它会排在正在播的队列后面，不会两段声音叠着放。"""
         if not self._tts_enabled or not (text or "").strip():
             return
-        for piece in tts.split_sentences(text, max_chars=self._speech_max_chars):
-            self._speech_queue.put((self._generation, piece))
+        with self._speech_lock:
+            generation = self._generation
+            for piece in tts.split_sentences(text, max_chars=self._speech_max_chars):
+                self._speech_queue.put((generation, piece))
 
     def _abandon_speech(self):
-        """作废这一轮所有还没播的句子，并让宿主停掉正在播的。"""
-        self._generation += 1
-        self._speech_buffer = ""
-        while True:
-            try:
-                self._speech_queue.get_nowait()
-            except queue.Empty:
-                break
+        """作废这一轮所有还没播的句子，并让宿主停掉正在播的。
+
+        必须和 _feed_speech/_queue_sentence 共用同一把锁：这里跑在处理下一条
+        用户消息的 dispatch 线程上，而上一轮的 worker 线程这时可能还没退出、
+        还在往 _speech_buffer 里追加——两边不加锁交错写，会把两轮的文字拼成
+        "Yes, sir?Yes, sir?" 这种没有分隔符的粘连句子（已经在 brain.log 里
+        实测复现过）。加锁后二者只会严格先后执行，不会再交错。
+        """
+        with self._speech_lock:
+            self._generation += 1
+            self._speech_buffer = ""
+            self._speech_seen = set()
+            self._repeat_streak = 0
+            while True:
+                try:
+                    self._speech_queue.get_nowait()
+                except queue.Empty:
+                    break
         self.emit({"type": "speak_stop"})
 
     def _speech_worker(self):
@@ -623,8 +688,7 @@ class SessionCoordinator:
             splitter = BilingualSplitter()
 
             for kind, value in self.provider.stream(messages, tools):
-                if self._cancel.is_set():
-                    raise Cancelled()
+                self._assert_current_turn(generation)
 
                 if kind == "reasoning":
                     self.emit({"type": "assistant_reasoning_delta", "id": message_id, "text": value})
@@ -636,7 +700,7 @@ class SessionCoordinator:
                         self.set_state("speaking")
                     for channel, chunk in splitter.feed(value):
                         self._emit_segment(message_id, channel, chunk,
-                                           english_parts, chinese_parts)
+                                           english_parts, chinese_parts, generation)
                     # 复读防线跳闸：模型卡循环了，别再往下读——继续读只是白烧
                     # token、让球体多"speaking"几秒，句子早在 _queue_sentence
                     # 那层就已经被拦住、不会真播出来。
@@ -648,18 +712,21 @@ class SessionCoordinator:
                     tool_calls = value
 
             for channel, chunk in splitter.flush():
-                self._emit_segment(message_id, channel, chunk, english_parts, chinese_parts)
+                self._emit_segment(message_id, channel, chunk, english_parts, chinese_parts,
+                                   generation)
 
             # 历史只留英文：中文是给眼睛看的字幕，喂回上下文只会让 token 翻倍
             full_text = "".join(english_parts)
             chinese_text = "".join(chinese_parts).strip()
-            full_text, chinese_text = self._ensure_bilingual(message_id, full_text, chinese_text)
+            full_text, chinese_text = self._ensure_bilingual(
+                message_id, full_text, chinese_text, generation)
 
             if not tool_calls:
                 if full_text:
                     history.append({"role": "assistant", "content": full_text})
                 self._commit_history(history, generation)
                 self._flush_speech()
+                self._assert_current_turn(generation)
                 self.emit({"type": "assistant_done", "id": message_id,
                            "text": full_text, "text_zh": chinese_text})
                 self._finish_task(generation, "completed")

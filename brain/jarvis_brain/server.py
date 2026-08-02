@@ -186,15 +186,19 @@ class BrainServer:
             self.log("客户端读取中断：%s" % exc)
         finally:
             self.log("宿主断开")
+            was_current = False
             with self._client_lock:
                 if self.client is conn:
                     self.client = None
+                    was_current = True
             try:
                 conn.close()
             except Exception:
                 pass
-            # 宿主没了，正在跑的一轮没有意义了
-            self.session.cancel()
+            # 新连接会先替换并关闭旧连接。旧连接的线程随后才走到 finally；
+            # 它已经不是当前宿主，不能顺手取消新宿主刚发起的那一轮。
+            if was_current:
+                self.session.cancel()
 
     def _dispatch(self, line):
         try:

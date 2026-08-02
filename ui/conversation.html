@@ -747,9 +747,14 @@ function addUserMessage(text, fileNames) {
 }
 
 let current = null;      // 正在流式接收的那条 assistant 消息
+const completedAssistantIds = new Set();
+const abandonedAssistantIds = new Set();
 
-function ensureAssistant() {
-  if (current) return current;
+function ensureAssistant(id) {
+  if (!id || completedAssistantIds.has(id) || abandonedAssistantIds.has(id)) return null;
+  // 同一时刻只接受一条回答。打断后的旧 socket 数据即使晚到，也不能切回去
+  // 新建第二个气泡，更不能和当前回答轮流制造多个流式光标。
+  if (current) return current.id === id ? current : null;
   hideEmpty();
   const msg = el('div', 'msg assistant streaming');
   const reasoning = el('div', 'reasoning');
@@ -761,13 +766,22 @@ function ensureAssistant() {
       () => body.textContent + (zh.textContent ? '\n' + zh.textContent : ''),
       false, () => body.textContent));
   log.appendChild(msg);
-  current = { msg, body, reasoning, zh };
+  current = { id, msg, body, reasoning, zh };
   return current;
 }
 
-function endStreaming() {
-  if (current) current.msg.classList.remove('streaming');
+function endStreaming(id) {
+  if (id && current && current.id !== id) return;
+  if (current) {
+    current.msg.classList.remove('streaming');
+    if (id) completedAssistantIds.add(id);
+  }
   current = null;
+}
+
+function abandonStreaming() {
+  if (current) abandonedAssistantIds.add(current.id);
+  endStreaming();
 }
 
 /* 提示不调 hideEmpty：「没听清」「播报失败」这类是系统提示，不是对话内容。
@@ -1247,7 +1261,7 @@ function submit() {
   input.style.height = 'auto';
   attachments.clear();
   renderAttachments();
-  endStreaming();
+  abandonStreaming();
   setState('thinking');
   post('submit', { text: payload });
 }
@@ -1257,7 +1271,7 @@ $('btn-stop').addEventListener('click', stopTask);
 
 function stopTask() {
   post('cancel');
-  endStreaming();
+  abandonStreaming();
   setState(S.connected ? 'idle' : 'offline');
 }
 
@@ -1545,25 +1559,44 @@ function handle(event) {
       break;
 
     case 'assistant_reasoning_delta': {
-      const node = ensureAssistant().reasoning;
+      const message = ensureAssistant(event.id);
+      if (!message) break;
+      const node = message.reasoning;
       node.style.display = '';
       node.textContent += event.text;
       scroll();
       break;
     }
 
-    case 'assistant_delta':
-      ensureAssistant().body.textContent += event.text;
+    case 'assistant_delta': {
+      const node = ensureAssistant(event.id);
+      if (!node) break;
+      node.body.textContent += event.text;
       scroll();
       break;
+    }
 
-    case 'assistant_delta_zh':
-      ensureAssistant().zh.textContent += event.text;
+    case 'assistant_delta_zh': {
+      const node = ensureAssistant(event.id);
+      if (!node) break;
+      node.zh.textContent += event.text;
       scroll();
       break;
+    }
+
+    /* 双语兜底修正整段重发时用：面板已经把错误内容流过一遍，没法收回某一条
+       已发的 delta，干脆清空这条消息重新画，别在同一条气泡里越叠越乱。 */
+    case 'assistant_reset': {
+      const node = ensureAssistant(event.id);
+      if (!node) break;
+      node.body.textContent = '';
+      node.zh.textContent = '';
+      scroll();
+      break;
+    }
 
     case 'assistant_done':
-      endStreaming();
+      endStreaming(event.id);
       break;
 
     case 'tool_started':
@@ -1593,17 +1626,19 @@ function handle(event) {
       break;
 
     case 'turn_cancelled':
-      endStreaming();
+      endStreaming(event.id);
       setState(S.connected ? 'idle' : 'offline');
       addNotice('已停止');
       break;
 
     case 'turn_done':
-      endStreaming();
+      endStreaming(event.id);
       break;
 
     case 'session_reset':
       toolNodes.clear();
+      completedAssistantIds.clear();
+      abandonedAssistantIds.clear();
       S.pendingConfirm = null;
       endStreaming();
       S.hasMessages = false;
