@@ -1522,6 +1522,12 @@ function handle(event) {
       addNotice(event.message || '');
       break;
 
+    /* 打断只把状态切到 listening，用户容易看不懂"怎么自己停了"。
+       这条提示专门解释原因，wake 事件本身沿用 listening 的视觉反馈就够。 */
+    case 'barge_in':
+      addNotice('已打断播报（' + (event.keyword || 'Jarvis') + '），在听');
+      break;
+
     case 'skills':
       applySkills(event.items);
       break;
