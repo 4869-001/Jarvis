@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""常驻合成进程 —— 模型只加载一次。
+"""常驻 Jarvis Piper 合成进程 —— 模型只加载一次。
 
-synth.py 每调一次就要重新加载 Kokoro/Piper,实测每句约 3 秒,几乎全是加载开销。
+synth.py 每调一次就要重新加载 Piper，实测有明显固定加载开销。
 对话是逐句播报的,这个代价每句都要付一遍,听感上就是一顿一顿的。
 这里把模型常驻,由 Brain 通过 stdin/stdout 喂请求。
 
@@ -22,20 +22,7 @@ warnings.filterwarnings("ignore")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-_kokoro = None
-_zh_g2p = None
 _piper = None
-
-
-def _load_zh():
-    """Kokoro v1.1-zh + zm_029。注音必须走 misaki,espeak 的 cmn 声调是错的。"""
-    global _kokoro, _zh_g2p
-    if _kokoro is None:
-        from kokoro_onnx import Kokoro
-        from misaki import zh
-        _kokoro = Kokoro(f"{HERE}/zh/kokoro-v1.1-zh.onnx", f"{HERE}/zh/voices-zm_029.bin")
-        _zh_g2p = zh.ZHG2P()
-    return _kokoro, _zh_g2p
 
 
 def _load_en():
@@ -50,11 +37,6 @@ def _load_en():
 
 
 def synth(lang, text, speed):
-    if lang == "zh":
-        kokoro, g2p = _load_zh()
-        phonemes, _ = g2p(text)
-        return kokoro.create(phonemes, voice="zm_029", speed=speed, is_phonemes=True)
-
     import numpy as np
     voice = _load_en()
     chunks = [c.audio_float_array for c in voice.synthesize(text)]
@@ -75,13 +57,10 @@ def main():
 
     # 启动就把要用的模型加载好——第一句话不该比后面的慢一大截。
     #
-    # **只加载真正会用到的那个语言。** 以前这里无条件 _load_zh()，而 Jarvis 一律讲英文，
-    # 结果是 Kokoro（约 500MB，含 jieba 词典）常驻却一次没用上，Piper 反而留到第一句
-    # 现加载。8GB 机器上那 500MB 会直接把合成速度拖下来——Piper 本来就是 CPU 密集的。
-    # 语言由 neural.py 按第一次请求传进来。
-    preload = sys.argv[1] if len(sys.argv) > 1 else "zh"
+    # 始终只加载 Jarvis Piper；中文短词在进入模型前转成拼音。
+    preload = sys.argv[1] if len(sys.argv) > 1 else "en"
     try:
-        _load_en() if preload in ("en", "pinyin") else _load_zh()
+        _load_en()
     except Exception as exc:
         print(json.dumps({"ok": False, "error": "预加载 %s 模型失败：%s" % (preload, exc)}), flush=True)
 
@@ -98,8 +77,7 @@ def main():
                 audio, rate = synth("en", chinese_to_pinyin(request["text"]),
                                     float(request.get("speed") or 1.0))
             else:
-                audio, rate = synth(lang, request["text"],
-                                    float(request.get("speed") or 1.0))
+                audio, rate = synth("en", request["text"], float(request.get("speed") or 1.0))
             out = request["out"]
             os.makedirs(os.path.dirname(out), exist_ok=True)
             sf.write(out, audio, rate)

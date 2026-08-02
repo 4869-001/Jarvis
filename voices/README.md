@@ -1,6 +1,7 @@
 # Jarvis 音色资产
 
-已定稿的中英文音色 + 金属感后处理配置。2026-08-01 确定。
+已定稿的 Piper Jarvis 英文音色 + 金属感后处理配置。中文短词先转无声调拼音，
+仍由同一个音色合成，不再加载第二套中文模型。
 
 ## 目录
 
@@ -8,31 +9,14 @@
 |------|------|------|
 | `en/jarvis-high.onnx` | 英文音色，Piper 格式 | 114MB |
 | `en/jarvis-high.onnx.json` | Piper 配置（必须与 onnx 同目录） | 7KB |
-| `zh/kokoro-v1.1-zh.onnx` | 中文合成器，Kokoro v1.1-zh | 343MB |
-| `zh/voices-zm_029.bin` | 中文音色，只含 `zm_029` 的最小 npz | 375KB |
-| `synth.py` | 中英文合成脚本，已跑通 | — |
+| `synth.py` | 英文及中文拼音合成脚本 | — |
 | `samples/` | 你确认的两个金属处理 mp3 | 65KB |
 
-## 中文：zm_029
+## 中文处理
 
-Kokoro v1.1-zh 的 45 个中文男声里，按基频排序筛出最低沉的 8 个试听后选定。
-
-**注音必须走 `misaki[zh]`，不能用 espeak 的 `cmn`** —— espeak 的中文 G2P 声调基本是错的，听着不像普通话。
-
-```python
-from kokoro_onnx import Kokoro
-from misaki import zh
-
-k = Kokoro('voices/zh/kokoro-v1.1-zh.onnx', 'voices/zh/voices-zm_029.bin')
-ps, _ = zh.ZHG2P()('晚上好，先生。')
-audio, sr = k.create(ps, voice='zm_029', is_phonemes=True)   # sr = 24000
-```
-
-依赖：`kokoro-onnx`、`soundfile`、`misaki[zh]`。**不需要 torch**（onnxruntime 路线）。
-
-> 官方的 `voices-v1.1-zh.bin` 是 54MB / 103 个音色的 npz。`kokoro-onnx` 会
-> `np.load()` 它并校验文件存在（传 numpy 数组给 `voice=` 也绕不过这个检查），
-> 所以这里重打了一个只含 `zm_029` 的 npz，375KB。
+汉字片段通过 `pypinyin` 转成无声调拼音，再交给 `jarvis-high`。优点是全程保持
+同一音色、只常驻一个模型；代价是长中文句和多音字不如中文 TTS 自然，因此它只适合
+回复中的短中文词。完整回答仍要求英文播报、中文字幕。
 
 ## 英文：jarvis-high
 
@@ -67,7 +51,7 @@ lowpass=f=8500
 | `treble g=2.5` | 齿音清晰 |
 | `highpass 90` + `lowpass 8500` | 带限 —— "从扬声器里出来"的关键，缺这条就不像 |
 
-中英文共用同一条链。出处：`~/Projects/JarvisRefs/assistant-x-openclaw` 的 `assistants.json`。
+所有播报共用同一条链。出处：`~/Projects/JarvisRefs/assistant-x-openclaw` 的 `assistants.json`。
 
 ### 语速
 
@@ -75,7 +59,6 @@ lowpass=f=8500
 应该在合成阶段控制：
 
 - Piper：`length_scale`，值越大越慢（`1.0` 原速，`1.1` 慢 10%）
-- Kokoro：`k.create(..., speed=1.0)`，值越大越快
 
 ## 试听样本
 
@@ -85,11 +68,11 @@ lowpass=f=8500
 
 ```bash
 uv venv --python 3.13
-uv pip install kokoro-onnx soundfile "misaki[zh]" piper-tts
+uv pip install soundfile piper-tts pypinyin
 
-python voices/synth.py zh "晚上好，先生。"
+python voices/synth.py zh "晚上好，先生。"  # 转拼音后仍使用 Jarvis 音色
 python voices/synth.py en "Good evening, sir."
 python voices/synth.py zh "..." --raw     # 跳过金属处理
 ```
 
-两条链路 2026-08-01 实测跑通。
+Piper 与拼音链路已实测跑通。

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Jarvis 定稿音色合成 —— 中英文各一条,输出可直接播放的 wav。
+"""Jarvis 定稿音色合成 —— Piper 单音色，中文先转拼音。
 
 环境(不需要 torch):
     uv venv --python 3.13
-    uv pip install kokoro-onnx soundfile "misaki[zh]" piper-tts
+    uv pip install soundfile piper-tts pypinyin
 
 用法:
-    python synth.py zh "晚上好,先生。"
+    python synth.py zh "晚上好,先生。"          # 同一个 Jarvis 音色念拼音
     python synth.py en "Good evening, sir."
     python synth.py zh "..." --raw               # 跳过金属处理
     python synth.py zh "..." --out /tmp/a.wav    # 指定输出路径
-    python synth.py zh "..." --speed 1.1         # zh 是 Kokoro speed,en 是 Piper length_scale
+    python synth.py en "..." --speed 1.1
 
 Brain 调用时走 `--raw --out`:金属链统一在 tts/metallic.py 里加,
 免得同一条滤镜在两个地方各写一份、日后改参数只改到一处。
@@ -37,14 +37,12 @@ METALLIC = (
 )
 
 
-def synth_zh(text, speed=1.0):
-    """Kokoro v1.1-zh + zm_029。注音必须走 misaki,espeak 的 cmn 声调是错的。"""
-    from kokoro_onnx import Kokoro
-    from misaki import zh
-
-    k = Kokoro(f"{HERE}/zh/kokoro-v1.1-zh.onnx", f"{HERE}/zh/voices-zm_029.bin")
-    phonemes, _ = zh.ZHG2P()(text)
-    return k.create(phonemes, voice="zm_029", speed=speed, is_phonemes=True)
+def as_pinyin(text):
+    from pypinyin import Style, lazy_pinyin
+    import re
+    return re.sub(r"[一-鿿㐀-䶿]+",
+                  lambda m: " " + " ".join(lazy_pinyin(m.group(0), style=Style.NORMAL)) + " ",
+                  text)
 
 
 def synth_en(text, length_scale=1.0):
@@ -85,7 +83,8 @@ def main():
     parser.add_argument("--speed", type=float, default=1.0)
     args = parser.parse_args()
 
-    audio, sr = (synth_zh if args.lang == "zh" else synth_en)(args.text, args.speed)
+    text = as_pinyin(args.text) if args.lang == "zh" else args.text
+    audio, sr = synth_en(text, args.speed)
 
     import soundfile as sf
 

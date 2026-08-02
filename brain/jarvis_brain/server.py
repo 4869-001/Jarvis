@@ -105,17 +105,13 @@ class BrainServer:
 
         不预热的话第一句要多等一秒多加载模型，而第一句恰恰是最容易被感知到慢的那句。
 
-        **必须按配置的语言预热。** 以前这里写死 "zh"，于是在 `tts.language = "en"`
-        的默认配置下预热的是 Kokoro（一个从头到尾都用不上的模型），
-        真正要用的 Piper 仍然留到第一句现加载——两头都没讨着好，还白占
-        约 500MB 常驻内存。8GB 机器上这块内存本身就会把合成拖慢。
+        现在只有 Piper Jarvis 一个神经音色；中文短词也走它，不再按语言加载第二个模型。
         """
         if not (self.cfg["tts"]["enabled"] and self.cfg["tts"]["backend"] == "neural"):
             return
 
-        # language 为 null 表示按内容自动判断，那就没法预知，按中文赌一把
-        lang = self.cfg["tts"].get("language") or "zh"
-        sample = "就绪" if lang == "zh" else "At your service."
+        lang = "en"
+        sample = "At your service."
 
         def warm():
             from .tts import neural

@@ -58,7 +58,7 @@ DEFAULTS = {
     },
     "tts": {
         "enabled": True,
-        # neural = 定稿音色（中文 zm_029 / 英文 jarvis-high），需要 voices/.venv；
+        # neural = Piper jarvis-high（短中文词转拼音），需要 voices/.venv；
         # system = 系统 `say`，零依赖。neural 出任何问题都自动回退 system，不会哑。
         "backend": "neural",
         # Jarvis 一律讲英文，所以固定英文音色（Piper jarvis-high）。

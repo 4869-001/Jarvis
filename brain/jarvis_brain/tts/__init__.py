@@ -2,7 +2,7 @@
 
 两个后端，一条共用的金属后处理链：
     system —— `say`，零依赖，默认
-    neural —— 定稿音色 zm_029 / jarvis-high，需要 voices/.venv
+    neural —— Piper jarvis-high；短中文词转拼音，需要 voices/.venv
 
 neural 出任何问题都自动退回 system。播报可以难听，但不能哑。
 """
@@ -19,7 +19,8 @@ CACHE_DIR = os.path.expanduser("~/.jarvis/tts")
 # 按内容寻址的缓存，和上面那个"用完即弃"的临时目录分开：
 # 临时文件 10 分钟就清，这里的要留着复用，清的规则完全不同。
 PHRASE_DIR = os.path.join(CACHE_DIR, "phrases")
-PHRASE_KEEP = 300                      # 最多留多少条，按最近使用淘汰
+PHRASE_KEEP = 200                      # 数量与体积双上限，按最近使用淘汰
+PHRASE_MAX_BYTES = 50 * 1024 * 1024
 # 超过这个长度就不进缓存了：长句几乎不会一字不差地重复，白占磁盘
 PHRASE_MAX_CHARS = 120
 
@@ -171,16 +172,22 @@ def _phrase_hit(key):
     return path
 
 
-def prune_phrases(keep=PHRASE_KEEP):
+def prune_phrases(keep=PHRASE_KEEP, max_bytes=PHRASE_MAX_BYTES):
     try:
-        entries = [(os.path.getmtime(os.path.join(PHRASE_DIR, n)), n)
-                   for n in os.listdir(PHRASE_DIR)]
+        entries = [(os.path.getmtime(os.path.join(PHRASE_DIR, n)), n,
+                    os.path.getsize(os.path.join(PHRASE_DIR, n)))
+                   for n in os.listdir(PHRASE_DIR) if n.endswith(".wav")]
     except OSError:
         return
-    if len(entries) <= keep:
-        return
     entries.sort(reverse=True)
-    for _, name in entries[keep:]:
+    retained_bytes = 0
+    victims = []
+    for index, (_, name, size) in enumerate(entries):
+        if index < keep and retained_bytes + size <= max_bytes:
+            retained_bytes += size
+        else:
+            victims.append(name)
+    for name in victims:
         try:
             os.unlink(os.path.join(PHRASE_DIR, name))
         except OSError:
