@@ -73,6 +73,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <string>JARVIS 需要语音识别把你说的话转成文字（本机离线完成）。</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>JARVIS 需要发送 Apple 事件来发系统通知和控制其他应用。</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>JARVIS 需要读取日历，以便回答接下来的安排并提供及时提醒。</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>JARVIS 需要读取日历，以便回答接下来的安排并提供及时提醒。</string>
   <key>NSDesktopFolderUsageDescription</key>
   <string>JARVIS 需要访问桌面来帮你查找和整理文件。</string>
   <key>NSDocumentsFolderUsageDescription</key>
@@ -91,7 +95,7 @@ clang -O2 -fobjc-arc -mmacosx-version-min=13.0 \
   -Wall -Wno-unused-parameter \
   -I"$HERE" -I"$ROOT/vendor/sherpa-onnx/include" \
   -framework Cocoa -framework WebKit -framework IOKit \
-  -framework Carbon -framework UserNotifications \
+  -framework Carbon -framework UserNotifications -framework EventKit \
   -framework AVFoundation -framework Speech -framework PDFKit \
   -o "$APP/Contents/MacOS/${APP_NAME}" \
   $SOURCES \

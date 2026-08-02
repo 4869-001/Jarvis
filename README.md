@@ -102,11 +102,11 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 
 ## 工具
 
-24 个，固定工具集，没有「让模型自己拼命令行」这条路（`shell_run` 除外，见下）。
+25 个，固定工具集，没有「让模型自己拼命令行」这条路（`shell_run` 除外，见下）。
 
 | 由谁执行 | 工具 |
 |---|---|
-| ObjC 宿主 | `app_open` `app_quit` `app_list_running` `url_open` `finder_reveal` `clipboard_read` `clipboard_write` `system_notify` `system_info` `media_control` |
+| ObjC 宿主 | `app_open` `app_quit` `app_list_running` `url_open` `finder_reveal` `clipboard_read` `clipboard_write` `system_notify` `system_info` `calendar_events` `media_control` |
 | Python Brain | `fs_list` `fs_read` `fs_search` `fs_write` `fs_move` `web_search` `web_fetch` `memory_save` `memory_recall` `memory_list` `memory_update` `memory_forget` `task_history` `shell_run` |
 
 原生那半留在 ObjC，因为 **TCC 权限按 app bundle 授予**：Python 子进程去发 Apple Events

@@ -4,6 +4,7 @@
 
 #import <AppKit/AppKit.h>
 #import <UserNotifications/UserNotifications.h>
+#import <EventKit/EventKit.h>
 #import <IOKit/ps/IOPowerSources.h>
 #import <IOKit/ps/IOPSKeys.h>
 #include <mach/mach.h>
@@ -19,6 +20,7 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
 
 @interface NativeToolExecutor ()
 @property (nonatomic, strong) MediaController *media;
+@property (nonatomic, strong) EKEventStore *eventStore;
 @end
 
 @implementation NativeToolExecutor
@@ -31,6 +33,7 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
                                       @"url_open", @"finder_reveal",
                                       @"clipboard_read", @"clipboard_write",
                                       @"system_notify", @"system_info",
+                                      @"calendar_events",
                                       @"media_control"]];
     });
     return [names containsObject:name];
@@ -54,8 +57,64 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     else if ([name isEqualToString:@"clipboard_write"]) { [self writeClipboard:arguments completion:completion]; }
     else if ([name isEqualToString:@"system_notify"])   { [self notify:arguments completion:completion]; }
     else if ([name isEqualToString:@"system_info"])     { completion([self systemInfo], nil); }
+    else if ([name isEqualToString:@"calendar_events"]) { [self calendarEvents:arguments completion:completion]; }
     else if ([name isEqualToString:@"media_control"])   { [self controlMedia:arguments completion:completion]; }
     else { completion(nil, [NSString stringWithFormat:@"宿主不认识工具 %@", name]); }
+}
+
+#pragma mark - 日历
+
+- (EKEventStore *)eventStore {
+    if (!_eventStore) _eventStore = [[EKEventStore alloc] init];
+    return _eventStore;
+}
+
+- (void)calendarEvents:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    NSInteger hours = [arguments[@"hours"] respondsToSelector:@selector(integerValue)]
+        ? [arguments[@"hours"] integerValue] : 24;
+    NSInteger limit = [arguments[@"limit"] respondsToSelector:@selector(integerValue)]
+        ? [arguments[@"limit"] integerValue] : 20;
+    hours = MAX(1, MIN(hours, 24 * 14));
+    limit = MAX(1, MIN(limit, 50));
+
+    void (^load)(BOOL, NSError *) = ^(BOOL granted, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!granted) {
+                NSString *reason = error.localizedDescription ?: @"请在系统设置 → 隐私与安全性 → 日历中允许 J.A.R.V.I.S.";
+                completion(nil, [NSString stringWithFormat:@"没有日历读取权限：%@", reason]);
+                return;
+            }
+            NSDate *start = [NSDate date];
+            NSDate *end = [start dateByAddingTimeInterval:hours * 3600.0];
+            NSPredicate *predicate = [self.eventStore predicateForEventsWithStartDate:start
+                                                                               endDate:end
+                                                                             calendars:nil];
+            NSArray<EKEvent *> *found = [self.eventStore eventsMatchingPredicate:predicate];
+            NSMutableArray *events = [NSMutableArray array];
+            NSISO8601DateFormatter *iso = [[NSISO8601DateFormatter alloc] init];
+            for (EKEvent *event in found) {
+                if (events.count >= (NSUInteger)limit) break;
+                NSMutableDictionary *item = [@{
+                    @"title": event.title ?: @"（无标题）",
+                    @"start": [iso stringFromDate:event.startDate] ?: @"",
+                    @"end": [iso stringFromDate:event.endDate] ?: @"",
+                    @"all_day": @(event.isAllDay),
+                    @"calendar": event.calendar.title ?: @""
+                } mutableCopy];
+                if (event.location.length) item[@"location"] = event.location;
+                [events addObject:item];
+            }
+            completion(@{@"from": [iso stringFromDate:start] ?: @"",
+                         @"to": [iso stringFromDate:end] ?: @"",
+                         @"count": @(events.count), @"events": events}, nil);
+        });
+    };
+
+    if (@available(macOS 14.0, *)) {
+        [self.eventStore requestFullAccessToEventsWithCompletion:load];
+    } else {
+        [self.eventStore requestAccessToEntityType:EKEntityTypeEvent completion:load];
+    }
 }
 
 #pragma mark - 播放器
