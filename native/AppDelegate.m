@@ -293,11 +293,13 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
     }
     if (self.voice.isListening) { [self.voice stop]; return; }
 
-    // 打断：正在播报就掐掉，正在生成就取消。用户开口的优先级最高。
+    // 打断：正在播报就掐掉；思考、工具执行和生成都取消。用户开口优先级最高。
     if (self.player.isPlaying) {
         [self.player stopAll];
         [self.brain send:@{@"type": @"cancel"}];
-    } else if ([self.brainState isEqualToString:@"thinking"]) {
+    } else if ([self.brainState isEqualToString:@"thinking"]
+               || [self.brainState isEqualToString:@"executing"]
+               || [self.brainState isEqualToString:@"speaking"]) {
         [self.brain send:@{@"type": @"cancel"}];
     }
 
@@ -455,17 +457,25 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
     }];
 }
 
-/// 半双工门（评审 §6.5 第一层）：播报和收音期间都不让唤醒词触发。
-/// 前者防止 Jarvis 把自己念出来的"贾维斯"当成唤醒，后者防止一句话里
-/// 提到"贾维斯"时在收音中途再唤醒一次。
+/// 收音期间一定关闭唤醒词，避免一句话里提到 Jarvis 时再次触发。
+/// 播报期间默认允许唤醒词，以支持用户直接说 Jarvis 打断；AudioHub 的
+/// Voice Processing（AEC）负责先消掉扬声器回声。配置 barge_in=false
+/// 可退回严格半双工。
 ///
 /// 兼职做空闲计时的入口：忙的时候（收音/播报）先把倒计时按住；
 /// 一旦又闲下来——唤醒词之前被空闲关掉了就重新拉起来，没关掉就重新数 30s。
 - (void)refreshWakeGate {
-    BOOL busy = self.player.isPlaying || self.voice.isListening;
-    self.wake.muted = busy;
+    BOOL playing = self.player.isPlaying;
+    BOOL listening = self.voice.isListening;
+    BOOL bargeIn = [self.wakeConfig[@"barge_in"] boolValue];
+    BOOL busy = playing || listening;
+    self.wake.muted = listening || (playing && !bargeIn);
     if (busy || self.sleeping) {
         [self cancelWakeIdleTimer];
+        // 唤醒词可能刚被省电计时器关掉；开始播报时为了允许打断，要临时拉回来。
+        if (playing && bargeIn && !self.wake.isRunning && self.wakeConfig) {
+            [self setUpWakeWordWithConfig:self.wakeConfig];
+        }
         return;
     }
     if (self.wakeConfig && !self.wake.isRunning) {
@@ -526,6 +536,10 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 
 - (void)wakeWordDetector:(WakeWordDetector *)detector didDetect:(NSString *)keyword {
     NSLog(@"[jarvis] 唤醒：%@", keyword);
+    if (self.player.isPlaying) {
+        NSLog(@"[jarvis] 用户打断播报：%@", keyword);
+        [self.conversation pushEvent:@{@"type": @"barge_in", @"keyword": keyword ?: @""}];
+    }
     [self.conversation pushEvent:@{@"type": @"wake", @"keyword": keyword ?: @""}];
     self.pendingWakeContext = [self buildSceneContext];   // 只用这一次，sendUserMessage 里消费掉
     [self toggleVoice];

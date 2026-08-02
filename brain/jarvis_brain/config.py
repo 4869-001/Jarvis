@@ -79,6 +79,9 @@ DEFAULTS = {
         "enabled": True,
         "score": 1.5,
         "threshold": 0.25,
+        # 播报期间仍监听唤醒词；用户说 Jarvis/贾维斯即可停播并接管对话。
+        # AudioHub 的 Voice Processing 会先做回声消除，降低自触发概率。
+        "barge_in": True,
     },
     "voice_input": {
         "enabled": True,
