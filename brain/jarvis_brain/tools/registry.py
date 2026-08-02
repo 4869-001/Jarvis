@@ -148,12 +148,18 @@ TOOLS = [
           "同一件事再次被提到会就地更新，不会记成两条。",
           {"text": _p("要记住的一句话，用第三人称陈述，如「用户偏好简短的回答」"),
            "kind": {"type": "string",
-                    "enum": ["self", "identity", "preference", "project", "fact"],
+                    "enum": ["self", "identity", "preference", "relationship", "project",
+                             "commitment", "episode", "lesson", "fact"],
                     "description": "self Jarvis 对自己的认知；identity 用户是谁；preference 偏好习惯；"
                                    "project 手上在做的事；fact 其他事实。"
                                    "identity 与 preference 会在每一轮对话中常驻"},
            "tags": {"type": "array", "items": _STR,
-                    "description": "便于日后检索的关键词，可选"}},
+                    "description": "便于日后检索的关键词，可选"},
+           "subject": _p("稳定主题键，如 user:name、project:jarvis；同 kind+subject 会更新原条目"),
+           "confidence": {"type": "number", "minimum": 0, "maximum": 1,
+                          "description": "可信度，用户明确陈述填 1"},
+           "status": {"type": "string", "enum": ["pending", "active", "completed", "cancelled"],
+                      "description": "主要用于 commitment/project"}},
           "L1", "python", memory_impl.memory_save, required=["text"]),
 
     _tool("memory_recall",
@@ -165,7 +171,8 @@ TOOLS = [
 
     _tool("memory_list", "列出全部长期记忆。用户问「你都记得我什么」时用。",
           {"kind": {"type": "string",
-                    "enum": ["self", "identity", "preference", "project", "fact"],
+                    "enum": ["self", "identity", "preference", "relationship", "project",
+                             "commitment", "episode", "lesson", "fact"],
                     "description": "只看某一类，不填则全部"}},
           "L0", "python", memory_impl.memory_list),
 
@@ -173,6 +180,14 @@ TOOLS = [
           {"id": _p("记忆 id，来自 memory_list / memory_recall"),
            "query": _p("没有 id 时，按关键词删掉最匹配的一条")},
           "L1", "python", memory_impl.memory_forget),
+
+    _tool("memory_update", "按 id 修正记忆内容、可信度或完成状态。承诺完成、项目结束、"
+          "用户纠正旧事实时使用，避免保留互相冲突的两条记录。",
+          {"id": _p("记忆 id，来自 memory_list / memory_recall"),
+           "text": _p("修正后的内容，可选"),
+           "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+           "status": {"type": "string", "enum": ["pending", "active", "completed", "cancelled"]}},
+          "L1", "python", memory_impl.memory_update, required=["id"]),
 
     _tool("task_history",
           "查看最近工具任务的真实执行步骤、结果与验证证据。用户要求继续、重试、"
@@ -230,6 +245,8 @@ def describe(name, arguments):
         "memory_recall": "回忆「{query}」",
         "memory_list": "翻看长期记忆",
         "memory_forget": "忘掉一条记忆",
+        "memory_update": "更新一条记忆",
+        "task_history": "检查最近任务记录",
         "shell_run": "执行命令：{command}",
     }
     template = templates.get(name)
@@ -255,7 +272,8 @@ _ACTIONS = {
     "fs_write": "写入文件", "fs_move": "移动文件",
     "web_search": "联网搜索", "web_fetch": "抓取网页",
     "memory_save": "记住一件事", "memory_recall": "回忆", "memory_list": "翻看记忆",
-    "memory_forget": "忘掉一条记忆",
+    "memory_forget": "忘掉一条记忆", "memory_update": "更新记忆",
+    "task_history": "检查任务记录",
     "shell_run": "执行命令",
 }
 _TARGET_KEYS = ("path", "source", "command", "name", "url", "text", "query", "id")
