@@ -102,12 +102,12 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 
 ## 工具
 
-22 个，固定工具集，没有「让模型自己拼命令行」这条路（`shell_run` 除外，见下）。
+24 个，固定工具集，没有「让模型自己拼命令行」这条路（`shell_run` 除外，见下）。
 
 | 由谁执行 | 工具 |
 |---|---|
 | ObjC 宿主 | `app_open` `app_quit` `app_list_running` `url_open` `finder_reveal` `clipboard_read` `clipboard_write` `system_notify` `system_info` `media_control` |
-| Python Brain | `fs_list` `fs_read` `fs_search` `fs_write` `fs_move` `web_search` `web_fetch` `memory_save` `memory_recall` `memory_list` `memory_forget` `shell_run` |
+| Python Brain | `fs_list` `fs_read` `fs_search` `fs_write` `fs_move` `web_search` `web_fetch` `memory_save` `memory_recall` `memory_list` `memory_update` `memory_forget` `task_history` `shell_run` |
 
 原生那半留在 ObjC，因为 **TCC 权限按 app bundle 授予**：Python 子进程去发 Apple Events
 会让授权归属漂到解释器上，弹窗写的是 "Python" 而不是 "J.A.R.V.I.S."。
@@ -145,13 +145,15 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 
 ## 长期记忆
 
-跨会话、跨重启都还在的一小撮事实——"这个人是谁、他偏好什么、他手上在做什么"。
+跨会话、跨重启都还在的一小撮事实与经历——"这个人是谁、他偏好什么、手上在做什么、
+还有哪些承诺没有完成"。
 和 `session.history` 分得很清：那是这一轮的短期上下文，按「新会话」就没了；这里的不会。
 
 存在 `~/.jarvis/memory.json`，纯文本，可以直接看、直接改、直接删。
 
 ```jsonc
 {"id": "592e070f", "text": "用户偏好简短的回答", "kind": "preference",
+ "subject": "user:reply-style", "source": "user", "confidence": 1.0,
  "tags": ["style"], "created": 1785590139, "updated": 1785590139, "used": 3}
 ```
 
@@ -160,8 +162,12 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 | `self` | Jarvis 对自己的认知：诞生日、创造者、身份 | ✅ 每轮都注入 |
 | `identity` | 用户是谁：姓名、称呼、身份、设备 | ✅ 每轮都注入 |
 | `preference` | 偏好与习惯 | ✅ 每轮都注入 |
+| `relationship` | 人物及其与用户的关系 | 按当前这句话检索 |
 | `project` | 手上在做的事 | 按当前这句话检索 |
+| `lesson` | 从成功或失败中形成的经验 | 按当前这句话检索 |
 | `fact` | 其他事实 | 按当前这句话检索 |
+| `episode` | 重要的共同经历或已完成任务 | 按当前这句话检索 |
+| `commitment` | 承诺、待办、未来事项 | pending 时每轮最多注入 5 条 |
 
 **检索是关键词重叠，不是向量。** 中文按 2-gram 切、英文按词切，分数用 query 长度归一，
 再按新鲜度微调。几百条这个量级完全够用，而且零依赖——上向量就得引嵌入模型，
@@ -169,8 +175,10 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 因为这两类不该靠关键词碰运气。
 
 **写入只走 `memory_save` 工具，不做隐式抓取。** 隐式抓取会把闲聊噪音塞满记忆，
-而且用户无从知道 Jarvis 到底记了什么。同一件事再次被提到会**就地更新**
-（token Jaccard ≥ 0.6 判定为同一条），否则"我叫 X"改成"我叫 Y"会留下两条互相打架的记忆。
+而且用户无从知道 Jarvis 到底记了什么。同一 `kind + subject` 会**就地更新**；没有
+`subject` 时再用 token Jaccard ≥ 0.6 判断，避免"我叫 X"改成"我叫 Y"留下冲突记录。
+承诺完成或事实被纠正时用 `memory_update` 修改原条目。重要多步骤/写操作任务完成后，
+系统只沉淀一条简短 `episode`，详细工具证据仍留在受限的 `tasks.json`，不会复制进长期记忆。
 
 上限 500 条、单条 600 字、文件最大 512 KB、每轮注入最多 8000 字；超限按
 (命中次数, 更新时间) 淘汰，`self`/`identity`/`preference`（内置身份 + 常驻类别）永不淘汰。

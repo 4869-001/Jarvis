@@ -37,7 +37,18 @@ KINDS = {
     "identity":   "用户是谁：姓名、称呼、身份、所在地、设备",
     "preference": "偏好与习惯：喜欢怎么被回应、常用工具、忌讳",
     "project":    "手上在做的事：项目、目标、进度",
+    "relationship": "人物与关系：家人、同事、客户，以及与用户的关系",
+    "commitment": "尚未完成的承诺、待办或未来事项",
+    "episode":    "共同经历过的事件或完成过的任务（带时间线）",
+    "lesson":     "从成功或失败中形成、以后应复用的经验",
     "fact":       "其他值得记住的事实",
+}
+
+LAYERS = {
+    "core": ("self", "identity", "preference"),
+    "semantic": ("relationship", "project", "lesson", "fact"),
+    "episodic": ("episode",),
+    "prospective": ("commitment",),
 }
 
 # 上下文预算。记忆再有用也不能把 token 吃光——超出就按分数截断。
@@ -60,6 +71,10 @@ BUILTIN_MEMORIES = ({
     "created": 1785513600,
     "updated": 1785674745,
     "used": 0,
+    "subject": "jarvis:origin",
+    "source": "system",
+    "confidence": 1.0,
+    "status": "active",
     "builtin": True,
 },)
 
@@ -126,8 +141,27 @@ class MemoryStore:
 
         # 内置自我记忆与用户记忆保存在同一个文件中，但用稳定 id 去重。
         # 这样不需要额外数据库，也不会在每次启动时重复增长。
-        by_id = {e.get("id"): e for e in self._entries}
+        # v1 memory.json did not require the layered-memory metadata. Normalize it
+        # once on load so every later read can stay fast and branch-free.
+        now = time.time()
         added = False
+        for entry in self._entries:
+            defaults = {
+                "id": uuid.uuid4().hex[:8],
+                "kind": "fact",
+                "tags": [],
+                "created": now,
+                "updated": entry.get("created", now),
+                "used": 0,
+                "source": "system" if entry.get("builtin") else "user",
+                "confidence": 1.0,
+            }
+            for key, value in defaults.items():
+                if key not in entry:
+                    entry[key] = value
+                    added = True
+
+        by_id = {e.get("id"): e for e in self._entries}
         for builtin in BUILTIN_MEMORIES:
             existing = by_id.get(builtin["id"])
             if existing is None:
@@ -136,7 +170,8 @@ class MemoryStore:
                 continue
             # 内置身份以代码中的版本为准：升级时能够修正创造者、日期等事实，
             # 同时保留运行期累计的 used/last_used，不把使用统计清零。
-            for key in ("text", "kind", "tags", "created", "updated", "builtin"):
+            for key in ("text", "kind", "tags", "created", "updated", "subject", "source",
+                        "confidence", "status", "builtin"):
                 if existing.get(key) != builtin.get(key):
                     existing[key] = builtin[key]
                     added = True
@@ -158,7 +193,8 @@ class MemoryStore:
 
     # ------------------------------------------------------------ 写
 
-    def save(self, text, kind="fact", tags=None):
+    def save(self, text, kind="fact", tags=None, subject=None, source="user", confidence=1.0,
+             status=None):
         """新增或就地更新一条。返回 (entry, created)。"""
         text = (text or "").strip()[:MAX_TEXT]
         if not text:
@@ -168,7 +204,8 @@ class MemoryStore:
 
         with self._lock:
             self._load()
-            existing = self._find_similar(text, kind)
+            subject = (subject or "").strip()[:120] or None
+            existing = self._find_similar(text, kind, subject)
             now = time.time()
             if existing:
                 # 同一件事被重复告知就是"更新"，不是"再记一条"——
@@ -176,6 +213,12 @@ class MemoryStore:
                 existing["text"] = text
                 existing["kind"] = kind
                 existing["tags"] = sorted(set(tags or []) | set(existing.get("tags") or []))
+                if subject:
+                    existing["subject"] = subject
+                existing["source"] = source or existing.get("source") or "user"
+                existing["confidence"] = max(0.0, min(float(confidence), 1.0))
+                if status:
+                    existing["status"] = status
                 existing["updated"] = now
                 self._save()
                 return existing, False
@@ -188,7 +231,12 @@ class MemoryStore:
                 "created": now,
                 "updated": now,
                 "used": 0,
+                "subject": subject,
+                "source": source or "user",
+                "confidence": max(0.0, min(float(confidence), 1.0)),
             }
+            if status:
+                entry["status"] = status
             self._entries.append(entry)
             self._evict()
             self._save()
@@ -213,11 +261,32 @@ class MemoryStore:
             self._save()
             return target
 
+    def update(self, entry_id, text=None, status=None, confidence=None):
+        """按稳定 id 修改状态或内容；用于承诺完成、事实纠正。"""
+        with self._lock:
+            self._load()
+            entry = next((e for e in self._entries if e.get("id") == entry_id), None)
+            if not entry:
+                return None
+            if text is not None:
+                cleaned = text.strip()[:MAX_TEXT]
+                if not cleaned:
+                    raise ValueError("记忆内容不能为空")
+                entry["text"] = cleaned
+            if status:
+                entry["status"] = status
+            if confidence is not None:
+                entry["confidence"] = max(0.0, min(float(confidence), 1.0))
+            entry["updated"] = time.time()
+            self._save()
+            return entry
+
     def clear(self):
         with self._lock:
             self._load()
-            count = len(self._entries)
-            self._entries = []
+            removable = [e for e in self._entries if not e.get("builtin")]
+            count = len(removable)
+            self._entries = [e for e in self._entries if e.get("builtin")]
             self._save()
             return count
 
@@ -253,13 +322,11 @@ class MemoryStore:
             if not self._entries:
                 return ""
 
-        pinned = [e for e in self.all() if e["kind"] in PINNED_KINDS][:MAX_PINNED]
+        all_entries = self.all()
+        pinned = [e for e in all_entries if e["kind"] in PINNED_KINDS][:MAX_PINNED]
         pinned_ids = {e["id"] for e in pinned}
         recalled = [e for e in (self.recall(query, limit) if query and limit else [])
                     if e["id"] not in pinned_ids]
-
-        if not pinned and not recalled:
-            return ""
 
         lines = []
         self_memories = [e for e in pinned if e["kind"] == "self"]
@@ -277,6 +344,15 @@ class MemoryStore:
                 lines.append("")
             lines.append("Possibly relevant to what was just said:")
             lines += ["- [%s] %s" % (e["kind"], e["text"]) for e in recalled]
+        commitments = [e for e in all_entries
+                       if e.get("kind") == "commitment" and e.get("status", "pending") == "pending"][:5]
+        if commitments:
+            if lines:
+                lines.append("")
+            lines.append("Open commitments (not completed yet):")
+            lines += ["- %s" % e["text"] for e in commitments]
+        if not lines:
+            return ""
         return "\n".join(lines)[:MAX_CONTEXT_CHARS]
 
     # ------------------------------------------------------------ 内部
@@ -296,6 +372,7 @@ class MemoryStore:
                 continue
             # 用 query 的长度归一，短查询不会因为记忆条目长就被稀释
             score = overlap / float(len(query_tokens))
+            score *= max(0.25, min(float(entry.get("confidence", 1.0)), 1.0))
             # 新鲜度：一个月内的略微加权，避免陈年旧事压过刚说的事
             age_days = (now - entry.get("updated", now)) / 86400.0
             score *= 1.0 + max(0.0, (30.0 - age_days)) / 100.0
@@ -303,7 +380,7 @@ class MemoryStore:
         ranked.sort(key=lambda pair: pair[0], reverse=True)
         return ranked
 
-    def _find_similar(self, text, kind):
+    def _find_similar(self, text, kind, subject=None):
         """找语义上"同一件事"的旧条目。阈值定得高，宁可多记也别错误覆盖。"""
         new_tokens = _tokens(text)
         if not new_tokens:
@@ -311,6 +388,8 @@ class MemoryStore:
         for entry in self._entries:
             if entry["kind"] != kind:
                 continue
+            if subject and entry.get("subject") == subject:
+                return entry
             old_tokens = _tokens(entry["text"])
             if not old_tokens:
                 continue

@@ -110,6 +110,22 @@ class TaskJournal:
             task["status"] = status
             task["updated"] = time.time()
             self._save()
+        # 只把真正有分量的已完成任务沉淀成情景记忆：多步骤，或发生过写操作。
+        # 简单查一次状态不值得永久记住；完整参数/证据仍只留在 tasks.json。
+        steps = task.get("steps") or []
+        important = len(steps) >= 2 or any(s.get("risk") in ("L2", "L3", "L4") for s in steps)
+        if status == "completed" and important:
+            try:
+                from .memory import STORE
+                actions = "、".join(s.get("summary") or s.get("name") or "" for s in steps[:6])
+                when = time.strftime("%Y-%m-%d")
+                STORE.save("%s，Jarvis 与用户完成了：%s。执行：%s" %
+                           (when, task.get("goal") or "一项工具任务", actions),
+                           kind="episode", tags=["task", "completed"],
+                           subject="task:" + task["id"], source="system", confidence=1.0,
+                           status="completed")
+            except Exception:
+                pass                         # 情景沉淀不能反过来拖垮任务收尾
 
     def recent(self, limit=5, recoverable_only=False):
         with self.lock:

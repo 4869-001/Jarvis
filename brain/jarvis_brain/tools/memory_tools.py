@@ -9,7 +9,9 @@ from ..memory import KINDS, STORE
 
 def _brief(entry):
     return {"id": entry["id"], "kind": entry["kind"], "text": entry["text"],
-            "tags": entry.get("tags") or []}
+            "tags": entry.get("tags") or [], "subject": entry.get("subject"),
+            "source": entry.get("source"), "confidence": entry.get("confidence", 1.0),
+            "status": entry.get("status")}
 
 
 def memory_save(args, ctx):
@@ -20,7 +22,10 @@ def memory_save(args, ctx):
     if isinstance(tags, str):
         tags = [t.strip() for t in tags.split(",") if t.strip()]
     try:
-        entry, created = STORE.save(text, args.get("kind") or "fact", tags)
+        entry, created = STORE.save(text, args.get("kind") or "fact", tags,
+                                    subject=args.get("subject"), source="user",
+                                    confidence=args.get("confidence", 1.0),
+                                    status=args.get("status"))
     except ValueError as exc:
         return {"error": str(exc)}
     return {"saved": _brief(entry), "created": created,
@@ -56,3 +61,17 @@ def memory_forget(args, ctx):
     if not entry:
         return {"error": "没找到匹配的记忆"}
     return {"forgot": _brief(entry)}
+
+
+def memory_update(args, ctx):
+    entry_id = (args.get("id") or "").strip()
+    if not entry_id:
+        return {"error": "缺少 id"}
+    try:
+        entry = STORE.update(entry_id, args.get("text"), args.get("status"),
+                             args.get("confidence"))
+    except ValueError as exc:
+        return {"error": str(exc)}
+    if not entry:
+        return {"error": "没找到这条记忆"}
+    return {"updated": _brief(entry)}
