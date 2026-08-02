@@ -132,6 +132,40 @@ header button svg { display: block; width: 13px; height: 13px; }
   background: var(--hot); border: none; box-shadow: 0 0 8px rgba(255, 140, 26, 0.9);
 }
 
+/* ── 唤醒方式 ───────────────────────────────────────── */
+#wakeMode {
+  flex: none; display: none;
+  padding: 10px 14px 12px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(255, 140, 26, 0.055), rgba(255, 140, 26, 0.018));
+}
+#wakeMode.on { display: block; }
+#wakeMode .wake-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+#wakeMode .wake-title { font: 600 10px/1 var(--mono); letter-spacing: 0.15em; color: var(--gold); }
+#wakeMode .wake-summary {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 10px/1.3 var(--mono); color: var(--text-dim);
+}
+#wakeMode .wake-options { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+#wakeMode .opt {
+  position: relative; min-width: 0; padding: 8px 28px 8px 10px; text-align: left;
+  border: 1px solid var(--line); border-radius: 8px; background: rgba(255, 230, 196, 0.018);
+  color: var(--text-dim); cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+#wakeMode .opt:hover { color: var(--gold); border-color: var(--line-lit); background: rgba(255, 140, 26, 0.045); }
+#wakeMode .opt.active {
+  color: var(--hot); border-color: rgba(255, 168, 60, 0.62);
+  background: rgba(255, 140, 26, 0.09); box-shadow: inset 0 0 18px rgba(255, 140, 26, 0.035);
+}
+#wakeMode .opt-name { display: block; font: 600 11px/1.2 var(--mono); letter-spacing: 0.02em; }
+#wakeMode .opt-desc { display: block; margin-top: 4px; font: 10px/1.35 -apple-system, "PingFang SC", sans-serif; opacity: 0.68; }
+#wakeMode .opt::after {
+  content: ''; position: absolute; right: 10px; top: 11px; width: 8px; height: 8px;
+  border: 1px solid var(--line-lit); border-radius: 50%;
+}
+#wakeMode .opt.active::after { background: var(--amber); border-color: var(--gold); box-shadow: 0 0 7px rgba(255, 140, 26, 0.8); }
+
 /* ── 消息区 ─────────────────────────────────────────── */
 #body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #log {
@@ -451,6 +485,7 @@ body.dragging #shell { outline: 1px dashed var(--line-lit); outline-offset: -6px
    缩小之后还是个能打字、能拖文件进来的迷你对话框，不是纯摆设的一条条。
    窗口高度由宿主按顶栏 + 输入区的实际高度缩，见 setCollapsed()。 */
 body.collapsed #opacity,
+body.collapsed #wakeMode,
 body.collapsed #body { display: none; }
 body.collapsed footer { border-top: none; padding: 4px 10px 9px; }
 body.collapsed #input { min-height: 42px; max-height: 88px; }
@@ -480,6 +515,11 @@ body.collapsed #composer { padding-top: 7px; }
     <span id="status">连接中</span>
     <span id="bars"><i></i><i></i><i></i><i></i><i></i></span>
     <button id="btn-opacity" title="面板透明度">◐</button>
+    <button id="btn-wake" title="唤醒方式" aria-label="唤醒方式" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="8" y="3" width="8" height="12" rx="4"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M9 21h6"/>
+      </svg>
+    </button>
     <button id="btn-sleep" title="睡眠：停止聆听与后台任务">☾</button>
     <button id="btn-new" title="新建对话（⌘⇧N）" aria-label="新建对话">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -493,6 +533,23 @@ body.collapsed #composer { padding-top: 7px; }
     <label>OPACITY</label>
     <input id="opacity-range" type="range" min="0" max="100" step="1" value="82">
     <output id="opacity-value">82%</output>
+  </div>
+
+  <div id="wakeMode">
+    <div class="wake-head">
+      <span class="wake-title">WAKE MODE</span>
+      <span class="wake-summary" id="wake-hint"></span>
+    </div>
+    <div class="wake-options">
+      <button class="opt" id="wake-auto" type="button">
+        <span class="opt-name">自动聆听</span>
+        <span class="opt-desc">说“Jarvis / 贾维斯”唤醒</span>
+      </button>
+      <button class="opt" id="wake-manual" type="button">
+        <span class="opt-name">手动唤醒</span>
+        <span class="opt-desc">仅使用 ⌥V 或麦克风按钮</span>
+      </button>
+    </div>
   </div>
 
   <div id="body">
@@ -567,6 +624,7 @@ const S = {
   sleeping: false,
   collapsed: false,
   listening: false,
+  wakeWordEnabled: true,
   hasMessages: false,
   textBeforeVoice: '',   // 开麦前输入框里已有的内容，转写要接在它后面
   pendingConfirm: null,  // 未回答的确认卡片，Esc 优先关它
@@ -1312,6 +1370,10 @@ const opacityRange = $('opacity-range'), opacityValue = $('opacity-value');
 $('btn-opacity').addEventListener('click', () => {
   const open = $('opacity').classList.toggle('on');
   $('btn-opacity').classList.toggle('on', open);
+  if (open) {
+    $('wakeMode').classList.remove('on');
+    $('btn-wake').classList.toggle('on', !S.wakeWordEnabled);
+  }
 });
 opacityRange.addEventListener('input', () => {
   const value = opacityRange.value / 100;
@@ -1323,6 +1385,36 @@ opacityRange.addEventListener('input', () => {
 function applyTint(value) {
   document.documentElement.style.setProperty('--tint', (0.12 + 0.58 * value).toFixed(3));
   opacityValue.textContent = Math.round(value * 100) + '%';
+}
+
+/* ── 唤醒方式 ───────────────────────────────────────── */
+/* 和透明度一个模式：这里只发请求，宿主真正切换唤醒词监听后回一条 wake_word
+   事件，页面照它刷新——避免用户点了但宿主因为权限/模型缺失没生效时，
+   界面却已经"看起来"切换成功。 */
+$('btn-wake').addEventListener('click', () => {
+  const open = $('wakeMode').classList.toggle('on');
+  $('btn-wake').setAttribute('aria-expanded', String(open));
+  $('btn-wake').classList.toggle('on', open || !S.wakeWordEnabled);
+  if (open) {
+    $('opacity').classList.remove('on');
+    $('btn-opacity').classList.remove('on');
+  }
+});
+$('wake-auto').addEventListener('click', () => post('set_wake_word', { enabled: true }));
+$('wake-manual').addEventListener('click', () => post('set_wake_word', { enabled: false }));
+
+function applyWakeMode(cfg) {
+  if (!cfg) return;
+  const enabled = !!cfg.enabled;
+  S.wakeWordEnabled = enabled;
+  $('wake-auto').classList.toggle('active', enabled);
+  $('wake-manual').classList.toggle('active', !enabled);
+  $('wake-auto').setAttribute('aria-pressed', String(enabled));
+  $('wake-manual').setAttribute('aria-pressed', String(!enabled));
+  $('btn-wake').classList.toggle('on', !enabled);   // 手动模式时点亮，提醒"唤醒词已关"
+  $('wake-hint').textContent = enabled
+    ? '自动聆听已开启 · 闲置时进入省电周期'
+    : '后台麦克风已关闭';
 }
 
 /* ── 键盘 ───────────────────────────────────────────── */
@@ -1368,6 +1460,10 @@ function handle(event) {
       applyTint(event.value || 0);
       break;
 
+    case 'wake_word':
+      applyWakeMode(event);
+      break;
+
     case 'connection':
       S.connected = !!event.connected;
       if (!S.connected) {
@@ -1385,6 +1481,7 @@ function handle(event) {
       S.connected = true;
       setState('idle', event.configured ? (event.model || '') : '缺 API Key');
       if (event.models) applyModels(event.models);
+      if (event.wake_word) applyWakeMode(event.wake_word);
       if (!event.configured) {
         const notice = addNotice('还没配 DeepSeek API Key，点这里打开配置文件', true);
         notice.style.cursor = 'pointer';
@@ -1566,6 +1663,7 @@ window.__jarvisReceive = (raw) => {
 
 showEmpty();
 resetBars();
+applyWakeMode({ enabled: true });
 render();
 </script>
 </body>

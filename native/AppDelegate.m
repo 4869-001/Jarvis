@@ -669,6 +669,10 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
         [self runNativeTool:event];
         return;
     }
+    if ([type isEqualToString:@"wake_word"]) {
+        // 用户在设置里切换了唤醒方式：立即生效，不用等下次连接/重启。
+        [self setUpWakeWordWithConfig:event];
+    }
     if ([type isEqualToString:@"tool_confirm_request"]) {
         [self.conversation show];               // 要确认就得让用户看得见
     } else if ([type isEqualToString:@"ready"]) {
@@ -833,6 +837,10 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 
 - (void)conversationPanel:(ConversationPanelController *)panel didRequestRemoveModel:(NSString *)modelID {
     [self.brain send:@{@"type": @"remove_model", @"id": modelID}];
+}
+
+- (void)conversationPanel:(ConversationPanelController *)panel didRequestSetWakeWordEnabled:(BOOL)enabled {
+    [self.brain send:@{@"type": @"set_wake_word", @"enabled": @(enabled)}];
 }
 
 /// 文件卡片上的「在访达中显示 / 打开」。走 NSWorkspace 而不是 open(1)：

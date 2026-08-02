@@ -34,6 +34,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)conversationPanel:(ConversationPanelController *)panel didRequestUpdateModel:(NSDictionary *)fields;
 /// 用户在模型列表里删了一个自定义模型
 - (void)conversationPanel:(ConversationPanelController *)panel didRequestRemoveModel:(NSString *)modelID;
+/// 用户在唤醒方式菜单里切换了自动唤醒词监听 / 仅手动 ⌥V
+- (void)conversationPanel:(ConversationPanelController *)panel didRequestSetWakeWordEnabled:(BOOL)enabled;
 @end
 
 @interface ConversationPanelController : NSObject
