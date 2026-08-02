@@ -1,6 +1,6 @@
-"""定稿音色后端 —— 中文 Kokoro v1.1-zh / zm_029，英文 Piper / jarvis-high。
+"""定稿音色后端 —— Piper / jarvis-high，中文词先转拼音后保持同一音色。
 
-依赖不在系统 Python 里（onnxruntime、kokoro-onnx、misaki[zh]、piper-tts），
+依赖不在系统 Python 里（onnxruntime、piper-tts、pypinyin），
 所以跑在 voices/.venv 里，由这里以**常驻子进程**方式驱动 voices/synth_server.py。
 常驻是必须的：每次新起进程要花约 3 秒加载模型，而播报是逐句的，
 每句都付一遍这个代价就完全没法用了。
@@ -11,7 +11,7 @@ venv 不存在时抛 NotInstalled，上层自动退回 system 后端——
 建 venv：
     cd ~/Projects/Jarvis/voices
     uv venv --python 3.13 .venv
-    uv pip install --python .venv/bin/python kokoro-onnx soundfile "misaki[zh]" piper-tts
+    uv pip install --python .venv/bin/python soundfile piper-tts pypinyin
 """
 import json
 import os
@@ -43,8 +43,7 @@ class _Worker:
     def _spawn(self, preload_lang):
         root = voices_dir()
         executable = python_executable(root)
-        # 把语言告诉它，只加载这一个模型。中英两个模型加起来约 900MB，
-        # 全装进来在 8GB 机器上会把合成本身拖慢。
+        # 参数保留是为了兼容旧协议；worker 现在始终只加载 Jarvis Piper。
         self.process = subprocess.Popen(
             [executable, os.path.join(root, "synth_server.py"), preload_lang],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -95,8 +94,8 @@ def python_executable(root):
 
 
 def synthesize(text, out_path, lang, cfg):
-    speed = cfg.get("zh_speed", 1.0) if lang == "zh" else cfg.get("en_length_scale", 1.0)
-    request_lang = "pinyin" if lang == "en" and re.search(r"[一-鿿㐀-䶿]", text) else lang
+    speed = cfg.get("en_length_scale", 1.0)
+    request_lang = "pinyin" if re.search(r"[一-鿿㐀-䶿]", text) else "en"
     reply = _worker.request({"lang": request_lang, "text": text, "out": out_path,
                              "speed": speed, "zh_speed": cfg.get("zh_speed", 1.0)})
     if not reply.get("ok"):

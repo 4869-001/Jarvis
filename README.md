@@ -97,8 +97,8 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 
 三处容易塌的地方都堵过了：用户明确要求「用中文回答」、工具结果里全是中文、
 以及模型在调工具那一轮写中文前言。系统提示之外还在每次请求末尾贴一条格式提醒
-（工具结果隔得太远时开头的提示压不住）。万一还是漏了中文，TTS 会按内容
-改用中文音色，不会把中文硬塞给英文引擎念成乱码。
+（工具结果隔得太远时开头的提示压不住）。万一整句滑成中文，TTS 会跳过这句语音、
+只保留屏幕文字；英文句中的短中文词则转成拼音，仍由 Jarvis 音色朗读。
 
 ## 工具
 
@@ -272,7 +272,7 @@ Brain 可以用 `detail` 把通用文案覆盖成具体动作（`{"state":"execu
 | 采集 | `AudioHub`：AVAudioEngine + `setVoiceProcessingEnabled:`（AEC/降噪/AGC） | ✅ |
 | 识别 | `SFSpeechRecognizer`，本机 zh-CN / en-US / en-GB **均支持离线** | ✅ |
 | 收句 | 自适应噪声门 + 文本停顿双判据，收句后再等终版结果 | ✅ |
-| 播报 | 中文 Kokoro `zm_029` / 英文 Piper `jarvis-high` → ffmpeg 金属链 | ✅ |
+| 播报 | Piper `jarvis-high`；短中文词转拼音 → ffmpeg 金属链 | ✅ |
 | 回声抑制 | 半双工门（播报/收音时暂停唤醒）+ 系统 Voice Processing | ✅ 前两层 |
 
 ### 识别准确率与速度
@@ -305,7 +305,7 @@ Brain 可以用 `detail` 把通用文案覆盖成具体动作（`{"state":"execu
 
 ```bash
 cd voices && uv venv --python 3.13 .venv
-uv pip install --python .venv/bin/python kokoro-onnx soundfile "misaki[zh]" piper-tts
+uv pip install --python .venv/bin/python soundfile piper-tts pypinyin
 ```
 
 没建 venv 也能跑——会自动回退系统 `say`，只是不像 Jarvis。
@@ -332,16 +332,14 @@ uv pip install --python .venv/bin/python kokoro-onnx soundfile "misaki[zh]" pipe
 
 | 改动 | 效果 |
 |---|---|
-| 预热按配置语言走 | 以前写死预热中文 Kokoro，而 `language = "en"`——**预热的模型一次没用上**，真正要用的 Piper 仍留到首句现加载。常驻内存 484MB → 65MB |
-| 短句按内容缓存（`~/.jarvis/tts/phrases/`） | 重复的句子 0.00s，跨重启有效。上限 300 条按最近使用淘汰 |
+| 只预热单一 Piper 音色 | 不再携带或加载第二套中文模型，避免无效常驻内存 |
+| 短句按内容缓存（`~/.jarvis/tts/phrases/`） | 重复的句子 0.00s，跨重启有效。最多 200 条且总量不超过 50MB |
 | 长句在从句处切段（`tts.max_chars_per_chunk`，默认 80） | 首音提前约一半；代价是分段处语调略平。设 0 关掉 |
-| 语言兜底改用系统音色 | 见下 |
+| 中文边界处理 | 短词转拼音；整句中文格式错误只显示、不播报 |
 
 **⚠️ 中文滑落会拖垮整段对话。** 模型偶尔不守"英文在前"、整句吐中文，
-而常驻合成进程只加载了英文模型。以前这种情况会现场加载 Kokoro（约 500MB + jieba），
-**一句话卡 18~35 秒**，之后两个模型一起常驻、把后面每一句也拖慢。
-现在兜底语言一律走系统音色（约 2 秒，金属链照样过）——
-一次格式跑偏的代价应该是"这句声音略不同"，不是"整个对话卡半分钟"。
+现在没有第二套中文模型：英文回复中的短中文词转成拼音后继续使用 Jarvis 音色；
+如果模型整句输出中文，则屏幕正常显示，但跳过该句播报，避免又慢又不像同一个人。
 
 嫌慢又不想换音色，`tts.backend` 改 `system` 是随时可退的一档：
 同条件三句话实测 11s vs 定稿音色 64s。

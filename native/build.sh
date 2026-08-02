@@ -121,8 +121,19 @@ cp -a "$ROOT/vendor/sherpa-onnx/lib/libsherpa-onnx-c-api.dylib" \
       "$APP/Contents/Frameworks/"
 
 echo "▸ 打包唤醒词模型"
-mkdir -p "$APP/Contents/Resources/models"
-rsync -a --delete "$ROOT/models/" "$APP/Contents/Resources/models/"
+MODEL_DEST="$APP/Contents/Resources/models"
+KWS_DEST="$MODEL_DEST/kws-zh-en"
+mkdir -p "$KWS_DEST"
+# 模型发布包含多套 chunk/精度组合；运行时只引用下面这套 chunk-16 INT8。
+# 只装实际会打开的文件，避免把约 28MB 从未加载的 ONNX 塞进 App。
+cp "$ROOT/models/kws-jarvis.txt" "$MODEL_DEST/"
+for file in \
+  encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx \
+  decoder-epoch-13-avg-2-chunk-16-left-64.onnx \
+  joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx \
+  tokens.txt; do
+  cp "$ROOT/models/kws-zh-en/$file" "$KWS_DEST/"
+done
 
 # ── 签名 ──────────────────────────────────────────────────────────────
 # 优先用固定身份。ad-hoc 签名的 designated requirement 是 cdhash，二进制一改就变，
