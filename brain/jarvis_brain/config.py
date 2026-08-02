@@ -185,3 +185,31 @@ def write_template():
         json.dump(template, fh, ensure_ascii=False, indent=2)
     os.chmod(CONFIG_PATH, 0o600)
     return True
+
+
+def save_section(section, values):
+    """把 config.json 里某个顶层字段的几个键改掉，其余字段（含用户手改的部分）原样保留。
+
+    只用来落用户在前端点出来的设置（如唤醒方式），不走这里的字段不受影响。
+    """
+    raw = {}
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except Exception:
+            raw = {}
+    current = raw.get(section)
+    if not isinstance(current, dict):
+        current = {}
+    current.update(values)
+    raw[section] = current
+    os.makedirs(JARVIS_DIR, exist_ok=True)
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(raw, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp, CONFIG_PATH)
+    try:
+        os.chmod(CONFIG_PATH, 0o600)
+    except OSError:
+        pass

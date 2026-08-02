@@ -132,6 +132,23 @@ header button svg { display: block; width: 13px; height: 13px; }
   background: var(--hot); border: none; box-shadow: 0 0 8px rgba(255, 140, 26, 0.9);
 }
 
+/* ── 唤醒方式 ───────────────────────────────────────── */
+#wakeMode {
+  flex: none; display: none;
+  align-items: center; gap: 9px; padding: 7px 14px;
+  border-bottom: 1px solid var(--line); background: rgba(255, 140, 26, 0.035);
+}
+#wakeMode.on { display: flex; }
+#wakeMode label { font: 10px/1 var(--mono); letter-spacing: 0.14em; color: var(--text-dim); flex: none; }
+#wakeMode .opt {
+  flex: 1; font: 11px/1.3 var(--mono); text-align: center; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 5px; color: var(--text-dim); cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+#wakeMode .opt:hover { color: var(--gold); border-color: var(--line-lit); }
+#wakeMode .opt.active { color: var(--hot); border-color: var(--amber); background: rgba(255, 140, 26, 0.08); }
+#wakeMode .hint { flex: none; width: 100%; font: 10px/1.4 var(--mono); color: var(--text-dim); opacity: 0.75; }
+
 /* ── 消息区 ─────────────────────────────────────────── */
 #body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #log {
@@ -480,6 +497,7 @@ body.collapsed #composer { padding-top: 7px; }
     <span id="status">连接中</span>
     <span id="bars"><i></i><i></i><i></i><i></i><i></i></span>
     <button id="btn-opacity" title="面板透明度">◐</button>
+    <button id="btn-wake" title="唤醒方式">🎙</button>
     <button id="btn-sleep" title="睡眠：停止聆听与后台任务">☾</button>
     <button id="btn-new" title="新建对话（⌘⇧N）" aria-label="新建对话">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -493,6 +511,13 @@ body.collapsed #composer { padding-top: 7px; }
     <label>OPACITY</label>
     <input id="opacity-range" type="range" min="0" max="100" step="1" value="82">
     <output id="opacity-value">82%</output>
+  </div>
+
+  <div id="wakeMode">
+    <label>唤醒</label>
+    <div class="opt" id="wake-auto">自动唤醒词（约 2 分钟省电周期）</div>
+    <div class="opt" id="wake-manual">仅手动 ⌥V</div>
+    <div class="hint" id="wake-hint"></div>
   </div>
 
   <div id="body">
@@ -1325,6 +1350,28 @@ function applyTint(value) {
   opacityValue.textContent = Math.round(value * 100) + '%';
 }
 
+/* ── 唤醒方式 ───────────────────────────────────────── */
+/* 和透明度一个模式：这里只发请求，宿主真正切换唤醒词监听后回一条 wake_word
+   事件，页面照它刷新——避免用户点了但宿主因为权限/模型缺失没生效时，
+   界面却已经"看起来"切换成功。 */
+$('btn-wake').addEventListener('click', () => {
+  const open = $('wakeMode').classList.toggle('on');
+  $('btn-wake').classList.toggle('on', open);
+});
+$('wake-auto').addEventListener('click', () => post('set_wake_word', { enabled: true }));
+$('wake-manual').addEventListener('click', () => post('set_wake_word', { enabled: false }));
+
+function applyWakeMode(cfg) {
+  if (!cfg) return;
+  const enabled = !!cfg.enabled;
+  $('wake-auto').classList.toggle('active', enabled);
+  $('wake-manual').classList.toggle('active', !enabled);
+  $('btn-wake').classList.toggle('on', !enabled);   // 手动模式时点亮，提醒"唤醒词已关"
+  $('wake-hint').textContent = enabled
+    ? '常驻监听"Jarvis / 贾维斯"，闲置 30 秒关麦、2 分钟后自动恢复'
+    : '唤醒词已关闭，只能用 ⌥V 或点麦克风开始说话';
+}
+
 /* ── 键盘 ───────────────────────────────────────────── */
 /* 文档 §12 的 Esc 优先级：确认框 > 停止任务 > 收起面板。
    顺序不能反——任务跑着的时候按 Esc 却把面板收了，是最容易吓到人的一种。 */
@@ -1368,6 +1415,10 @@ function handle(event) {
       applyTint(event.value || 0);
       break;
 
+    case 'wake_word':
+      applyWakeMode(event);
+      break;
+
     case 'connection':
       S.connected = !!event.connected;
       if (!S.connected) {
@@ -1385,6 +1436,7 @@ function handle(event) {
       S.connected = true;
       setState('idle', event.configured ? (event.model || '') : '缺 API Key');
       if (event.models) applyModels(event.models);
+      if (event.wake_word) applyWakeMode(event.wake_word);
       if (!event.configured) {
         const notice = addNotice('还没配 DeepSeek API Key，点这里打开配置文件', true);
         notice.style.cursor = 'pointer';
@@ -1566,6 +1618,7 @@ window.__jarvisReceive = (raw) => {
 
 showEmpty();
 resetBars();
+applyWakeMode({ enabled: true });
 render();
 </script>
 </body>
