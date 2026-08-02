@@ -417,8 +417,13 @@ class SessionCoordinator:
                       "of a refined British butler (dry, understated, precise). "
                       "Output ONLY the translation, nothing else.\n\n" + text)
         try:
+            # 自定义聊天模型（尤其 LongCat）可能首字慢、还带长 reasoning；字幕只是
+            # 机械翻译，不该再让用户为同一个慢模型等一轮。固定走默认 DeepSeek，
+            # 不改变菜单里选中的主回答模型，也不写入对话 history。
+            translator = DeepSeekProvider(self.cfg["deepseek"])
+            translator.max_tokens = min(translator.max_tokens, 1200)
             parts = []
-            for kind, value in self.provider.stream([{"role": "user", "content": prompt}], tools=None):
+            for kind, value in translator.stream([{"role": "user", "content": prompt}], tools=None):
                 if kind == "text":
                     parts.append(value)
             return "".join(parts).strip()
