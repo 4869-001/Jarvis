@@ -18,14 +18,17 @@
   }
   #core{position:fixed;inset:0;width:100%;height:100%;display:block;}
 
-  /* 底部极简遥测 */
+  /* 底部极简遥测。启动完成前不露面——先让 #boot 把那句"我准备好了"说完，
+     两者共用同一个锚点（球体正下方 23vh），交接时是同一个位置的淡入淡出，
+     不是两个东西各占一块地方。 */
   .telemetry{
     position:fixed;left:50%;top:calc(50% + 23vh);transform:translateX(-50%);
     display:flex;align-items:center;gap:14px;white-space:nowrap;
     font-family:'SF Mono',Menlo,monospace;font-size:11px;letter-spacing:3px;
     color:var(--text-dim);text-shadow:0 0 12px rgba(255,140,26,.45);
-    opacity:.85;pointer-events:none;
+    opacity:0;pointer-events:none;transition:opacity .6s ease;
   }
+  .telemetry.on{opacity:.85;}
   .telemetry .mark{color:var(--accent);}
   .telemetry .val{color:#ffd9a8;}
   .telemetry .sep{opacity:.35;}
@@ -34,16 +37,45 @@
     box-shadow:0 0 9px var(--accent);animation:blink 3.2s ease-in-out infinite;
   }
   @keyframes blink{0%,100%{opacity:.45;transform:scale(1)}50%{opacity:1;transform:scale(1.25)}}
+
+  /* 启动进度：宿主按"进程起来→连上大脑→唤醒词就绪"几个真实里程碑推进度，
+     不是假的计时器动画。刻意跟球体分开——这是"系统在准备"的读数，不是球体
+     本身的一部分，摆在球体正下方的遥测区（跟上面 .telemetry 同一个锚点），
+     用一条细进度条而不是套在球体上的圆环，两者不会互相抢视觉重心。
+     全英文：LOADING + 百分比，不出现中文。 */
+  #boot{
+    position:fixed;left:50%;top:calc(50% + 23vh);transform:translateX(-50%);
+    display:flex;flex-direction:column;align-items:center;gap:8px;
+    pointer-events:none;transition:opacity .5s ease;
+  }
+  #boot.done{opacity:0;}
+  #boot .label{
+    font:11px/1 'SF Mono',Menlo,monospace;letter-spacing:3px;color:var(--text-dim);
+    text-shadow:0 0 12px rgba(255,140,26,.45);
+  }
+  #boot .label b{color:#ffd9a8;font-weight:600;letter-spacing:1px;}
+  #boot .bar{
+    width:132px;height:2px;border-radius:2px;overflow:hidden;
+    background:rgba(255,140,26,.16);
+  }
+  #boot .bar i{
+    display:block;height:100%;width:0%;border-radius:2px;background:var(--accent);
+    box-shadow:0 0 8px rgba(255,140,26,.65);transition:width .35s ease;
+  }
 </style>
 </head>
 <body>
   <canvas id="core"></canvas>
+  <div id="boot">
+    <div class="label">LOADING <b id="bootPct">0%</b></div>
+    <div class="bar"><i id="bootFill"></i></div>
+  </div>
   <div class="telemetry">
     <span class="dot"></span>
     <span class="mark">J.A.R.V.I.S.</span>
     <span class="sep">·</span><span id="tState">ONLINE</span>
     <span class="sep">·</span><span class="val" id="tClock">--:--:--</span>
-    <span class="sep">·</span>UP <span class="val" id="tUp">00:00:00</span>
+    <span class="sep">·</span>CPU <span class="val" id="tCpu">--%</span>
   </div>
 
 <script src="three.min.js"></script>
@@ -55,11 +87,16 @@
      2) 限帧渲染；电池供电时降频并卸掉次要层
      3) 窗口被完全遮挡时彻底停帧（由宿主 App 调用 __jarvisSetVisible）
    ========================================================= */
-const BOOT_T = Date.now();
 // stateMix 是"交互态强度"，每帧朝目标缓动。
 // 刻意不记时间戳：动画时钟 t 在停帧期间会落后于 performance.now()，
 // 两者相减求经过时间会在壁纸被遮挡后算出负数，把动效整个反转。
-const FX = { pulse: 0, state: 'idle', stateMix: 0, level: 0, levelMix: 0 };
+// sCore/sHalo/sPulse/sSpin/sSpeed 是各状态的动效参数，每帧朝目标缓动——
+// 光有 stateMix（idle↔活跃）还不够：listening→thinking→speaking 这类"活跃态之间"
+// 的切换在对话里最常见，之前这几个参数是 if/else 直接取值，一帧内硬切，
+// 视觉上就是"一跳"，这才是"过于突兀"的主因，比呼吸曲线本身的问题更大。
+const FX = { pulse: 0, state: 'idle', stateMix: 0, level: 0, levelMix: 0,
+             sCore: 0, sHalo: 0, sPulse: 0, sSpin: 0, sSpeed: 0,
+             sRippleAmp: 0, sRippleOpacity: 0 };
 
 /* ---------- 功耗档位 ---------- */
 const PROFILE = {
@@ -353,6 +390,8 @@ const CORE = (function(){
 
   /* 9b) 交互环波 —— 交互态时从核心向外脉冲扩散 */
   const ringWaves = [];
+  const rwColorCur = new THREE.Color(0xff8a1e);      // 同样缓动着色，别硬跳
+  const rwColorTarget = new THREE.Color();
   const RW_COUNT = 8;
   for (let i = 0; i < RW_COUNT; i++) {
     const geo = new THREE.TorusGeometry(R * 0.60, 0.004, 8, 100);
@@ -362,58 +401,47 @@ const CORE = (function(){
     });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.visible = false;
-    mesh.rotation.x = Math.PI / 2;
+    // Fibonacci 球面分布：8 个环法线均匀在球面上，绝不出现完全水平环（白色横线）
+    const _phi = Math.acos(1 - 2 * (i + 0.5) / RW_COUNT);
+    const _theta = Math.PI * (1 + Math.sqrt(5)) * i;
+    _a.set(Math.sin(_phi)*Math.cos(_theta), Math.cos(_phi), Math.sin(_phi)*Math.sin(_theta));
+    mesh.quaternion.setFromUnitVectors(_b.set(0,0,1), _a);
     mesh.userData = { phase: i / RW_COUNT * Math.PI * 2, nextFire: i * 0.35 };
     root.add(mesh);
     ringWaves.push(mesh);
   }
 
-  /* 9c) 流动光点 —— 沿三条主赤道环流动，交互态时点亮并加速
-          这是"线条动效"的载体：光点贴在环上跑，环本身也在转，
-          视觉上就是能量沿轨道流动，区别于待机时静止的环。 */
+  // 流动光点已删除（环上亮光点像"小疙瘩"，流动感改由球面能量流承担）
   const flowDots = [];
-  (function flowLights(){
-    const COLORS = [0xfff3d0, 0xffc46a, 0xff8a1e];
-    const RADII  = [0.60, 0.80, 0.97];
-    for (let i = 0; i < tori.length; i++){
-      const ring = tori[i];
-      const grp  = new THREE.Group(); ring.add(grp);   // 跟随环的旋转
-      const r    = RADII[i] * R;
-      const N    = 16;
-      for (let j = 0; j < N; j++){
-        const sp = new THREE.Sprite(new THREE.SpriteMaterial({
-          map:glowTex, color:COLORS[i], blending:ADD, depthWrite:false, transparent:true, opacity:0
-        }));
-        sp.scale.setScalar(0.055);
-        sp.position.set(Math.cos(j/N*Math.PI*2)*r, 0, Math.sin(j/N*Math.PI*2)*r);
-        grp.add(sp);
-        flowDots.push({ sp, r, phase: j/N*Math.PI*2, idx:i });
-      }
-    }
-  })();
 
-  /* 9d) 径向喷射粒子池 —— 交互态时从核心向外短寿命喷射
-          区别于静态壳层粒子（始终在球面上）：这些是从中心生成、
-          沿径向飞出、衰减消失的"火花"，让"粒子动效"有方向感和节奏。 */
-  const EJECT_N = 160;
-  const ejectPos = new Float32Array(EJECT_N*3);
-  const ejectCol = new Float32Array(EJECT_N*3);
-  const ejectData = [];
-  for (let i = 0; i < EJECT_N; i++){
-    ejectData.push({ life:0, vel:new THREE.Vector3(), active:false });
-    // color=0 + additive blending = 不可见，复用池子的隐藏机制
-    ejectCol[i*3] = ejectCol[i*3+1] = ejectCol[i*3+2] = 0;
+  /* 9d) 球面能量流 —— 交互态时粒子沿球面大圆流动，带拖尾
+          取代"径向喷射烟花"（从核心直线飞出，廉价）。粒子沿球面大圆
+          流转（像能量在球面流动），每个粒子带 4 段拖尾渐隐，形成连续的
+          "流"而非孤立的"点"。头部白热，拖尾渐隐到金，末段整体淡出。 */
+  const FLOW_N = 56;          // 流动粒子数
+  const TRAIL  = 4;           // 每粒子拖尾点数
+  const FTOTAL = FLOW_N * TRAIL;
+  const flowPos = new Float32Array(FTOTAL*3);
+  const flowCol = new Float32Array(FTOTAL*3);
+  const flowData = [];
+  for (let i = 0; i < FLOW_N; i++){
+    flowData.push({ axis:new THREE.Vector3(), e1:new THREE.Vector3(), e2:new THREE.Vector3(),
+                    angle:0, speed:0, life:0, radius:R*0.98, active:false });
+    for (let j = 0; j < TRAIL; j++){
+      const idx = (i*TRAIL+j)*3;
+      flowCol[idx] = flowCol[idx+1] = flowCol[idx+2] = 0;
+    }
   }
-  const ejectGeo = new THREE.BufferGeometry();
-  ejectGeo.setAttribute('position', new THREE.BufferAttribute(ejectPos, 3));
-  ejectGeo.setAttribute('color',    new THREE.BufferAttribute(ejectCol, 3));
-  const ejectMat = new THREE.PointsMaterial({
-    size:0.058, map:glowTex, vertexColors:true, transparent:true,
+  const flowGeo = new THREE.BufferGeometry();
+  flowGeo.setAttribute('position', new THREE.BufferAttribute(flowPos, 3));
+  flowGeo.setAttribute('color',    new THREE.BufferAttribute(flowCol, 3));
+  const flowMat = new THREE.PointsMaterial({
+    size:0.05, map:glowTex, vertexColors:true, transparent:true,
     opacity:0.95, blending:ADD, depthWrite:false, sizeAttenuation:true
   });
-  const ejectPoints = new THREE.Points(ejectGeo, ejectMat);
-  root.add(ejectPoints);
-  let ejectSpawnAcc = 0;
+  const flowPoints = new THREE.Points(flowGeo, flowMat);
+  root.add(flowPoints);
+  let flowSpawnAcc = 0;
 
   /* 9e) 涟漪球面 —— speaking 时顶点做音乐式径向起伏（上下起伏 + 赤道扩散涟漪）
           取代旧版"辉光增强"的主视觉。一个 wireframe 二十面体，每帧按多波叠加
@@ -431,34 +459,13 @@ const CORE = (function(){
   const rippleMesh = new THREE.Mesh(rippleGeo, rippleMat);
   shell.add(rippleMesh);
   let rippleDirty = false;
+  // 颜色/振幅/透明度以前是每帧直接 setHex + 硬赋值——线框球在叠加混合下，
+  // 状态一切换（尤其切进 thinking 的近白色 0xfff3d0）就是一帧内的硬跳变，
+  // 看起来像"一条白线在闪"。现在跟其它状态参数一样缓动，颜色用 Color.lerp。
+  const rippleColorCur = new THREE.Color(0xff8a1e);
+  const rippleColorTarget = new THREE.Color();
 
-  /* 10) 中央涡旋 —— 外层管倾角，内层管自转 */
-  const vortex = new THREE.Group();
-  vortex.rotation.set(-1.24, 0, 0.30);
-  const vortexSpin = new THREE.Group();
-  vortex.add(vortexSpin);
-  root.add(vortex);
-  (function swirl(){
-    const N = 1100, pos = new Float32Array(N*3), col = new Float32Array(N*3);
-    for (let i = 0; i < N; i++){
-      const f = i/N, arm = i % 3;
-      const a = f*Math.PI*6.4 + arm*(Math.PI*2/3);
-      const rr = 0.04 + Math.pow(f, 0.72)*0.70;
-      const j = (Math.random()-0.5)*0.05;
-      pos[i*3] = Math.cos(a)*rr + j;
-      pos[i*3+1] = (Math.random()-0.5)*0.05*(1-f);
-      pos[i*3+2] = Math.sin(a)*rr + j;
-      tmp.copy(cHot).lerp(cAmb, Math.pow(f, 0.6));
-      col[i*3] = tmp.r; col[i*3+1] = tmp.g; col[i*3+2] = tmp.b;
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    g.setAttribute('color',    new THREE.BufferAttribute(col, 3));
-    vortexSpin.add(new THREE.Points(g, new THREE.PointsMaterial({
-      size:0.046, map:glowTex, vertexColors:true, transparent:true,
-      opacity:0.95, blending:ADD, depthWrite:false, sizeAttenuation:true
-    })));
-  })();
+  // 中央涡旋已删除（反复造成核心区域白色横线闪烁）
 
   /* ---------- 尺寸：按屏幕短边定距，保证球体占比稳定 ---------- */
   const FILL = 0.46;   // 球体（含外缘）占屏幕短边一半的比例
@@ -539,36 +546,48 @@ const CORE = (function(){
     const flowPhase   = phaseOf(stMix, 0.15, 0.65);
     const wavePhase   = phaseOf(stMix, 0.35, 0.85);
     const ejectPhase  = phaseOf(stMix, 0.55, 1.00);
-    // 状态驱动参数
+    // 状态驱动参数——这几个是"目标值"，不直接用，先缓动到 FX.s* 再用
     let stSpin=0, stCore=0, stHalo=0, stPulse=0, stSpeed=0;
     if(st==='listening'){ stCore=0.35;stHalo=0.30;stPulse=0.25;stSpeed=1.3; }
     else if(st==='thinking'){ stSpin=0.80;stCore=0.45;stHalo=0.18;stPulse=0.15;stSpeed=2.2; }
     else if(st==='speaking'){ stCore=0.28;stHalo=0.22;stPulse=0.10;stSpeed=0.8; }
     // idle: all zero → 纯呼吸
 
+    // 缓动速率比 stateMix（1.2s）快一档，~0.5s 到位：
+    // 既不会像 stateMix 那么慢导致"追不上对话节奏"，又足够抹平硬切的跳变。
+    const paramRate = Math.min(1, dt * 3.5);
+    FX.sCore  += (stCore  - FX.sCore)  * paramRate;
+    FX.sHalo  += (stHalo  - FX.sHalo)  * paramRate;
+    FX.sPulse += (stPulse - FX.sPulse) * paramRate;
+    FX.sSpin  += (stSpin  - FX.sSpin)  * paramRate;
+    FX.sSpeed += (stSpeed - FX.sSpeed) * paramRate;
+
     // 真实音量驱动。宿主播报时上报播放振幅，收音时上报麦克风 RMS，
     // 所以球体是真的跟着声音在动，不是在跑一条预设动画。
-    FX.levelMix += (FX.level - FX.levelMix) * Math.min(1, dt * 14);
+    // 起振快、落振慢（attack/release）：播报戛然而止时 level 会瞬间归零，
+    // 之前落振和起振同一个 dt*14 速率，球体跟着在同一帧里"瘪"下去，
+    // 这才是"语音交互结束回到静态呼吸"最刺眼的那一下，比状态参数的硬切更明显。
+    const levelRate = FX.level > FX.levelMix ? dt * 14 : dt * 3.0;
+    FX.levelMix += (FX.level - FX.levelMix) * Math.min(1, levelRate);
     const lvl = FX.levelMix * stMix;
-    stCore  += lvl * 0.55;
-    stHalo  += lvl * 0.45;
-    stPulse += lvl * 0.30;
+    const core  = FX.sCore  + lvl * 0.55;
+    const halo  = FX.sHalo  + lvl * 0.45;
+    const pulseAmt = FX.sPulse + lvl * 0.30;
 
-    spin.rotation.y += (0.10 + p*0.55 + stMix*stSpin) * dt;
+    spin.rotation.y += (0.10 + p*0.55 + stMix*FX.sSpin) * dt;
     spin.rotation.x  = Math.sin(t * 0.23) * 0.10;
     root.scale.setScalar(1 + breath*0.030 + micro*0.008 + p*0.055 + stMix*0.012*Math.sin(t*2.5));
 
     shell.scale.setScalar(1 + breath*0.045 + micro*0.012);
-    starMat.size    = STAR_BASE * (1 + b*0.16 + p*0.55 + stMix*stCore*1.4);
-    starMat.opacity = 0.66 + b*0.28 + p*0.04 + stMix*stPulse*0.2;
-    cityMat.size    = 0.030 * (1 + b*0.22 + p*0.60 + stMix*stCore*0.9);
-    cityMat.opacity = 0.72 + b*0.26 + p*0.04 + stMix*stPulse*0.15;
+    starMat.size    = STAR_BASE * (1 + b*0.16 + p*0.55 + stMix*core*1.4);
+    starMat.opacity = 0.66 + b*0.28 + p*0.04 + stMix*pulseAmt*0.2;
+    cityMat.size    = 0.030 * (1 + b*0.22 + p*0.60 + stMix*core*0.9);
+    cityMat.opacity = 0.72 + b*0.26 + p*0.04 + stMix*pulseAmt*0.15;
 
-    coreLight.scale.setScalar(0.36 + b*0.08 + p*0.30 + stMix*stCore);
-    halo1.material.opacity = 0.17 + b*0.10 + p*0.24 + stMix*stHalo;
-    halo2.material.opacity = 0.09 + b*0.07 + p*0.13 + stMix*stHalo*0.6;
+    coreLight.scale.setScalar(0.36 + b*0.08 + p*0.30 + stMix*core);
+    halo1.material.opacity = 0.17 + b*0.10 + p*0.24 + stMix*halo;
+    halo2.material.opacity = 0.09 + b*0.07 + p*0.13 + stMix*halo*0.6;
 
-    vortexSpin.rotation.y -= (0.55 + p*1.6 + stMix*stSpeed*1.8) * dt;
     // 赤道环交互缩放
     const torusScale = 1 + stMix * 0.12 * Math.sin(t * 3.5);
     tori.forEach(tr => { tr.scale.setScalar(torusScale); });
@@ -576,9 +595,9 @@ const CORE = (function(){
     if (rimMesh) {
       rimMat.opacity = (0.20 + b*0.16 + p*0.28) + stMix * 0.22 * (0.5 + 0.5 * Math.sin(t * 5.2));
     }
-    tori[0].rotation.y += (0.30 + stMix*stSpeed*0.4) * dt;
-    tori[1].rotation.y -= (0.20 + stMix*stSpeed*0.25) * dt;
-    tori[2].rotation.z += (0.12 + stMix*stSpeed*0.15) * dt;
+    tori[0].rotation.y += (0.30 + stMix*FX.sSpeed*0.4) * dt;
+    tori[1].rotation.y -= (0.20 + stMix*FX.sSpeed*0.25) * dt;
+    tori[2].rotation.z += (0.12 + stMix*FX.sSpeed*0.15) * dt;
 
     // -- 交互环波：从核心向外脉冲扩散 --
     if (ringWaves && ringWaves.length) {
@@ -628,89 +647,94 @@ const CORE = (function(){
       }
       // 波纹颜色随状态变化：thinking 偏白热，listening 偏金，speaking 偏暖橙
       if (rwActive) {
-        const rwHex = st === 'thinking' ? 0xfff3d0
-                    : st === 'listening' ? 0xffc46a
-                    : 0xff8a1e;
-        for (let i = 0; i < ringWaves.length; i++) ringWaves[i].material.color.setHex(rwHex);
+        rwColorTarget.setHex(st === 'thinking' ? 0xfff3d0
+                           : st === 'listening' ? 0xffc46a
+                           : 0xff8a1e);
+        rwColorCur.lerp(rwColorTarget, Math.min(1, dt * 3.5));
+        for (let i = 0; i < ringWaves.length; i++) ringWaves[i].material.color.copy(rwColorCur);
       }
     }
 
-    // -- 流动光点：沿赤道环跑，速度和亮度随交互态 --
-    // idle 时几乎不可见（opacity≈0），listening/speaking 中速流动，thinking 最快
-    if (flowDots.length) {
-      const flowSpeed = stMix * (st === 'thinking' ? 3.4
-                          : st === 'listening' ? 2.0
-                          : st === 'speaking' ? 1.5 : 0);
-      const flowOp = stMix * 0.85;
-      for (let i = 0; i < flowDots.length; i++){
-        const d = flowDots[i];
-        d.phase += flowSpeed * dt;
-        d.sp.position.set(Math.cos(d.phase)*d.r, 0, Math.sin(d.phase)*d.r);
-        // 亮度做一点呼吸，避免所有点同时一样亮显得呆板
-        d.sp.material.opacity = flowOp * (0.45 + 0.55*Math.abs(Math.sin(d.phase*1.7 + d.idx)));
-      }
-    }
+    // 流动光点已删除（小疙瘩），流动感由球面能量流承担
 
-    // -- 径向喷射粒子：交互态时从核心向外喷出，衰减消失 --
-    if (ejectData.length) {
-      // 喷射速率：thinking 最高（思绪涌动），listening 中（感知），speaking 低（稳）
-      const ejectRate = stMix * (st === 'thinking' ? 22
+    // -- 球面能量流：粒子沿球面大圆流动，带拖尾，ejectPhase 渐入渐出 --
+    if (flowData.length) {
+      const flowRate = ejectPhase * (st === 'thinking' ? 20
                           : st === 'listening' ? 12
-                          : st === 'speaking' ? 7 : 0);
-      ejectSpawnAcc += ejectRate * dt;
-      let spawnBudget = Math.floor(ejectSpawnAcc);
-      ejectSpawnAcc -= spawnBudget;
-      for (let i = 0; i < EJECT_N && spawnBudget > 0; i++){
-        const d = ejectData[i];
+                          : st === 'speaking' ? 8 : 0);
+      flowSpawnAcc += flowRate * dt;
+      let flowBudget = Math.floor(flowSpawnAcc);
+      flowSpawnAcc -= flowBudget;
+      for (let i = 0; i < FLOW_N && flowBudget > 0; i++){
+        const d = flowData[i];
         if (!d.active){
           d.active = true;
-          d.life = 0.7 + Math.random()*0.7;        // 0.7~1.4s 寿命
-          onSphere(d.vel).multiplyScalar(0.40 + Math.random()*0.40); // 径向速度
-          ejectPos[i*3] = 0; ejectPos[i*3+1] = 0; ejectPos[i*3+2] = 0;
-          tmp.copy(cHot).lerp(cAmb, Math.random()*0.9);
-          ejectCol[i*3] = tmp.r; ejectCol[i*3+1] = tmp.g; ejectCol[i*3+2] = tmp.b;
-          spawnBudget--;
+          d.life = 2.0 + Math.random()*1.5;          // 寿命 2~3.5s，流动一段
+          // 避免水平大圆（法线接近 Y 轴），防止粒子沿赤道流动形成水平光带
+          do { onSphere(d.axis); } while (Math.abs(d.axis.y) > 0.55);
+          _a.set(0,1,0); if (Math.abs(d.axis.y)>0.9) _a.set(1,0,0);
+          d.e1.crossVectors(_a, d.axis).normalize();   // 大圆正交基
+          d.e2.crossVectors(d.axis, d.e1).normalize();
+          d.angle = Math.random()*Math.PI*2;           // 随机起始角
+          d.speed = (0.5 + Math.random()*0.7) * (Math.random()<0.5?1:-1);  // 角速度+方向
+          d.radius = R*(0.96 + Math.random()*0.06);
+          flowBudget--;
         }
       }
-      for (let i = 0; i < EJECT_N; i++){
-        const d = ejectData[i];
+      for (let i = 0; i < FLOW_N; i++){
+        const d = flowData[i];
         if (!d.active){
-          // 隐藏：color 归零（additive 下黑色=不可见），不动 position
-          if (ejectCol[i*3] !== 0){ ejectCol[i*3]=ejectCol[i*3+1]=ejectCol[i*3+2]=0; }
+          for (let j = 0; j < TRAIL; j++){
+            const idx=(i*TRAIL+j)*3; flowCol[idx]=flowCol[idx+1]=flowCol[idx+2]=0;
+          }
           continue;
         }
         d.life -= dt;
         if (d.life <= 0){
           d.active = false;
-          ejectCol[i*3]=ejectCol[i*3+1]=ejectCol[i*3+2]=0;
+          for (let j = 0; j < TRAIL; j++){
+            const idx=(i*TRAIL+j)*3; flowCol[idx]=flowCol[idx+1]=flowCol[idx+2]=0;
+          }
           continue;
         }
-        ejectPos[i*3]   += d.vel.x * dt;
-        ejectPos[i*3+1] += d.vel.y * dt;
-        ejectPos[i*3+2] += d.vel.z * dt;
-        // 末段淡出色：lerp 向黑色
-        if (d.life < 0.35){
-          const k = d.life / 0.35;
-          ejectCol[i*3]   *= k; ejectCol[i*3+1] *= k; ejectCol[i*3+2] *= k;
+        d.angle += d.speed * dt;
+        const lifeFade = Math.min(1, d.life/0.5);      // 末段整体淡出
+        for (let j = 0; j < TRAIL; j++){
+          const trailAngle = d.angle - j*0.055*Math.sign(d.speed);  // 拖尾沿反方向
+          const idx = (i*TRAIL+j)*3;
+          const ca = Math.cos(trailAngle), sa = Math.sin(trailAngle);
+          flowPos[idx]   = (d.e1.x*ca + d.e2.x*sa) * d.radius;
+          flowPos[idx+1] = (d.e1.y*ca + d.e2.y*sa) * d.radius;
+          flowPos[idx+2] = (d.e1.z*ca + d.e2.z*sa) * d.radius;
+          // 头部白热，拖尾渐隐到金
+          const fade = 1 - j/TRAIL;
+          tmp.copy(cHot).lerp(cGold, j/TRAIL);
+          flowCol[idx]   = tmp.r * fade * lifeFade;
+          flowCol[idx+1] = tmp.g * fade * lifeFade;
+          flowCol[idx+2] = tmp.b * fade * lifeFade;
         }
       }
-      ejectGeo.attributes.position.needsUpdate = true;
-      ejectGeo.attributes.color.needsUpdate = true;
+      flowGeo.attributes.position.needsUpdate = true;
+      flowGeo.attributes.color.needsUpdate = true;
     }
 
     // -- 涟漪球面：speaking 时音乐式径向起伏，listening/thinking 低强度 --
     // 这是"球体线条涟漪"的主载体：wireframe 二十面体顶点按多波叠加做径向位移
     if (rippleMesh) {
-      const stRipple = st === 'speaking' ? 1.0
-                     : st === 'thinking' ? 0.45
-                     : st === 'listening' ? 0.30 : 0;
-      const rippleAmp = stMix * (stRipple * 0.045 + lvl * 0.075);
-      rippleMat.opacity = stMix * (st === 'speaking' ? 0.62
-                              : st === 'thinking' ? 0.38
-                              : st === 'listening' ? 0.28 : 0);
-      rippleMat.color.setHex(st === 'thinking' ? 0xfff3d0
-                           : st === 'listening' ? 0xffc46a
-                           : 0xff8a1e);
+      let stRippleAmpT = 0, stRippleOpT = 0;
+      if (st === 'listening')     { stRippleAmpT = 0.30; stRippleOpT = 0.28; }
+      else if (st === 'thinking') { stRippleAmpT = 0.45; stRippleOpT = 0.38; }
+      else if (st === 'speaking') { stRippleAmpT = 1.0;  stRippleOpT = 0.62; }
+      FX.sRippleAmp     += (stRippleAmpT - FX.sRippleAmp)     * paramRate;
+      FX.sRippleOpacity += (stRippleOpT  - FX.sRippleOpacity) * paramRate;
+
+      const rippleAmp = stMix * (FX.sRippleAmp * 0.045 + lvl * 0.075);
+      rippleMat.opacity = stMix * FX.sRippleOpacity;
+      rippleColorTarget.setHex(st === 'thinking' ? 0xfff3d0
+                             : st === 'listening' ? 0xffc46a
+                             : 0xff8a1e);
+      rippleColorCur.lerp(rippleColorTarget, Math.min(1, dt * 3.5));
+      rippleMat.color.copy(rippleColorCur);
       if (rippleAmp > 0.0004) {
         const pos = rippleGeo.attributes.position.array;
         for (let i = 0; i < RIPPLE_N; i++) {
@@ -766,6 +790,18 @@ const CORE = (function(){
   return api;
 })();
 
+/* 宿主在 didFinishNavigation 只知道 DOM/CSS 加载完了，不知道 WebGL 有没有真的
+   画出球体——DOM（进度条文字）合成快，canvas 要等 GPU 进程回一趟才合成，
+   宿主按前者时机淡入窗口就会看见"进度条先到、球体隔一拍才跟上"。
+   两次 rAF 之间浏览器必定已完成一次合成，用这个信号才能保证宿主淡入时
+   球体已经真的在屏幕上，跟进度条同时出现。 */
+requestAnimationFrame(() => requestAnimationFrame(() => {
+  try {
+    window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.jarvisSphereReady
+      && window.webkit.messageHandlers.jarvisSphereReady.postMessage('ready');
+  } catch (e) {}
+}));
+
 /* ---------- 宿主 App 调用的全局钩子 ---------- */
 window.__jarvisSetPower   = p => CORE.setPower(p);
 window.__jarvisSetVisible = v => CORE.setVisible(v);
@@ -787,6 +823,37 @@ window.__jarvisSetState  = s => {
   FX.state = s; syncTelemetryState(s);
 };
 window.__jarvisSetLevel  = v => { FX.level = Math.max(0, Math.min(1, +v || 0)); };
+// 整机 CPU 占用，宿主用 host_statistics 轮询后推过来（见 OrbWindowController）
+window.__jarvisSetCPU = pct => {
+  const el = document.getElementById('tCpu');
+  if (el) el.textContent = Math.round(Math.max(0, Math.min(100, +pct || 0))) + '%';
+};
+
+/* 启动进度：宿主按真实里程碑（进程起来/连上大脑/唤醒词就绪……）推百分比，
+   只认数字，不接受/不显示宿主传来的任何文案——保证这条动效永远只有
+   "LOADING NN%"，不会被谁不小心塞进中文。到 100 就把这条淡出、
+   把球体正下方那条遥测信息淡入接管，两者共用同一个锚点，交接不跳位。
+   新开的屏幕（接显示器）如果启动早就完成了，宿主会直接重推一次 100，
+   不会让新窗口重新播一遍动画。 */
+let bootDone = false;
+window.__jarvisSetBoot = (pct) => {
+  if (bootDone) return;
+  pct = Math.max(0, Math.min(100, +pct || 0));
+  const fill = document.getElementById('bootFill');
+  if (fill) fill.style.width = pct + '%';
+  const pctNode = document.getElementById('bootPct');
+  if (pctNode) pctNode.textContent = Math.round(pct) + '%';
+  if (pct >= 100) {
+    bootDone = true;
+    const boot = document.getElementById('boot');
+    if (boot) {
+      boot.classList.add('done');
+      setTimeout(() => { boot.style.display = 'none'; }, 600);
+    }
+    const tel = document.querySelector('.telemetry');
+    if (tel) tel.classList.add('on');
+  }
+};
 
 // 独立预览 demo：宿主没调用 __jarvisSetState 时，自动循环四种状态，
 // 让交互动效在浏览器直接打开就能看到。加 ?nodemo=1 可关闭。
@@ -801,9 +868,6 @@ setInterval(() => {
   const d = new Date();
   document.getElementById('tClock').textContent =
     [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2,'0')).join(':');
-  const s = Math.floor((Date.now() - BOOT_T)/1000);
-  document.getElementById('tUp').textContent =
-    [Math.floor(s/3600), Math.floor(s/60)%60, s%60].map(n => String(n).padStart(2,'0')).join(':');
 }, 1000);
 </script>
 </body>

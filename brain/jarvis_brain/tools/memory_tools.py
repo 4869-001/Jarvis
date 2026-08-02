@@ -49,7 +49,10 @@ def memory_forget(args, ctx):
     query = (args.get("query") or "").strip() or None
     if not entry_id and not query:
         return {"error": "要么给 id，要么给 query"}
-    entry = STORE.forget(entry_id, query)
+    try:
+        entry = STORE.forget(entry_id, query)
+    except ValueError as exc:
+        return {"error": str(exc)}
     if not entry:
         return {"error": "没找到匹配的记忆"}
     return {"forgot": _brief(entry)}

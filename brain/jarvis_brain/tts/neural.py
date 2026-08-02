@@ -15,6 +15,7 @@ venv 不存在时抛 NotInstalled，上层自动退回 system 后端——
 """
 import json
 import os
+import re
 import subprocess
 import threading
 
@@ -95,7 +96,9 @@ def python_executable(root):
 
 def synthesize(text, out_path, lang, cfg):
     speed = cfg.get("zh_speed", 1.0) if lang == "zh" else cfg.get("en_length_scale", 1.0)
-    reply = _worker.request({"lang": lang, "text": text, "out": out_path, "speed": speed})
+    request_lang = "pinyin" if lang == "en" and re.search(r"[一-鿿㐀-䶿]", text) else lang
+    reply = _worker.request({"lang": request_lang, "text": text, "out": out_path,
+                             "speed": speed, "zh_speed": cfg.get("zh_speed", 1.0)})
     if not reply.get("ok"):
         raise RuntimeError(reply.get("error") or "合成失败")
     if not os.path.exists(out_path):

@@ -17,6 +17,10 @@ static const NSTimeInterval kRetryMax = 5.0;
 @property (nonatomic, assign) NSTimeInterval retryDelay;
 @property (nonatomic, strong) dispatch_queue_t readQueue;
 @property (nonatomic, strong) dispatch_queue_t writeQueue;
+// fd 每次连接/断开都会变；写块是异步执行的，执行时 self.fd 可能已经是下一条连接的了。
+// generation 每次 fd 变化都 +1，写块执行前核对一下，对不上就说明这条连接已经不是
+// 排队时那条了，静默丢弃——总比把上一条连接的半截消息发到新连接上强。
+@property (nonatomic, assign) NSUInteger generation;
 @end
 
 @implementation BrainIPCClient
@@ -71,6 +75,11 @@ static const NSTimeInterval kRetryMax = 5.0;
     int sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock < 0) { [self retryAfterFailure:@"socket() 失败"]; return; }
 
+    // 没有这个，Brain 恰好在我们 send() 期间断开时，系统会给整个进程发 SIGPIPE，
+    // 默认动作是直接杀掉 App——本该是个普通的写失败，不该让宿主整个退出。
+    int noSigPipe = 1;
+    setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, sizeof(noSigPipe));
+
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         close(sock);
         // Brain 还没起来时这是常态，不打日志刷屏
@@ -79,6 +88,7 @@ static const NSTimeInterval kRetryMax = 5.0;
     }
 
     self.fd = sock;
+    self.generation += 1;
     self.connected = YES;
     self.retryDelay = kRetryMin;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -147,6 +157,7 @@ static const NSTimeInterval kRetryMax = 5.0;
 - (void)closeSocket {
     int sock = self.fd;
     self.fd = -1;
+    self.generation += 1;
     self.connected = NO;
     if (sock >= 0) {
         shutdown(sock, SHUT_RDWR);
@@ -166,12 +177,17 @@ static const NSTimeInterval kRetryMax = 5.0;
     NSMutableData *payload = [json mutableCopy];
     [payload appendBytes:"\n" length:1];
 
+    // 排队时把 (fd, generation) 一起捕获；写块真正执行时如果 generation 已经变了，
+    // 说明这条连接排队期间断过或重连过，self.fd 已经是别的连接的了，不能再往上写。
+    NSUInteger queuedGeneration = self.generation;
     dispatch_async(self.writeQueue, ^{
+        if (self.generation != queuedGeneration) return;
         int sock = self.fd;
         if (sock < 0) return;
         const uint8_t *bytes = payload.bytes;
         size_t remaining = payload.length;
         while (remaining > 0) {
+            if (self.generation != queuedGeneration) return;
             ssize_t wrote = send(sock, bytes, remaining, 0);
             if (wrote > 0) { bytes += wrote; remaining -= (size_t)wrote; continue; }
             if (wrote < 0 && errno == EINTR) continue;

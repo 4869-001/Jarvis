@@ -29,10 +29,11 @@ from . import config
 
 MEMORY_PATH = os.path.join(config.JARVIS_DIR, "memory.json")
 
-# 每一轮都注入的类别。这两类是"关于用户本人"的，检索命不中也必须在场。
-PINNED_KINDS = ("identity", "preference")
+# 每一轮都注入的类别。自我身份与用户身份/偏好不该靠关键词碰运气。
+PINNED_KINDS = ("self", "identity", "preference")
 
 KINDS = {
+    "self":       "Jarvis 对自己的认知：诞生日、创造者、身份",
     "identity":   "用户是谁：姓名、称呼、身份、所在地、设备",
     "preference": "偏好与习惯：喜欢怎么被回应、常用工具、忌讳",
     "project":    "手上在做的事：项目、目标、进度",
@@ -44,6 +45,23 @@ MAX_PINNED = 20
 MAX_RECALLED = 8
 MAX_ENTRIES = 500
 MAX_TEXT = 600
+# 单文件硬上限。正常情况下 500 条短记忆远低于这个值；若大量长内容把文件
+# 顶到上限，就淘汰低频、最旧的非内置记录，避免每轮加载和整体写回越来越慢。
+MAX_FILE_BYTES = 512 * 1024
+MAX_CONTEXT_CHARS = 8000
+
+# 稳定 id 让升级、重启和重复初始化都不会多写一条。时间为
+# 2026-08-01 00:00:00 +08:00；这是 Jarvis 的软件诞生日。
+BUILTIN_MEMORIES = ({
+    "id": "jarvis-birthday",
+    "text": "Jarvis 的诞生日是 2026 年 8 月 1 日，创造者是 Frank。Jarvis was created by Frank on August 1, 2026.",
+    "kind": "self",
+    "tags": ["birthday", "creation", "origin", "诞生日", "创造"],
+    "created": 1785513600,
+    "updated": 1785674745,
+    "used": 0,
+    "builtin": True,
+},)
 
 _CJK = re.compile(r"[一-鿿]")
 _WORD = re.compile(r"[a-zA-Z0-9_]+")
@@ -105,6 +123,26 @@ class MemoryStore:
             except Exception:
                 pass
             self._entries = []
+
+        # 内置自我记忆与用户记忆保存在同一个文件中，但用稳定 id 去重。
+        # 这样不需要额外数据库，也不会在每次启动时重复增长。
+        by_id = {e.get("id"): e for e in self._entries}
+        added = False
+        for builtin in BUILTIN_MEMORIES:
+            existing = by_id.get(builtin["id"])
+            if existing is None:
+                self._entries.append(dict(builtin))
+                added = True
+                continue
+            # 内置身份以代码中的版本为准：升级时能够修正创造者、日期等事实，
+            # 同时保留运行期累计的 used/last_used，不把使用统计清零。
+            for key in ("text", "kind", "tags", "created", "updated", "builtin"):
+                if existing.get(key) != builtin.get(key):
+                    existing[key] = builtin[key]
+                    added = True
+        if added:
+            self._evict()
+            self._save()
 
     def _save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -169,6 +207,8 @@ class MemoryStore:
                     target = ranked[0][1]
             if not target:
                 return None
+            if target.get("builtin"):
+                raise ValueError("内置身份记忆不能通过对话删除")
             self._entries.remove(target)
             self._save()
             return target
@@ -222,15 +262,22 @@ class MemoryStore:
             return ""
 
         lines = []
-        if pinned:
+        self_memories = [e for e in pinned if e["kind"] == "self"]
+        user_memories = [e for e in pinned if e["kind"] != "self"]
+        if self_memories:
+            lines.append("Known about yourself (always true):")
+            lines += ["- %s" % e["text"] for e in self_memories]
+        if user_memories:
+            if lines:
+                lines.append("")
             lines.append("Known about the user (always true):")
-            lines += ["- [%s] %s" % (e["kind"], e["text"]) for e in pinned]
+            lines += ["- [%s] %s" % (e["kind"], e["text"]) for e in user_memories]
         if recalled:
             if lines:
                 lines.append("")
             lines.append("Possibly relevant to what was just said:")
             lines += ["- [%s] %s" % (e["kind"], e["text"]) for e in recalled]
-        return "\n".join(lines)
+        return "\n".join(lines)[:MAX_CONTEXT_CHARS]
 
     # ------------------------------------------------------------ 内部
 
@@ -273,13 +320,26 @@ class MemoryStore:
         return None
 
     def _evict(self):
-        """超上限就淘汰：pinned 类别永不淘汰，其余按 (命中次数, 更新时间) 留新留常用。"""
-        if len(self._entries) <= MAX_ENTRIES:
-            return
-        keep = [e for e in self._entries if e["kind"] in PINNED_KINDS]
-        rest = [e for e in self._entries if e["kind"] not in PINNED_KINDS]
-        rest.sort(key=lambda e: (e.get("used", 0), e.get("updated", 0)), reverse=True)
-        self._entries = keep + rest[:max(0, MAX_ENTRIES - len(keep))]
+        """同时约束条目数和序列化体积，内置身份和 pinned 类别永不淘汰。
+
+        pinned（self/identity/preference）走 context_block 的常驻注入，不经
+        recall()，used 永远是 0——按 (used, updated) 挑受害者的话，它们会最先
+        被淘汰，跟"这两类不该靠关键词碰运气"的设计初衷正好相反。数量已经靠
+        MAX_PINNED 在读取时软限制（只注入最近更新的 20 条），不需要在这里
+        再靠强制删除控制体量。
+        """
+        def encoded_size():
+            payload = {"version": 1, "entries": self._entries}
+            return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+
+        while len(self._entries) > MAX_ENTRIES or encoded_size() > MAX_FILE_BYTES:
+            candidates = [e for e in self._entries
+                          if not e.get("builtin") and e.get("kind") not in PINNED_KINDS]
+            if not candidates:
+                break
+            victim = min(candidates,
+                         key=lambda e: (e.get("used", 0), e.get("updated", 0)))
+            self._entries.remove(victim)
 
 
 STORE = MemoryStore()

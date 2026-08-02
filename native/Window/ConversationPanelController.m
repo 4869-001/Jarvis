@@ -2,6 +2,7 @@
 #import "JarvisPaths.h"
 
 #import <WebKit/WebKit.h>
+#import <PDFKit/PDFKit.h>
 
 static NSString *const kBridgeName = @"jarvis";
 static NSString *const kOpacityDefaultsKey = @"JarvisPanelOpacity";
@@ -26,9 +27,42 @@ static const CGFloat kMinExpandedHeight = 200.0;
 
 #pragma mark -
 
-@interface ConversationPanelController () <WKScriptMessageHandler, WKNavigationDelegate>
+/// WKWebView 会吃掉整块内容区的 mouseDown（它的 -mouseDownCanMoveWindow 固定是 NO，
+/// 这是为了保证网页里的文字选择/链接点击不被窗口拖拽截胡），所以纯 CSS 的
+/// `-webkit-app-region: drag` 在 WKWebView 里从来没被实现过，只是被静默忽略——
+/// 面板"偶尔能拖动"其实是点到了 webView 视觉范围之外的极小缝隙。
+/// 这里在原生层重建同样的语义：页面把顶栏（可拖）和按钮（不可拖）的矩形上报，
+/// -hitTest: 在可拖区域内且不落在任何按钮矩形里时返回 nil，
+/// 命中测试会落到下一层的毛玻璃视图（默认 mouseDownCanMoveWindow = YES），
+/// movableByWindowBackground 才真正生效。
+@interface JarvisDraggableWebView : WKWebView
+@property (nonatomic, assign) NSRect dragRegion;
+@property (nonatomic, strong) NSArray<NSValue *> *excludeRegions;
+@end
+
+@implementation JarvisDraggableWebView
+
+- (NSView *)hitTest:(NSPoint)point {
+    if (!NSIsEmptyRect(self.dragRegion)) {
+        NSPoint local = [self convertPoint:point fromView:self.superview];
+        if (NSPointInRect(local, self.dragRegion)) {
+            BOOL excluded = NO;
+            for (NSValue *value in self.excludeRegions) {
+                if (NSPointInRect(local, value.rectValue)) { excluded = YES; break; }
+            }
+            if (!excluded) return nil;
+        }
+    }
+    return [super hitTest:point];
+}
+
+@end
+
+#pragma mark -
+
+@interface ConversationPanelController () <WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate>
 @property (nonatomic, strong) ConversationPanel *panel;
-@property (nonatomic, strong) WKWebView *webView;
+@property (nonatomic, strong) JarvisDraggableWebView *webView;
 @property (nonatomic, strong) NSVisualEffectView *blur;
 @property (nonatomic, assign) BOOL pageReady;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *pendingEvents;
@@ -60,8 +94,9 @@ static const CGFloat kMinExpandedHeight = 200.0;
     config.userContentController = content;
 
     NSRect frame = NSMakeRect(0, 0, kPanelWidth, kPanelHeight);
-    self.webView = [[WKWebView alloc] initWithFrame:frame configuration:config];
+    self.webView = [[JarvisDraggableWebView alloc] initWithFrame:frame configuration:config];
     self.webView.navigationDelegate = self;
+    self.webView.UIDelegate = self;
     self.webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     @try {
         [self.webView setValue:@NO forKey:@"drawsBackground"];
@@ -118,6 +153,35 @@ static const CGFloat kMinExpandedHeight = 200.0;
 
     NSURL *page = [JarvisPaths webPage:@"conversation.html"];
     [self.webView loadFileURL:page allowingReadAccessToURL:[page URLByDeletingLastPathComponent]];
+
+    // 技能列表 + 常用短语频率都是面板自己的东西，不用等 Brain——self.panel 已经赋值，
+    // pushEvent 里的 buildIfNeeded 会在守卫那行直接返回，不会递归重建。
+    [self pushEvent:@{@"type": @"skills", @"items": [self loadSkills]}];
+    [self pushEvent:@{@"type": @"usage", @"items": [self topUsageItemsFromCounts:[self loadUsageCounts]]}];
+}
+
+#pragma mark - 网页文件选择
+
+/// WKWebView 不会自动替网页里的 <input type="file"> 弹出文件选择器；必须由
+/// WKUIDelegate 接住请求。缺这段时输入区的「＋」事件虽然触发了，界面却毫无反应。
+- (void)webView:(WKWebView *)webView
+runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
+initiatedByFrame:(WKFrameInfo *)frame
+completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = parameters.allowsDirectories;
+    panel.allowsMultipleSelection = parameters.allowsMultipleSelection;
+    panel.resolvesAliases = YES;
+
+    void (^finish)(NSModalResponse) = ^(NSModalResponse result) {
+        completionHandler(result == NSModalResponseOK ? panel.URLs : nil);
+    };
+    if (self.panel) {
+        [panel beginSheetModalForWindow:self.panel completionHandler:finish];
+    } else {
+        finish([panel runModal]);
+    }
 }
 
 /// 默认贴主屏右下角。用户拖过之后 frameAutosaveName 会接管，不再重定位。
@@ -297,12 +361,30 @@ static const CGFloat kMinExpandedHeight = 200.0;
         NSNumber *header = body[@"header"];
         [self setCollapsed:[body[@"collapsed"] boolValue]
               headerHeight:[header isKindOfClass:[NSNumber class]] ? header.doubleValue : 56.0];
+    } else if ([action isEqualToString:@"drag_zones"]) {
+        [self applyDragZonesFromMessage:body];
+    } else if ([action isEqualToString:@"extract_file"]) {
+        [self extractFileFromMessage:body];
     } else if ([action isEqualToString:@"sleep"]) {
         [self.delegate conversationPanel:self didRequestSleep:[body[@"sleeping"] boolValue]];
     } else if ([action isEqualToString:@"speak"]) {
         NSString *text = body[@"text"];
         if ([text isKindOfClass:[NSString class]] && text.length) {
             [self.delegate conversationPanel:self didRequestSpeak:text];
+        }
+    } else if ([action isEqualToString:@"set_model"]) {
+        NSString *modelID = body[@"id"];
+        if ([modelID isKindOfClass:[NSString class]] && modelID.length) {
+            [self.delegate conversationPanel:self didRequestSetModel:modelID];
+        }
+    } else if ([action isEqualToString:@"add_model"]) {
+        [self.delegate conversationPanel:self didRequestAddModel:body];
+    } else if ([action isEqualToString:@"update_model"]) {
+        [self.delegate conversationPanel:self didRequestUpdateModel:body];
+    } else if ([action isEqualToString:@"remove_model"]) {
+        NSString *modelID = body[@"id"];
+        if ([modelID isKindOfClass:[NSString class]] && modelID.length) {
+            [self.delegate conversationPanel:self didRequestRemoveModel:modelID];
         }
     } else if ([action isEqualToString:@"open_path"]) {
         NSString *path = body[@"path"];
@@ -324,6 +406,186 @@ static const CGFloat kMinExpandedHeight = 200.0;
     } else if ([action isEqualToString:@"open_config"]) {
         [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:[JarvisPaths configPath]]];
     }
+}
+
+/// 页面上报顶栏可拖区域，及区域内不可拖的按钮矩形（都是 getBoundingClientRect()
+/// 的原始值，坐标系跟 WKWebView 自身的 flipped bounds 完全一致，不用转换）。
+- (void)applyDragZonesFromMessage:(NSDictionary *)body {
+    NSRect (^rectFrom)(id) = ^NSRect(id raw) {
+        if (![raw isKindOfClass:[NSDictionary class]]) return NSZeroRect;
+        NSDictionary *r = raw;
+        return NSMakeRect([r[@"x"] doubleValue], [r[@"y"] doubleValue],
+                           [r[@"w"] doubleValue], [r[@"h"] doubleValue]);
+    };
+
+    self.webView.dragRegion = rectFrom(body[@"header"]);
+
+    NSMutableArray<NSValue *> *excludes = [NSMutableArray array];
+    NSArray *buttons = body[@"buttons"];
+    if ([buttons isKindOfClass:[NSArray class]]) {
+        for (id raw in buttons) [excludes addObject:[NSValue valueWithRect:rectFrom(raw)]];
+    }
+    self.webView.excludeRegions = excludes;
+}
+
+#pragma mark - 技能
+
+/// 输入框敲 "/" 弹出的常用短语菜单，两部分拼起来：这几条固定的预设技能
+/// （改配置只能手改 ~/.jarvis/skills.json，面板里没有编辑界面——
+/// 真正常用的东西应该是"说得多"，不是"手动收藏"），
+/// 加上下面按频率自动涌现的历史高频原话。
+- (NSArray<NSDictionary *> *)defaultSkills {
+    return @[
+        @{@"id": @"s1", @"text": @"找一下桌面上的 Markdown 文档"},
+        @{@"id": @"s2", @"text": @"打开 Safari，再看看我这台 Mac 现在状态怎么样"},
+        @{@"id": @"s3", @"text": @"把桌面上的 Jarvis-temp-test.txt 重命名成 test-renamed.txt"},
+    ];
+}
+
+/// 第一次跑没有这个文件就把默认三条落盘。
+- (NSArray<NSDictionary *> *)loadSkills {
+    NSData *data = [NSData dataWithContentsOfFile:[JarvisPaths skillsPath]];
+    if (data) {
+        id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        if ([parsed isKindOfClass:[NSArray class]]) return parsed;
+    }
+    NSArray *defaults = [self defaultSkills];
+    [self writeSkills:defaults];
+    return defaults;
+}
+
+- (void)writeSkills:(NSArray *)items {
+    NSData *data = [NSJSONSerialization dataWithJSONObject:items options:NSJSONWritingPrettyPrinted error:nil];
+    if (data) [data writeToFile:[JarvisPaths skillsPath] atomically:YES];
+}
+
+#pragma mark - 常用短语频率
+
+static const NSInteger kUsageMaxEntries = 300;   // 超过这个数就修剪，文件不能无限涨
+static const NSInteger kUsagePruneKeep  = 150;
+static const NSInteger kUsageTopN       = 8;     // "/" 菜单里最多展示几条高频项
+
+- (NSMutableDictionary<NSString *, NSNumber *> *)loadUsageCounts {
+    NSData *data = [NSData dataWithContentsOfFile:[JarvisPaths skillUsagePath]];
+    if (!data) return [NSMutableDictionary dictionary];
+    id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    return [parsed isKindOfClass:[NSDictionary class]] ? [parsed mutableCopy] : [NSMutableDictionary dictionary];
+}
+
+- (void)saveUsageCounts:(NSDictionary<NSString *, NSNumber *> *)counts {
+    NSDictionary *toSave = counts;
+    if (counts.count > kUsageMaxEntries) {
+        // 修剪只留高频那批：偶发的一次性长尾没必要陪着文件一起长胖
+        NSArray *keys = [counts keysSortedByValueUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
+            return [b compare:a];
+        }];
+        NSMutableDictionary *pruned = [NSMutableDictionary dictionary];
+        NSInteger keep = MIN(kUsagePruneKeep, (NSInteger)keys.count);
+        for (NSString *key in [keys subarrayWithRange:NSMakeRange(0, keep)]) pruned[key] = counts[key];
+        toSave = pruned;
+    }
+    NSData *data = [NSJSONSerialization dataWithJSONObject:toSave options:NSJSONWritingPrettyPrinted error:nil];
+    if (data) [data writeToFile:[JarvisPaths skillUsagePath] atomically:YES];
+}
+
+/// 只说过一次的不算"常说"——不然随便一句话都会立刻挤进菜单，反而是噪音。
+- (NSArray<NSDictionary *> *)topUsageItemsFromCounts:(NSDictionary<NSString *, NSNumber *> *)counts {
+    NSArray *keys = [counts keysSortedByValueUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
+        return [b compare:a];
+    }];
+    NSMutableArray *items = [NSMutableArray array];
+    for (NSString *key in keys) {
+        if (items.count >= kUsageTopN) break;
+        if (counts[key].integerValue < 2) continue;
+        [items addObject:@{@"text": key, @"count": counts[key]}];
+    }
+    return items;
+}
+
+- (void)trackUsage:(NSString *)text {
+    NSString *trimmed = [text stringByTrimmingCharactersInSet:
+                          [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    // 太长的多半是夹了附件内容或场景信息，不是"一句常用话"，且反正也不会重复
+    if (trimmed.length == 0 || trimmed.length > 200) return;
+
+    NSMutableDictionary<NSString *, NSNumber *> *counts = [self loadUsageCounts];
+    counts[trimmed] = @([counts[trimmed] integerValue] + 1);
+    [self saveUsageCounts:counts];
+    [self pushEvent:@{@"type": @"usage", @"items": [self topUsageItemsFromCounts:counts]}];
+}
+
+#pragma mark - 文件解析
+
+/// doc/docx/pdf/rtf 在页面里解析不了文档结构，页面把字节转 base64 发过来，
+/// 这边用 PDFKit / NSAttributedString 原生提文字——都是系统自带框架，
+/// 不为了这个给 Brain 添 Python 依赖（Brain 只用标准库这条线是刻意的）。
+/// 解析挪到后台队列，大文件不卡 UI；回调切回主线程才能碰 WKWebView。
+- (void)extractFileFromMessage:(NSDictionary *)body {
+    NSString *requestID = body[@"request_id"];
+    NSString *name = body[@"name"];
+    NSString *ext = [body[@"ext"] lowercaseString];
+    NSString *base64 = body[@"data_base64"];
+    if (![requestID isKindOfClass:[NSString class]] || ![base64 isKindOfClass:[NSString class]]) return;
+
+    NSData *data = [[NSData alloc] initWithBase64EncodedString:base64
+                                                         options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    if (!data) {
+        [self replyFileExtraction:requestID ok:NO payload:@"文件解码失败"];
+        return;
+    }
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *error = nil;
+        NSString *text = [ext isEqualToString:@"pdf"]
+            ? [self extractPDFText:data error:&error]
+            : [self extractDocumentText:data ext:ext error:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (text) [self replyFileExtraction:requestID ok:YES payload:text];
+            else [self replyFileExtraction:requestID ok:NO
+                                    payload:error ?: [NSString stringWithFormat:@"解析失败：%@", name]];
+        });
+    });
+}
+
+- (NSString *)extractPDFText:(NSData *)data error:(NSString **)error {
+    PDFDocument *doc = [[PDFDocument alloc] initWithData:data];
+    if (!doc) { *error = @"不是有效的 PDF"; return nil; }
+
+    NSMutableString *text = [NSMutableString string];
+    for (NSInteger i = 0; i < doc.pageCount; i++) {
+        NSString *pageText = [doc pageAtIndex:i].string;
+        if (pageText.length == 0) continue;
+        if (text.length) [text appendString:@"\n\n"];
+        [text appendString:pageText];
+    }
+    if (text.length == 0) { *error = @"PDF 里没有可提取的文字（可能是扫描件）"; return nil; }
+    return text;
+}
+
+- (NSString *)extractDocumentText:(NSData *)data ext:(NSString *)ext error:(NSString **)error {
+    NSString *docType = NSPlainTextDocumentType;
+    if ([ext isEqualToString:@"docx"])      docType = NSOfficeOpenXMLTextDocumentType;
+    else if ([ext isEqualToString:@"doc"])  docType = NSDocFormatTextDocumentType;
+    else if ([ext isEqualToString:@"rtf"])  docType = NSRTFTextDocumentType;
+
+    NSError *nsError = nil;
+    NSAttributedString *attributed =
+        [[NSAttributedString alloc] initWithData:data
+                                          options:@{NSDocumentTypeDocumentAttribute: docType}
+                               documentAttributes:nil
+                                            error:&nsError];
+    if (!attributed) {
+        *error = nsError.localizedDescription ?: @"文档解析失败";
+        return nil;
+    }
+    return attributed.string;
+}
+
+- (void)replyFileExtraction:(NSString *)requestID ok:(BOOL)ok payload:(NSString *)payload {
+    NSString *js = [NSString stringWithFormat:
+        @"window.__jarvisFileExtracted && window.__jarvisFileExtracted(%@, %@, %@)",
+        [self jsStringLiteral:requestID], ok ? @"true" : @"false", [self jsStringLiteral:payload ?: @""]];
+    [self.webView evaluateJavaScript:js completionHandler:nil];
 }
 
 #pragma mark - WKNavigationDelegate

@@ -68,17 +68,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key>   <true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
   <key>NSMicrophoneUsageDescription</key>
-  <string>J.A.R.V.I.S. 需要麦克风来听你说话。</string>
+  <string>JARVIS 需要麦克风来听你说话。</string>
   <key>NSSpeechRecognitionUsageDescription</key>
-  <string>J.A.R.V.I.S. 需要语音识别把你说的话转成文字（本机离线完成）。</string>
+  <string>JARVIS 需要语音识别把你说的话转成文字（本机离线完成）。</string>
   <key>NSAppleEventsUsageDescription</key>
-  <string>J.A.R.V.I.S. 需要发送 Apple 事件来发系统通知和控制其他应用。</string>
+  <string>JARVIS 需要发送 Apple 事件来发系统通知和控制其他应用。</string>
   <key>NSDesktopFolderUsageDescription</key>
-  <string>J.A.R.V.I.S. 需要访问桌面来帮你查找和整理文件。</string>
+  <string>JARVIS 需要访问桌面来帮你查找和整理文件。</string>
   <key>NSDocumentsFolderUsageDescription</key>
-  <string>J.A.R.V.I.S. 需要访问文稿来帮你查找和整理文件。</string>
+  <string>JARVIS 需要访问文稿来帮你查找和整理文件。</string>
   <key>NSDownloadsFolderUsageDescription</key>
-  <string>J.A.R.V.I.S. 需要访问下载文件夹来帮你查找和整理文件。</string>
+  <string>JARVIS 需要访问下载文件夹来帮你查找和整理文件。</string>
 </dict>
 </plist>
 PLIST
@@ -92,7 +92,7 @@ clang -O2 -fobjc-arc -mmacosx-version-min=13.0 \
   -I"$HERE" -I"$ROOT/vendor/sherpa-onnx/include" \
   -framework Cocoa -framework WebKit -framework IOKit \
   -framework Carbon -framework UserNotifications \
-  -framework AVFoundation -framework Speech \
+  -framework AVFoundation -framework Speech -framework PDFKit \
   -o "$APP/Contents/MacOS/${APP_NAME}" \
   $SOURCES \
   -L"$ROOT/vendor/sherpa-onnx/lib" -lsherpa-onnx-c-api \

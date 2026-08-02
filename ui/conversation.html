@@ -63,7 +63,6 @@ header {
   height: 56px; padding: 0 8px 0 78px;
   display: flex; align-items: center; gap: 8px;
   border-bottom: 1px solid var(--line);
-  -webkit-app-region: drag;
 }
 
 #dot {
@@ -105,17 +104,18 @@ header {
 }
 
 header button {
-  -webkit-app-region: no-drag; flex: none;
+  flex: none;
   background: none; border: 1px solid var(--line); border-radius: 5px;
   color: var(--text-dim); font-size: 11px; padding: 3px 7px; cursor: pointer;
   transition: color 0.15s, border-color 0.15s;
 }
 header button:hover { color: var(--gold); border-color: var(--line-lit); }
 header button.on { color: var(--amber); border-color: var(--line-lit); }
+header button svg { display: block; width: 13px; height: 13px; }
 
 /* ── 透明度滑块 ─────────────────────────────────────── */
 #opacity {
-  -webkit-app-region: no-drag; flex: none; display: none;
+  flex: none; display: none;
   align-items: center; gap: 9px; padding: 7px 14px;
   border-bottom: 1px solid var(--line); background: rgba(255, 140, 26, 0.035);
 }
@@ -271,21 +271,81 @@ header button.on { color: var(--amber); border-color: var(--line-lit); }
 .notice.bad { color: var(--bad); }
 .notice .link { color: var(--gold); cursor: pointer; text-decoration: underline; margin: 0 4px; }
 
-/* ── 空状态 ─────────────────────────────────────────── */
-#empty { margin: auto; text-align: center; padding: 0 18px; }
-#empty b {
-  display: block; font: 600 11px/1 var(--mono); letter-spacing: 0.22em;
-  color: var(--gold); margin-bottom: 10px; text-shadow: 0 0 14px rgba(255, 140, 26, 0.5);
+/* ── 技能 / 常用短语菜单（输入框敲 "/" 触发）──────────── */
+#skillMenu {
+  display: none; flex-direction: column; gap: 2px;
+  max-height: 220px; overflow-y: auto; margin-bottom: 8px; padding: 4px;
+  border: 1px solid var(--line); border-radius: 10px; background: rgba(20, 14, 8, 0.92);
 }
-#empty p { color: rgba(255, 196, 130, 0.34); font-size: 11.5px; line-height: 1.9; text-shadow: var(--halo); }
-#empty .chips { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
-#empty .chips button {
-  padding: 7px 11px; border-radius: 8px; cursor: pointer; font-size: 12px; text-align: left;
-  border: 1px solid var(--line); background: rgba(255, 200, 130, 0.04); color: rgba(255,230,196,0.75);
+#skillMenu.on { display: flex; }
+#skillMenu .skill-item {
+  display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 7px;
+  cursor: pointer; font-size: 12px; color: rgba(255, 230, 196, 0.75);
 }
-#empty .chips button:hover { border-color: var(--line-lit); color: var(--text); background: rgba(255, 140, 26, 0.1); }
-#empty .mem { display: block; margin-top: 12px; color: rgba(255, 196, 130, 0.26); font: 10px var(--mono); }
-#empty .mem:empty { display: none; }
+#skillMenu .skill-item .tag {
+  flex: none; font: 9px var(--mono); letter-spacing: 0.04em; color: var(--text-dim);
+  border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+}
+#skillMenu .skill-item .txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#skillMenu .skill-item:hover, #skillMenu .skill-item.sel { background: rgba(255, 140, 26, 0.12); color: var(--text); }
+
+/* ── 模型选择（输入框旁的 chip + 下拉菜单）─────────────── */
+/* 跟 #skillMenu 共用同一块地方（composer 上方），同一时刻只会有一个开着——
+   两个都是"输入区旁边弹出来的临时列表"，没必要各占一块地方。 */
+#modelMenu {
+  display: none; flex-direction: column; gap: 2px;
+  max-height: 260px; overflow-y: auto; margin-bottom: 8px; padding: 4px;
+  border: 1px solid var(--line); border-radius: 10px; background: rgba(20, 14, 8, 0.92);
+}
+#modelMenu.on { display: flex; }
+#modelMenu .model-item {
+  display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 7px;
+  cursor: pointer; font-size: 12px; color: rgba(255, 230, 196, 0.75);
+}
+#modelMenu .model-item .tick { flex: none; width: 12px; color: var(--amber); opacity: 0; }
+#modelMenu .model-item.active .tick { opacity: 1; }
+#modelMenu .model-item .txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#modelMenu .model-item:hover { background: rgba(255, 140, 26, 0.12); color: var(--text); }
+#modelMenu .model-actions { display: flex; gap: 4px; flex: none; }
+#modelMenu .model-actions button {
+  background: transparent; border: 1px solid var(--line); border-radius: 5px;
+  color: var(--text-dim); cursor: pointer; font-size: 10px; padding: 3px 6px;
+}
+#modelMenu .model-actions button:hover { color: var(--gold); border-color: var(--line-lit); }
+#modelMenu .model-actions .del:hover, #modelMenu .model-actions .del.confirm { color: var(--bad); }
+#modelMenu .model-add {
+  display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 7px;
+  cursor: pointer; font-size: 12px; color: var(--gold); border-top: 1px solid var(--line); margin-top: 2px;
+}
+#modelMenu .model-add:hover { background: rgba(255, 140, 26, 0.12); }
+
+/* 添加模型表单，跟 .confirm 卡片同一套字段/按钮语言 */
+#modelForm { display: none; flex-direction: column; gap: 8px; margin-bottom: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(20, 14, 8, 0.92); }
+#modelForm.on { display: flex; }
+#modelForm .hint { font: 10px/1.4 var(--mono); color: var(--text-dim); }
+#modelForm input {
+  width: 100%; padding: 6px 8px; border-radius: 6px; font-size: 12px;
+  border: 1px solid var(--line); background: rgba(255, 200, 130, 0.04); color: var(--text); outline: none;
+}
+#modelForm input:focus { border-color: var(--line-lit); }
+#modelForm .row { display: flex; gap: 8px; }
+#modelForm .row button {
+  flex: 1; padding: 6px; border-radius: 6px; cursor: pointer; font-size: 12px;
+  border: 1px solid var(--line); background: rgba(255, 200, 130, 0.06); color: var(--text);
+}
+#modelForm .row button.yes { border-color: rgba(255, 176, 32, 0.55); color: var(--warn); }
+#modelForm .row button:hover { background: rgba(255, 200, 130, 0.14); }
+
+/* 输入区旁的模型 chip。跟 .composer-action 那圈圆按钮不是一路——这个要放文字，
+   宽度按内容撑开，所以单独一套样式，不复用 .composer-action 的固定 30×30。 */
+#model-btn {
+  flex: none; display: flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px;
+  border-radius: 13px; cursor: pointer; border: 1px solid rgba(255, 220, 180, 0.13);
+  background: transparent; color: rgba(255, 220, 180, 0.56); font: 11px/1 var(--mono);
+}
+#model-btn:hover, #model-btn.on { color: var(--text); background: rgba(255, 220, 180, 0.08); border-color: var(--line-lit); }
+#model-btn svg { width: 13px; height: 13px; flex: none; }
+#model-btn .lbl { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── 睡眠遮罩 ───────────────────────────────────────── */
 #sleepmask {
@@ -317,42 +377,99 @@ footer { position: relative; flex: none; border-top: 1px solid var(--line); padd
 }
 #stopbar button:hover { background: rgba(255, 176, 32, 0.18); }
 
-#composer { display: flex; gap: 8px; align-items: flex-end; }
-#mic {
-  flex: none; width: 34px; height: 34px; border-radius: 9px; cursor: pointer;
-  border: 1px solid var(--line); background: rgba(255, 200, 130, 0.05);
-  color: var(--text-dim); font-size: 15px; line-height: 1;
+#composer {
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 9px 7px;
+  border: 1px solid rgba(255, 196, 130, 0.2); border-radius: 16px;
+  background: rgba(22, 16, 10, 0.62);
+  box-shadow: 0 10px 28px rgba(0,0,0,0.16), inset 0 1px rgba(255,255,255,0.025);
+  transition: border-color .15s, box-shadow .15s;
 }
-#mic:hover { color: var(--gold); border-color: var(--line-lit); }
+#composer:focus-within {
+  border-color: rgba(255, 180, 92, 0.42);
+  box-shadow: 0 12px 34px rgba(0,0,0,0.2), 0 0 0 1px rgba(255,140,26,0.05);
+}
+#composerbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 30px; }
+#composerbar .left, #composerbar .right { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.composer-action {
+  flex: none; width: 30px; height: 30px; border-radius: 50%; cursor: pointer;
+  border: 0; background: transparent; color: rgba(255, 220, 180, 0.56);
+  display: flex; align-items: center; justify-content: center;
+}
+.composer-action svg { width: 16px; height: 16px; }
+.composer-action:hover { color: var(--text); background: rgba(255, 220, 180, 0.08); }
+#attach { border: 1px solid rgba(255, 220, 180, 0.13); }
+#mic { border-radius: 50%; }
 #mic.on {
   border-color: rgba(255, 140, 26, 0.75); color: var(--hot); background: rgba(255, 140, 26, 0.2);
   box-shadow: 0 0 14px rgba(255, 140, 26, 0.45); animation: pulse 1.1s ease-in-out infinite;
 }
 
 #input {
-  flex: 1; background: rgba(255, 200, 130, 0.05); border: 1px solid var(--line);
-  border-radius: 9px; color: var(--text); font: 13px/1.5 inherit; padding: 8px 10px;
-  resize: none; max-height: 120px; outline: none; user-select: text;
+  display: block; width: 100%; min-height: 34px; max-height: 160px;
+  background: transparent; border: 0; border-radius: 0; color: var(--text);
+  font: 13.5px/1.55 inherit; padding: 3px 5px; resize: none; outline: none; user-select: text;
 }
-#input:focus { border-color: var(--line-lit); }
 #input::placeholder { color: rgba(255, 196, 130, 0.3); }
-#input.hearing { border-color: rgba(255, 140, 26, 0.6); background: rgba(255, 140, 26, 0.07); }
+#input.hearing { color: var(--hot); }
 
 #send {
-  flex: none; width: 34px; height: 34px; border-radius: 9px; cursor: pointer;
-  border: 1px solid var(--line-lit); background: rgba(255, 140, 26, 0.14);
-  color: var(--gold); font-size: 15px; line-height: 1;
-  transition: opacity 0.15s;
+  flex: none; width: 30px; height: 30px; border-radius: 50%; cursor: pointer;
+  border: 0; background: var(--text); color: #211205;
+  display: flex; align-items: center; justify-content: center;
+  transition: opacity 0.15s, transform .15s;
 }
-#send:hover:not(:disabled) { background: rgba(255, 140, 26, 0.26); }
+#send svg { width: 15px; height: 15px; }
+#send:hover:not(:disabled) { transform: translateY(-1px); background: var(--hot); }
 #send:disabled { opacity: 0.3; cursor: default; }
 
-#hint { font: 10px/1 var(--mono); color: rgba(255, 196, 130, 0.24); margin-top: 6px; text-align: right; }
+/* ── 附件 ───────────────────────────────────────────── */
+.chip {
+  display: flex; align-items: center; gap: 6px; max-width: 200px;
+  padding: 4px 8px; border-radius: 7px;
+  border: 1px solid var(--line); background: rgba(255, 140, 26, 0.08);
+  font: 11px/1.3 var(--mono); color: var(--text-dim);
+}
+.chip .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip.loading { color: var(--gold); }
+.chip.error { color: var(--bad); border-color: rgba(255, 106, 77, 0.4); }
+.chip button {
+  flex: none; background: none; border: none; color: inherit; cursor: pointer;
+  font-size: 12px; line-height: 1; opacity: 0.6; padding: 0;
+}
+.chip button:hover { opacity: 1; }
 
-/* 收起态：除了顶栏什么都不显示。窗口本身也会被宿主缩到顶栏高度。 */
+#attachments { display: none; flex-wrap: wrap; gap: 6px; padding: 0 4px 2px; }
+#attachments.on { display: flex; }
+
+.msg .attach-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.msg .attach-list .chip { pointer-events: none; max-width: 240px; }
+
+/* 拖文件到面板任意位置时的提示框，靠 CSS 一条描边足够，不用额外做遮罩 */
+body.dragging #shell { outline: 1px dashed var(--line-lit); outline-offset: -6px; }
+
+/* 收起态：只藏消息记录和透明度滑块，顶栏 + 输入区留着——
+   缩小之后还是个能打字、能拖文件进来的迷你对话框，不是纯摆设的一条条。
+   窗口高度由宿主按顶栏 + 输入区的实际高度缩，见 setCollapsed()。 */
 body.collapsed #opacity,
-body.collapsed #body,
-body.collapsed footer { display: none; }
+body.collapsed #body { display: none; }
+body.collapsed footer { border-top: none; padding: 4px 10px 9px; }
+body.collapsed #input { min-height: 42px; max-height: 88px; }
+body.collapsed #composer { padding-top: 7px; }
+
+/* 手动把窗口缩窄时，先让出状态与输入空间，功能按钮仍全部保留。 */
+@media (max-width: 410px) {
+  header { gap: 6px; padding-right: 6px; }
+  #brand, #bars { display: none; }
+  #status { letter-spacing: 0.04em; }
+  footer { padding-left: 9px; padding-right: 9px; }
+}
+
+/* 低矮窗口把装饰性留白收紧，消息区仍优先获得可滚动空间。 */
+@media (max-height: 460px) {
+  header { height: 48px; }
+  #log { padding: 10px 11px; gap: 9px; }
+  footer { padding-top: 7px; padding-bottom: 8px; }
+}
 </style>
 </head>
 <body>
@@ -364,7 +481,11 @@ body.collapsed footer { display: none; }
     <span id="bars"><i></i><i></i><i></i><i></i><i></i></span>
     <button id="btn-opacity" title="面板透明度">◐</button>
     <button id="btn-sleep" title="睡眠：停止聆听与后台任务">☾</button>
-    <button id="btn-new" title="新会话（⌘⇧N）">＋</button>
+    <button id="btn-new" title="新建对话（⌘⇧N）" aria-label="新建对话">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/>
+      </svg>
+    </button>
     <button id="btn-collapse" title="收起面板">⌃</button>
   </header>
 
@@ -385,12 +506,47 @@ body.collapsed footer { display: none; }
 
   <footer>
     <div id="stopbar"><span class="txt">正在处理…</span><button id="btn-stop">停止 (Esc)</button></div>
-    <div id="composer">
-      <button id="mic" title="说话（⌥V）">🎙</button>
-      <textarea id="input" rows="1" placeholder="说点什么…" autofocus></textarea>
-      <button id="send" title="发送" disabled>↑</button>
+    <div id="skillMenu"></div>
+    <div id="modelMenu"></div>
+    <div id="modelForm">
+      <div class="hint" id="model-form-hint">仅支持 OpenAI 兼容协议 API</div>
+      <input id="model-form-label" placeholder="名称，如 Kimi" maxlength="40">
+      <input id="model-form-url" placeholder="Base URL，如 https://api.moonshot.cn/v1" maxlength="200">
+      <input id="model-form-key" placeholder="API Key" type="password" maxlength="200">
+      <input id="model-form-model" placeholder="模型名称，如 kimi-k3" maxlength="80">
+      <div class="row">
+        <button id="model-form-cancel">取消</button>
+        <button id="model-form-save" class="yes">添加</button>
+      </div>
     </div>
-    <div id="hint">Enter 发送 · ⇧Enter 换行 · ⌥V 说话 · Esc 停止/收起</div>
+    <div id="composer">
+      <div id="attachments"></div>
+      <textarea id="input" rows="1" placeholder="给 J.A.R.V.I.S. 发消息" autofocus></textarea>
+      <div id="composerbar">
+        <div class="left">
+          <button id="attach" class="composer-action" title="添加文件" aria-label="添加文件">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+        <div class="right">
+          <button id="model-btn" title="选择模型" aria-label="选择模型">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>
+            </svg>
+            <span class="lbl" id="model-label">默认</span>
+          </button>
+          <button id="mic" class="composer-action" title="说话（⌥V）" aria-label="语音输入">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/>
+            </svg>
+          </button>
+          <button id="send" title="发送消息" aria-label="发送消息" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+    <input id="file-picker" type="file" multiple hidden>
   </footer>
 </div>
 
@@ -465,8 +621,8 @@ function render() {
   $('btn-sleep').classList.toggle('on', S.sleeping);
 
   input.disabled = S.sleeping;
-  input.placeholder = S.sleeping ? '先唤醒 Jarvis…' : '说点什么…';
-  sendBtn.disabled = S.sleeping || !input.value.trim();
+  input.placeholder = S.sleeping ? '先唤醒 J.A.R.V.I.S.…' : '给 J.A.R.V.I.S. 发消息';
+  sendBtn.disabled = S.sleeping || (!input.value.trim() && attachments.size === 0);
 }
 
 function setState(state, detail) {
@@ -476,45 +632,15 @@ function setState(state, detail) {
 }
 
 /* ── 空状态 ─────────────────────────────────────────── */
-/* 三个快捷指令来自文档 §6：点一下等于把这句话填进输入框并立刻发送。 */
-const CHIPS = [
-  '找一下桌面上的 Markdown 文档',
-  '打开 Safari，再看看我这台 Mac 现在状态怎么样',
-  '把桌面上的 Jarvis-temp-test.txt 重命名成 test-renamed.txt',
-];
-
-function showEmpty(note) {
+/* 彻底空白，没有卡片没有提示——技能入口挪到输入框的 "/" 菜单里了。 */
+function showEmpty() {
   log.innerHTML = '';
-  const box = el('div'); box.id = 'empty';
-  box.appendChild(el('b', null, 'AT YOUR SERVICE'));
-  const p = el('p');
-  p.innerHTML = '打开应用 · 查找与读写文件 · 读剪贴板<br>联网搜索 · 抓取网页 · 查看本机状态';
-  box.appendChild(p);
-  const chips = el('div', 'chips');
-  CHIPS.forEach((text) => {
-    const b = el('button', null, text);
-    b.addEventListener('click', () => { input.value = text; render(); submit(); });
-    chips.appendChild(b);
-  });
-  box.appendChild(chips);
-  const mem = el('span', 'mem'); mem.id = 'empty-memory';
-  box.appendChild(mem);
-  if (note) box.appendChild(el('span', 'mem', note));
-  log.appendChild(box);
-  applyMemoryCount();
 }
 
 let errorTimer = null;
-let memoryCount = 0;
-function applyMemoryCount() {
-  const node = $('empty-memory');
-  if (node) node.textContent = memoryCount ? '长期记忆 ' + memoryCount + ' 条' : '';
-}
 
 /* 第一条消息出现后空状态永久隐藏，直到新会话 */
 function hideEmpty() {
-  const node = $('empty');
-  if (node) node.remove();
   S.hasMessages = true;
 }
 
@@ -544,11 +670,20 @@ function actionsRow(getText, resend, speak) {
   return row;
 }
 
-function addUserMessage(text) {
+function addUserMessage(text, fileNames) {
   hideEmpty();
   const msg = el('div', 'msg user');
-  msg.appendChild(el('div', 'body', text));
-  msg.appendChild(actionsRow(() => text, true));
+  if (text) msg.appendChild(el('div', 'body', text));
+  if (fileNames && fileNames.length) {
+    const list = el('div', 'attach-list');
+    fileNames.forEach((name) => {
+      const chip = el('div', 'chip');
+      chip.appendChild(el('span', 'n', name));
+      list.appendChild(chip);
+    });
+    msg.appendChild(list);
+  }
+  msg.appendChild(actionsRow(() => text || (fileNames || []).join(', '), true));
   log.appendChild(msg);
   scroll(true);
 }
@@ -723,23 +858,340 @@ function renderConfirm(event) {
   scroll(true);
 }
 
+/* ── 附件 ───────────────────────────────────────────── */
+/* Codex 式“＋”按钮、拖拽、粘贴三个入口最后都汇到 addFiles。纯文本类格式（txt/md/html/
+   代码文件……不做白名单，读不出文本再报错）直接在页面里用 File.text() 读；
+   doc/docx/pdf/rtf 这些要解析文档结构的格式，字节转 base64 交给宿主用
+   PDFKit / NSAttributedString 原生解析——不为了这个给 Brain 添 Python 依赖。 */
+const NATIVE_FILE_EXT = new Set(['pdf', 'doc', 'docx', 'rtf']);
+const MAX_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_ATTACH_CHARS = 60000;
+
+const attachments = new Map();   // id -> { name, status: loading|ready|error, text, error }
+let attachSeq = 0;
+
+function extOf(name) {
+  const i = name.lastIndexOf('.');
+  return i < 0 ? '' : name.slice(i + 1).toLowerCase();
+}
+
+function clip(text) {
+  return text.length > MAX_ATTACH_CHARS
+    ? text.slice(0, MAX_ATTACH_CHARS) + '\n…（内容过长，已截断）'
+    : text;
+}
+
+function renderAttachments() {
+  const bar = $('attachments');
+  bar.innerHTML = '';
+  bar.classList.toggle('on', attachments.size > 0);
+  attachments.forEach((a, id) => {
+    const chip = el('div', 'chip' + (a.status !== 'ready' ? ' ' + a.status : ''));
+    chip.title = a.status === 'error' ? a.error : a.name;
+    chip.appendChild(el('span', 'n', a.name));
+    const remove = el('button', null, '✕');
+    remove.title = '移除';
+    remove.addEventListener('click', () => { attachments.delete(id); renderAttachments(); });
+    chip.appendChild(remove);
+    bar.appendChild(chip);
+  });
+  render();
+}
+
+function addFiles(fileList) {
+  [...fileList].forEach((file) => {
+    const id = 'att_' + (++attachSeq);
+    const entry = { name: file.name, status: 'loading', text: '', error: '' };
+    attachments.set(id, entry);
+
+    if (file.size > MAX_FILE_BYTES) {
+      entry.status = 'error'; entry.error = '文件太大（>20MB）';
+      renderAttachments();
+      return;
+    }
+
+    const ext = extOf(file.name);
+    if (NATIVE_FILE_EXT.has(ext)) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = String(reader.result).split(',')[1] || '';
+        post('extract_file', { request_id: id, name: file.name, ext: ext, data_base64: base64 });
+      };
+      reader.onerror = () => { entry.status = 'error'; entry.error = '读取失败'; renderAttachments(); };
+      reader.readAsDataURL(file);
+    } else {
+      file.text().then((text) => {
+        entry.status = 'ready'; entry.text = clip(text);
+        renderAttachments();
+      }).catch(() => {
+        entry.status = 'error'; entry.error = '不是文本文件'; renderAttachments();
+      });
+    }
+  });
+  renderAttachments();
+}
+
+$('attach').addEventListener('click', () => $('file-picker').click());
+$('file-picker').addEventListener('change', (event) => {
+  if (event.target.files && event.target.files.length) addFiles(event.target.files);
+  event.target.value = '';              // 同一个文件移除后还能再次选择
+});
+
+/* 宿主用 PDFKit / NSAttributedString 解析完 doc/docx/pdf/rtf 后回调这里 */
+window.__jarvisFileExtracted = (id, ok, payload) => {
+  const entry = attachments.get(id);
+  if (!entry) return;
+  if (ok) { entry.status = 'ready'; entry.text = clip(payload || ''); }
+  else    { entry.status = 'error'; entry.error = payload || '解析失败'; }
+  renderAttachments();
+};
+
+['dragenter', 'dragover'].forEach((type) => document.addEventListener(type, (event) => {
+  if (!event.dataTransfer || !event.dataTransfer.types.includes('Files')) return;
+  event.preventDefault();
+  document.body.classList.add('dragging');
+}));
+['dragleave', 'drop'].forEach((type) => document.addEventListener(type, () => {
+  document.body.classList.remove('dragging');
+}));
+document.addEventListener('drop', (event) => {
+  if (!event.dataTransfer || !event.dataTransfer.files.length) return;
+  event.preventDefault();
+  addFiles(event.dataTransfer.files);
+});
+
+/* 只拦有文件的粘贴；纯文本粘贴照旧交给输入框自己处理，别手抖抢了 */
+document.addEventListener('paste', (event) => {
+  const files = event.clipboardData && event.clipboardData.files;
+  if (!files || !files.length) return;
+  event.preventDefault();
+  addFiles(files);
+});
+
+/* ── 技能 / 常用短语（输入框敲 "/" 触发）──────────────── */
+/* 没有单独的管理界面了：三条预设技能来自宿主的 ~/.jarvis/skills.json
+   （改配置文件才能动），剩下全靠"你实际发过的话"按频率自动涌现——
+   宿主每次真正发消息后都会重推一份最新的高频列表，这里只管展示和挑选。 */
+let SKILLS = [];      // [{id, text}]
+let FREQUENT = [];    // [{text, count}]，宿主已经按频率降序排过
+let skillMenuItems = [];
+let skillMenuIndex = -1;
+
+function applySkills(items) {
+  if (Array.isArray(items)) SKILLS = items;
+}
+
+function applyUsage(items) {
+  if (Array.isArray(items)) FREQUENT = items;
+  if (input.value.startsWith('/')) renderSkillMenu();   // 菜单开着就跟着刷新
+}
+
+function skillMenuCandidates(query) {
+  const seen = new Set();
+  const out = [];
+  SKILLS.forEach((s) => {
+    if (seen.has(s.text)) return;
+    seen.add(s.text); out.push({ text: s.text, tag: '常用' });
+  });
+  FREQUENT.forEach((f) => {
+    if (seen.has(f.text)) return;
+    seen.add(f.text); out.push({ text: f.text, tag: '常说' });
+  });
+  const q = query.trim().toLowerCase();
+  return (q ? out.filter((item) => item.text.toLowerCase().includes(q)) : out).slice(0, 8);
+}
+
+function renderSkillMenu() {
+  skillMenuItems = skillMenuCandidates(input.value.slice(1));
+  const menu = $('skillMenu');
+  menu.innerHTML = '';
+  if (!skillMenuItems.length) { menu.classList.remove('on'); skillMenuIndex = -1; return; }
+  skillMenuIndex = Math.min(Math.max(skillMenuIndex, 0), skillMenuItems.length - 1);
+  skillMenuItems.forEach((item, i) => {
+    const row = el('div', 'skill-item' + (i === skillMenuIndex ? ' sel' : ''));
+    row.appendChild(el('span', 'tag', item.tag));
+    row.appendChild(el('span', 'txt', item.text));
+    // mousedown 而不是 click：抢在 input 的 blur 前面，不然菜单会先一步被 blur 关掉
+    row.addEventListener('mousedown', (event) => { event.preventDefault(); pickSkillMenuItem(i); });
+    menu.appendChild(row);
+  });
+  menu.classList.add('on');
+}
+
+function closeSkillMenu() {
+  $('skillMenu').classList.remove('on');
+  $('skillMenu').innerHTML = '';
+  skillMenuItems = [];
+  skillMenuIndex = -1;
+}
+
+function pickSkillMenuItem(i) {
+  const item = skillMenuItems[i];
+  if (!item) return;
+  input.value = item.text;
+  closeSkillMenu();
+  input.dispatchEvent(new Event('input'));
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+/* ── 模型选择 ───────────────────────────────────────── */
+/* Brain 每次连上、以及每次 set_model/add_model/remove_model 之后都会重推一份
+   完整列表（ready 事件带一份、models 事件是后续更新），这里只管展示和挑选——
+   "当前用哪个模型"这件事的唯一真相在 Brain 那边，页面不自己猜。 */
+let MODELS = { active: 'default', items: [{ id: 'default', label: '默认', model: '', builtin: true }] };
+let editingModelId = null;
+
+function applyModels(payload) {
+  if (!payload) return;
+  if (payload.active) MODELS.active = payload.active;
+  if (Array.isArray(payload.items)) MODELS.items = payload.items;
+  const current = MODELS.items.find((m) => m.id === MODELS.active);
+  $('model-label').textContent = current ? current.label : '默认';
+  if ($('modelMenu').classList.contains('on')) renderModelMenu();   // 菜单开着就跟着刷新
+}
+
+function renderModelMenu() {
+  const menu = $('modelMenu');
+  menu.innerHTML = '';
+  MODELS.items.forEach((m) => {
+    const row = el('div', 'model-item' + (m.id === MODELS.active ? ' active' : ''));
+    row.appendChild(el('span', 'tick', '✓'));
+    row.appendChild(el('span', 'txt', m.model ? `${m.label}  ${m.model}` : m.label));
+    row.addEventListener('click', () => {
+      post('set_model', { id: m.id });
+      closeModelMenu();
+    });
+    if (!m.builtin) {
+      const actions = el('span', 'model-actions');
+      const edit = el('button', 'edit', '查看 / 修改');
+      edit.addEventListener('click', (event) => {
+        event.stopPropagation();
+        openModelForm(m);
+      });
+      const del = el('button', 'del', '删除');
+      del.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (del.dataset.confirm !== 'yes') {
+          del.dataset.confirm = 'yes';
+          del.textContent = '确认删除';
+          del.classList.add('confirm');
+          setTimeout(() => {
+            del.dataset.confirm = '';
+            del.textContent = '删除';
+            del.classList.remove('confirm');
+          }, 3000);
+          return;
+        }
+        post('remove_model', { id: m.id });
+      });
+      actions.appendChild(edit);
+      actions.appendChild(del);
+      row.appendChild(actions);
+    }
+    menu.appendChild(row);
+  });
+  const add = el('div', 'model-add', '＋ 添加模型');
+  add.addEventListener('click', () => openModelForm(null));
+  menu.appendChild(add);
+}
+
+function openModelMenu() {
+  closeSkillMenu();
+  renderModelMenu();
+  $('modelMenu').classList.add('on');
+  $('model-btn').classList.add('on');
+}
+function closeModelMenu() {
+  $('modelMenu').classList.remove('on');
+  $('modelMenu').innerHTML = '';
+  $('model-btn').classList.remove('on');
+}
+function toggleModelMenu() {
+  if ($('modelMenu').classList.contains('on')) closeModelMenu();
+  else openModelMenu();
+}
+
+function openModelForm(model) {
+  closeModelMenu();
+  editingModelId = model && model.id ? model.id : null;
+  $('model-form-label').value = model ? (model.label || '') : '';
+  $('model-form-url').value = model ? (model.base_url || '') : '';
+  $('model-form-key').value = '';
+  $('model-form-key').placeholder = editingModelId && model.has_api_key
+    ? 'API Key（已保存，留空不修改）' : 'API Key';
+  $('model-form-model').value = model ? (model.model || '') : '';
+  $('model-form-hint').textContent = editingModelId
+    ? '查看 / 修改模型配置 · API Key 不会回显' : '添加模型 · 仅支持 OpenAI 兼容协议 API';
+  $('model-form-save').textContent = editingModelId ? '保存修改' : '添加';
+  $('modelForm').classList.add('on');
+  $('model-form-label').focus();
+}
+function closeModelForm() {
+  $('modelForm').classList.remove('on');
+  editingModelId = null;
+}
+function submitModelForm() {
+  const label = $('model-form-label').value.trim();
+  const base_url = $('model-form-url').value.trim();
+  const api_key = $('model-form-key').value.trim();
+  const model = $('model-form-model').value.trim();
+  if (!label || !base_url || !model) {
+    addNotice('名称、Base URL、模型名称都不能为空', true);
+    return;
+  }
+  post(editingModelId ? 'update_model' : 'add_model', {
+    id: editingModelId, label: label, base_url: base_url, api_key: api_key, model: model
+  });
+  closeModelForm();
+}
+
+$('model-btn').addEventListener('click', toggleModelMenu);
+$('model-form-cancel').addEventListener('click', closeModelForm);
+$('model-form-save').addEventListener('click', submitModelForm);
+
+// 点菜单/表单以外的地方直接关掉，跟大多数下拉菜单的习惯一致
+document.addEventListener('click', (event) => {
+  if ($('modelMenu').classList.contains('on') &&
+      !event.target.closest('#modelMenu') && !event.target.closest('#model-btn')) {
+    closeModelMenu();
+  }
+});
+
 /* ── 发送 ───────────────────────────────────────────── */
 
 function submit() {
   const text = input.value.trim();
-  if (!text) return;
-  if (S.sleeping) { addNotice('Jarvis 在睡眠中，先点顶栏的 ☾ 唤醒', true); return; }
+  closeSkillMenu();
+  if ([...attachments.values()].some(a => a.status === 'loading')) {
+    addNotice('文件还在解析，等一下再发', true);
+    return;
+  }
+  const ready = [...attachments.values()].filter(a => a.status === 'ready');
+  if (!text && ready.length === 0) return;
+  if (S.sleeping) { addNotice('J.A.R.V.I.S. 在睡眠中，先点顶栏的 ☾ 唤醒', true); return; }
   if (!S.connected) { addNotice('大脑未连接，稍等或从菜单栏重启大脑', true); return; }
 
   // 文档 §7.2：上一任务还在跑就先取消它，再发新的
   if (BUSY.has(S.state)) post('cancel');
 
-  addUserMessage(text);
+  addUserMessage(text, [...attachments.values()].map(a => a.name));
+
+  // 面板里只显示用户敲的字和文件名，实际发给大脑的文本把附件内容拼在后面——
+  // 效果等价于用户自己把文件内容粘贴进对话框，Brain 端不用改协议。
+  let payload = text;
+  if (ready.length) {
+    const blocks = ready.map(a => `[附件：${a.name}]\n${a.text}`).join('\n\n');
+    payload = payload ? payload + '\n\n' + blocks : blocks;
+  }
+
   input.value = '';
   input.style.height = 'auto';
+  attachments.clear();
+  renderAttachments();
   endStreaming();
   setState('thinking');
-  post('submit', { text: text });
+  post('submit', { text: payload });
 }
 
 sendBtn.addEventListener('click', submit);
@@ -753,15 +1205,46 @@ function stopTask() {
 
 input.addEventListener('input', () => {
   input.style.height = 'auto';
-  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+  if (input.value.startsWith('/')) renderSkillMenu(); else closeSkillMenu();
   render();
 });
 
+input.addEventListener('blur', closeSkillMenu);
+
 input.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-    event.preventDefault();
-    submit();
+  if ($('skillMenu').classList.contains('on')) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      skillMenuIndex = Math.min(skillMenuIndex + 1, skillMenuItems.length - 1);
+      renderSkillMenu();
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      skillMenuIndex = Math.max(skillMenuIndex - 1, 0);
+      renderSkillMenu();
+      return;
+    }
+    if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey
+        && !event.altKey && !event.isComposing) {
+      event.preventDefault();
+      pickSkillMenuItem(skillMenuIndex);
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();   // 别让这下 Esc 又顺带触发面板级的停止/收起
+      closeSkillMenu();
+      return;
+    }
   }
+  if (event.key !== 'Enter' || event.isComposing) return;
+
+  // 唯一规则：Enter 发送；Option+Enter 插入换行。
+  if (event.altKey) return;
+  event.preventDefault();
+  submit();
 });
 
 /* ── 顶栏按钮 ───────────────────────────────────────── */
@@ -773,16 +1256,53 @@ micBtn.addEventListener('click', () => post('voice_toggle'));
 
 $('btn-collapse').addEventListener('click', () => setCollapsed(!S.collapsed));
 
-/* 收起后只剩顶栏。高度由这里量、传给宿主去缩窗口——
-   写死一个数字迟早会和 CSS 对不上，差一点就切掉顶栏或露出半行内容。 */
+/* 收起后留顶栏 + 输入区（迷你对话框，还能打字/拖文件）。高度由这里量、
+   传给宿主去缩窗口——写死一个数字迟早会和 CSS 对不上，差一点就切掉半行内容。
+   顺序很关键：class 先切，offsetHeight 才是收起态之后的真实高度。 */
 function setCollapsed(collapsed) {
   S.collapsed = collapsed;
   document.body.classList.toggle('collapsed', collapsed);
   $('btn-collapse').textContent = collapsed ? '⌄' : '⌃';
   $('btn-collapse').title = collapsed ? '展开面板' : '收起面板';
-  post('collapse', { collapsed: collapsed, header: document.querySelector('header').offsetHeight });
-  if (!collapsed) input.focus();
+  reportCollapsedHeight();
+  // 输入框在收起态也还留着，两种状态都值得把焦点给它，省一次点击
+  input.focus();
 }
+
+/* 收起态不是固定高度：输入换行、添加附件、出现停止条都会改变 footer。
+   由 ResizeObserver 在下一帧合并上报，避免每个字符触发多次原生窗口调整。 */
+let collapsedResizeFrame = 0;
+function reportCollapsedHeight() {
+  if (collapsedResizeFrame) cancelAnimationFrame(collapsedResizeFrame);
+  collapsedResizeFrame = requestAnimationFrame(() => {
+    collapsedResizeFrame = 0;
+    const header = document.querySelector('header').offsetHeight;
+    const footer = document.querySelector('footer').offsetHeight;
+    post('collapse', { collapsed: S.collapsed, header: header + (S.collapsed ? footer : 0) });
+  });
+}
+new ResizeObserver(() => {
+  if (S.collapsed) reportCollapsedHeight();
+}).observe(document.querySelector('footer'));
+
+/* ── 顶栏拖拽 ───────────────────────────────────────── */
+/* WKWebView 不认 -webkit-app-region（那是 Chromium 的私货），窗口拖拽只能靠
+   宿主原生做。这里把顶栏矩形和顶栏里"不可拖"的按钮矩形量出来交给宿主，
+   宿主拿去做命中测试的挖洞。窗口宽度一变（面板可调宽），顶栏和按钮位置全变，
+   所以用 ResizeObserver 盯着顶栏，而不是只在启动时量一次。 */
+const headerEl = document.querySelector('header');
+function reportDragZones() {
+  const rectOf = (node) => {
+    const r = node.getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  };
+  post('drag_zones', {
+    header: rectOf(headerEl),
+    buttons: [...headerEl.querySelectorAll('button')].map(rectOf),
+  });
+}
+new ResizeObserver(reportDragZones).observe(headerEl);
+reportDragZones();
 
 /* ── 透明度 ─────────────────────────────────────────── */
 /* 滑块只负责把值交给宿主：毛玻璃层的 alpha 只有 AppKit 能调。
@@ -816,6 +1336,8 @@ document.addEventListener('keydown', (event) => {
   }
   if (event.key !== 'Escape') return;
   event.preventDefault();
+  if ($('modelForm').classList.contains('on')) { closeModelForm(); return; }
+  if ($('modelMenu').classList.contains('on')) { closeModelMenu(); return; }
   if (S.pendingConfirm) { S.pendingConfirm.answer(false); return; }
   if (S.listening) { post('voice_toggle'); return; }
   if (BUSY.has(S.state)) { stopTask(); return; }
@@ -861,14 +1383,17 @@ function handle(event) {
 
     case 'ready':
       S.connected = true;
-      memoryCount = (event.memory && event.memory.count) || 0;
-      applyMemoryCount();
       setState('idle', event.configured ? (event.model || '') : '缺 API Key');
+      if (event.models) applyModels(event.models);
       if (!event.configured) {
         const notice = addNotice('还没配 DeepSeek API Key，点这里打开配置文件', true);
         notice.style.cursor = 'pointer';
         notice.addEventListener('click', () => post('open_config'));
       }
+      break;
+
+    case 'models':
+      applyModels(event);
       break;
 
     /* 宿主已经把状态合成过了：睡眠 > 识别 > 收音 > 播报 > 大脑状态 */
@@ -976,9 +1501,7 @@ function handle(event) {
       S.pendingConfirm = null;
       endStreaming();
       S.hasMessages = false;
-      // 说明写进空状态里，而不是作为一条提示追加——追加会把刚恢复的空状态又顶掉。
-      // 「长期记忆保留」这句必须有，否则会以为新会话把记忆也清了。
-      showEmpty('新会话已开始 · 长期记忆保留');
+      showEmpty();
       setState(S.connected ? 'idle' : 'offline');
       break;
 
@@ -998,13 +1521,21 @@ function handle(event) {
     case 'log':
       addNotice(event.message || '');
       break;
+
+    case 'skills':
+      applySkills(event.items);
+      break;
+
+    case 'usage':
+      applyUsage(event.items);
+      break;
   }
 }
 
 /* 断线不能只丢一行字：得给出下一步能点的东西（文档 §15.1） */
 function showDisconnected() {
   const node = addNotice('', true);
-  node.appendChild(el('span', null, '连接已中断，Jarvis Brain 没有响应。'));
+  node.appendChild(el('span', null, '连接已中断，J.A.R.V.I.S. Brain 没有响应。'));
   const retry = el('span', 'link', '重新连接');
   retry.addEventListener('click', () => { post('restart_brain'); node.remove(); });
   const diag = el('span', 'link', '查看诊断');

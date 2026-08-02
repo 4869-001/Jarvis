@@ -25,6 +25,10 @@ DEFAULTS = {
         "model": "deepseek-chat",
         "temperature": 0.7,
         "max_tokens": 4096,
+        # 长对话里模型偶尔会卡进复读循环（同一句话反复吐），frequency_penalty
+        # 按 token 已出现次数罚分，是压这个毛病最直接的旋钮。0.4 是"明显抑制
+        # 复读、但不影响正常措辞多样性"的经验值，别调到 1 以上——遣词会变得生硬。
+        "frequency_penalty": 0.4,
     },
     "search": {
         # auto = 有 key 用 tavily/brave，没有就退 duckduckgo

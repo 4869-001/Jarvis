@@ -10,7 +10,7 @@
 
 - (void)install {
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
-    self.statusItem.button.toolTip = @"J.A.R.V.I.S.";
+    self.statusItem.button.toolTip = @"JARVIS";
     [self setSymbol:@"circle.dotted"];
 
     NSMenu *menu = [[NSMenu alloc] init];
@@ -62,7 +62,7 @@
 }
 
 - (void)setSymbol:(NSString *)symbolName {
-    NSImage *image = [NSImage imageWithSystemSymbolName:symbolName accessibilityDescription:@"J.A.R.V.I.S."];
+    NSImage *image = [NSImage imageWithSystemSymbolName:symbolName accessibilityDescription:@"JARVIS"];
     if (!image) {                       // 万一符号名在这版系统里不存在
         self.statusItem.button.title = @"J";
         return;

@@ -14,6 +14,7 @@ synth.py 每调一次就要重新加载 Kokoro/Piper,实测每句约 3 秒,几�
 """
 import json
 import os
+import re
 import sys
 import warnings
 
@@ -60,6 +61,15 @@ def synth(lang, text, speed):
     return np.concatenate(chunks), voice.config.sample_rate
 
 
+def chinese_to_pinyin(text):
+    """只转汉字片段，英文和标点原样保留；同一个 Piper 音色从头念到尾。"""
+    from pypinyin import Style, lazy_pinyin
+
+    def replace(match):
+        return " " + " ".join(lazy_pinyin(match.group(0), style=Style.NORMAL)) + " "
+    return re.sub(r"[一-鿿㐀-䶿]+", replace, text)
+
+
 def main():
     import soundfile as sf
 
@@ -71,7 +81,7 @@ def main():
     # 语言由 neural.py 按第一次请求传进来。
     preload = sys.argv[1] if len(sys.argv) > 1 else "zh"
     try:
-        _load_en() if preload == "en" else _load_zh()
+        _load_en() if preload in ("en", "pinyin") else _load_zh()
     except Exception as exc:
         print(json.dumps({"ok": False, "error": "预加载 %s 模型失败：%s" % (preload, exc)}), flush=True)
 
@@ -83,9 +93,13 @@ def main():
             continue
         try:
             request = json.loads(line)
-            audio, rate = synth(request.get("lang", "zh"),
-                                request["text"],
-                                float(request.get("speed") or 1.0))
+            lang = request.get("lang", "zh")
+            if lang == "pinyin":
+                audio, rate = synth("en", chinese_to_pinyin(request["text"]),
+                                    float(request.get("speed") or 1.0))
+            else:
+                audio, rate = synth(lang, request["text"],
+                                    float(request.get("speed") or 1.0))
             out = request["out"]
             os.makedirs(os.path.dirname(out), exist_ok=True)
             sf.write(out, audio, rate)

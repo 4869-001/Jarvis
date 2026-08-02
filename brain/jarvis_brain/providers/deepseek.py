@@ -26,6 +26,7 @@ class DeepSeekProvider:
         self.model = cfg.get("model", "deepseek-chat")
         self.temperature = cfg.get("temperature", 0.7)
         self.max_tokens = cfg.get("max_tokens", 4096)
+        self.frequency_penalty = cfg.get("frequency_penalty", 0.4)
         self._ssl = ssl.create_default_context()
         self._active = None      # 正在读的 response，取消时直接 close
 
@@ -60,9 +61,10 @@ class DeepSeekProvider:
             "stream": True,
             "max_tokens": self.max_tokens,
         }
-        # reasoner 不接受 temperature / tools，传了会报 400
+        # reasoner 不接受 temperature / frequency_penalty / tools，传了会报 400
         if not self.model.endswith("reasoner"):
             payload["temperature"] = self.temperature
+            payload["frequency_penalty"] = self.frequency_penalty
             if tools:
                 payload["tools"] = tools
                 payload["tool_choice"] = "auto"

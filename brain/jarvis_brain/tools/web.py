@@ -7,8 +7,10 @@ DDG 是 HTML 抓取，会随对方页面改动而失效，所以只当兜底，�
 import gzip
 import html
 import io
+import ipaddress
 import json
 import re
+import socket
 import ssl
 import urllib.error
 import urllib.parse
@@ -19,7 +21,72 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 _SSL = ssl.create_default_context()
 
 
-def _fetch(url, data=None, headers=None, timeout=20):
+# ---------------------------------------------------------------- SSRF 防线
+#
+# web_fetch 的 url 直接来自模型（可能是网页提示注入喂给它的），而且是 L1 工具，
+# 不经用户确认就会跑。不拦的话它能拿来当探测内网的跳板：127.0.0.1、私网段、
+# 甚至先解析出一个公网地址、跳转时再 302 到内网。所以请求前和每次跳转后都要
+# 把目标地址解出来，过一遍"是不是本机/内网"这道检查。
+# search 那几个后端打的是固定的可信 API 域名，不走这道检查。
+
+_BLOCKED_HOSTNAMES = {"localhost", "localhost.localdomain"}
+
+# 只挡 loopback / RFC1918 私网 / link-local / multicast 这几段真正意义上的
+# "内网或本机"——不用 ipaddress 自带的 is_private/is_reserved，那两个在新版
+# Python 里把 IANA 保留段（比如 198.18.0.0/15 benchmarking）也算了进去，而不少
+# 本地代理（Clash/mihomo 之类的 fake-ip DNS）恰好借用这段地址做透明代理，
+# 挡了它们会导致所有正常网页都抓不到。
+_BLOCKED_NETWORKS = [ipaddress.ip_network(cidr) for cidr in (
+    "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+    "169.254.0.0/16", "0.0.0.0/8",
+    "::1/128", "fe80::/10", "fc00::/7",
+)]
+
+
+def _is_blocked_ip(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return True   # 解析不出来的地址，宁可拦下来
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped   # ::ffff:127.0.0.1 这类映射地址，按内层 IPv4 判断
+    if ip.is_multicast or ip.is_unspecified:
+        return True
+    return any(ip in net for net in _BLOCKED_NETWORKS)
+
+
+def _check_host_allowed(hostname):
+    if not hostname:
+        raise ValueError("URL 缺少主机名")
+    host = hostname.strip().lower().rstrip(".")
+    if host in _BLOCKED_HOSTNAMES:
+        raise ValueError("不允许访问本机地址：%s" % hostname)
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise ValueError("域名解析失败：%s" % exc)
+    for info in infos:
+        ip = info[4][0]
+        if _is_blocked_ip(ip):
+            raise ValueError("不允许访问内网/本机地址：%s（%s）" % (hostname, ip))
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """跳转目标也要过一遍检查——公网地址 302 到内网是最常见的绕过手法。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _check_host_allowed(urllib.parse.urlparse(newurl).hostname)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_SAFE_OPENER = urllib.request.build_opener(
+    _SafeRedirectHandler, urllib.request.HTTPSHandler(context=_SSL))
+
+
+def _fetch(url, data=None, headers=None, timeout=20, check_ssrf=False):
+    if check_ssrf:
+        _check_host_allowed(urllib.parse.urlparse(url).hostname)
+
     req = urllib.request.Request(url, data=data, method="POST" if data else "GET")
     req.add_header("User-Agent", UA)
     req.add_header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
@@ -27,7 +94,10 @@ def _fetch(url, data=None, headers=None, timeout=20):
     for key, value in (headers or {}).items():
         req.add_header(key, value)
 
-    resp = urllib.request.urlopen(req, timeout=timeout, context=_SSL)
+    if check_ssrf:
+        resp = _SAFE_OPENER.open(req, timeout=timeout)
+    else:
+        resp = urllib.request.urlopen(req, timeout=timeout, context=_SSL)
     try:
         blob = resp.read(6 * 1024 * 1024)
         if resp.headers.get("Content-Encoding") == "gzip":
@@ -159,9 +229,11 @@ def web_fetch(args, ctx):
         url = "https://" + url
 
     try:
-        text, final_url = _fetch(url, timeout=25)
+        text, final_url = _fetch(url, timeout=25, check_ssrf=True)
     except urllib.error.HTTPError as exc:
         return {"error": "HTTP %s：%s" % (exc.code, url)}
+    except ValueError as exc:
+        return {"error": str(exc)}
     except Exception as exc:
         return {"error": "抓取失败：%s" % exc}
 

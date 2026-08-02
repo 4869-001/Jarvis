@@ -6,18 +6,42 @@
 import json
 import platform
 import queue
+import re
 import threading
 import time
 import traceback
 import uuid
 
-from . import tts
+from . import models, tts
 from .memory import STORE as MEMORY
 from .providers.deepseek import Cancelled, DeepSeekProvider, ProviderError
 from .tools import registry
 from .tools.paths import PathDenied
 
+# ── 语言策略：已锁定，改前先跟用户确认 ──────────────────────────
+# 规则：播报永远英文；字幕必须双语——英文和中文缺哪个都不行，不允许只有
+# 一种语言。五层各管一段，缺一不可：
+#   1) SYSTEM_PROMPT 的 "LANGUAGE" 段——逼模型英文正文 + {ZH_MARKER} + 中文字幕
+#   2) BilingualSplitter——按 {ZH_MARKER} 切流，中文段只落 assistant_delta_zh
+#   3) _emit_segment——代码级铁律：只有 "en" 声道会进 _feed_speech
+#   4) tts/__init__.py 的 detect_language/_mostly_cjk——模型偶尔破格式、
+#      整句吐中文时的兜底，按实际文本内容判断，不看声道标签
+#   5) _ensure_bilingual/_translate——模型漏掉 {ZH_MARKER} 导致某一种语言
+#      整段缺失时的最后一道兜底：单独请求把缺的那段翻译回来再照常发出去，
+#      用户不该感觉出"这句是补的"。平时格式正常时不产生这次额外请求。
+# 这条链路踩过"中文滑落拖垮整段对话"的坑才定下来，别为了"简化"把某一层删掉。
 ZH_MARKER = "[[ZH]]"
+
+
+def _speech_key(text):
+    """播报去重键：忽略 Markdown、大小写、空白和标点。
+
+    模型常把同一句复读成 ``Right away, sir.`` / ``Right away sir``，只做
+    strip+casefold 会当成两句。这里保留真正承载语义的字母、数字和汉字，
+    既能挡格式差异，也不会把不同句子粗暴合并。
+    """
+    cleaned = tts.clean_for_speech(text or "").casefold()
+    return re.sub(r"[^\w\u3400-\u9fff]+", "", cleaned, flags=re.UNICODE)
 
 SYSTEM_PROMPT = """You are J.A.R.V.I.S. — Tony Stark's personal AI butler — running on his MacBook.
 
@@ -28,6 +52,9 @@ the part you speak aloud is English. The ONLY place Chinese ever appears is AFTE
 the {marker} marker, as a subtitle translation. There is no situation in which you
 output Chinese before the marker. None. If you feel the urge to write Chinese first,
 stop — write English instead, then add the marker and Chinese translation.
+When explaining a Chinese term, never quote its Chinese characters in the spoken
+English section. Call it "the quoted Chinese phrase" and put the actual characters
+only in the subtitle section after the marker.
 
 == OUTPUT FORMAT — follow exactly, every single time ==
 1. First, your answer in English (spoken aloud).
@@ -44,6 +71,12 @@ after the marker already gives them what they asked for.
 When you call tools, emit the tool calls ONLY — no preamble, no "let me check that".
 The user already sees the tool running. Prose belongs in your final answer, which is
 the only place the three-part format applies.
+
+EXCEPTION — media_control and app_open: these can block for several seconds when the
+target app needs to cold-start, and the user is listening, not watching a screen, so
+silence reads as broken rather than busy. Before calling either of these two tools
+specifically, say one short acknowledgment first (e.g. "Right away, sir." / "On it.") —
+still in the three-part format — then call the tool. No other tool gets this treatment.
 
 == WHO YOU ARE ==
 You are not a generic chatbot or support agent. You are a refined, unflappable
@@ -166,6 +199,16 @@ class SessionCoordinator:
         self.emit = emit                # emit(dict) → 发给宿主
         self.log = log
         self.provider = DeepSeekProvider(cfg["deepseek"])
+        # 重启后要接着用重启前选的那个模型，不能每次都悄悄退回默认——
+        # 否则下拉菜单显示的"当前模型"和 Brain 实际在跑的模型会对不上。
+        active_model_id = models.STORE.active_id()
+        if active_model_id != models.DEFAULT_MODEL_ID:
+            active_cfg = models.STORE.get_provider_cfg(active_model_id, cfg["deepseek"])
+            if active_cfg is not None:
+                self.provider = DeepSeekProvider(active_cfg)
+            else:
+                # 记录的那个模型已经被删了（比如手改过 models.json），退回默认
+                models.STORE.set_active(models.DEFAULT_MODEL_ID)
 
         self.history = []
         self._lock = threading.Lock()
@@ -174,6 +217,16 @@ class SessionCoordinator:
         self._state = "idle"
         self._state_detail = None
         self.session_id = uuid.uuid4().hex[:12]
+
+        # 每开一轮 +1。worker 线程只信自己起跑时拿到的这个号：一轮结束要把
+        # 结果提交回 self.history 前，先核对号还对不对——号变了说明中途被
+        # reset() 或新一轮顶替了，安安静静地不提交，不要把半截或过期的结果
+        # 塞回一个已经不是它的会话里。
+        self._turn_generation = 0
+        # UI 那边"忙碌时先 cancel 再 submit"是异步的两步：cancel 到账前
+        # submit 可能已经到了。与其直接拒绝、把这句话丢在地上，不如接住它，
+        # 等当前这轮真正退出后自动续上。
+        self._queued = None
 
         # 等宿主回话的两类阻塞：确认弹窗、原生工具执行
         self._pending = {}              # id -> {"event": Event, "value": any}
@@ -197,6 +250,12 @@ class SessionCoordinator:
         self._turn_started = None
         self._turn_first_token = None
         self._turn_first_audio = None
+        # 复读防线：长对话里模型偶尔会卡进循环，同一句话反复吐出来，
+        # 播报就变成"反复念叨同一个词/句子"。这些字段每轮重置，
+        # 见 _run_turn 和 _feed_speech。
+        self._repeat_streak = 0
+        self._degenerate = False
+        self._speech_seen = set()
         threading.Thread(target=self._speech_worker, daemon=True).start()
 
     # ------------------------------------------------------------ 状态
@@ -225,20 +284,29 @@ class SessionCoordinator:
         text = (text or "").strip()
         if not text:
             return
-        if self.busy:
-            self.emit({"type": "error", "message": "上一轮还没结束，先说完这句。"})
-            return
         if not self.provider.configured:
             self.emit({"type": "error", "message":
                        "还没配 DeepSeek API Key。菜单栏 → 打开配置，填 deepseek.api_key 后重启大脑。"})
             return
+        if self.busy:
+            # UI 一定是先发了 cancel 才发这条——不然它自己就会挡住输入。
+            # 旧 worker 退出是异步的，接住这条消息，让它退出后自动续上，
+            # 而不是原样丢弃、让用户以为发出去了其实什么都没发生。
+            self._queued = (text, message_id)
+            self.cancel()
+            return
+        self._start_turn(text, message_id)
 
+    def _start_turn(self, text, message_id):
+        self._turn_generation += 1
+        generation = self._turn_generation
         self._cancel.clear()
         self._speech_buffer = ""
         self.history.append({"role": "user", "content": text})
         self._trim()
 
-        self._worker = threading.Thread(target=self._run_turn, args=(message_id, text), daemon=True)
+        self._worker = threading.Thread(target=self._run_turn,
+                                         args=(message_id, text, generation), daemon=True)
         self._worker.start()
 
     def cancel(self):
@@ -254,10 +322,29 @@ class SessionCoordinator:
     def reset(self):
         """清的是这一轮的上下文。长期记忆不动——那是跨会话的东西。"""
         self.cancel()
+        self._queued = None          # 新会话开始，排队中的上一句不该再冒出来
+        self._turn_generation += 1   # 老 worker 就算这会儿才反应过来，号也已经对不上了
         self.history = []
         self.session_id = uuid.uuid4().hex[:12]
         self.set_state("idle")
         self.emit({"type": "session_reset", "session_id": self.session_id})
+
+    def models_payload(self):
+        return {"active": models.STORE.active_id(),
+                "items": models.STORE.list_public(self.cfg["deepseek"])}
+
+    def set_model(self, model_id):
+        """切换正在用的模型。只换 self.provider，不碰 history/记忆——
+        换模型是换"跟谁说话"，不是换"聊到哪了"。"""
+        cfg = models.STORE.get_provider_cfg(model_id, self.cfg["deepseek"])
+        if cfg is None:
+            self.emit({"type": "error", "message": "模型不存在：%s" % model_id})
+            return
+        if self.busy:
+            self.cancel()   # 换 provider 等于换执行环境，跟 reset() 一样先掐掉旧一轮
+        self.provider = DeepSeekProvider(cfg)
+        models.STORE.set_active(model_id)
+        self.log("模型已切换：%s（%s）" % (self.provider.model, self.provider.base_url))
 
     def resolve_pending(self, request_id, value):
         with self._pending_lock:
@@ -277,6 +364,67 @@ class SessionCoordinator:
         else:
             chinese_parts.append(chunk)
             self.emit({"type": "assistant_delta_zh", "id": message_id, "text": chunk})
+
+    def _ensure_bilingual(self, message_id, full_text, chinese_text):
+        """字幕必须双语——英文和中文缺哪个都不行，这是用户明确要求锁定的规则。
+
+        平时模型守格式，两段都有，这里直接原样放行，不产生任何额外请求。
+        只有模型破格式（漏了 {marker} 导致某一段缺失）才会走翻译兜底，独立一次
+        请求，不进 history、不占工具调用轮数。补出来的内容照样走
+        assistant_delta(_zh)/语音，跟正常内容一视同仁——用户不该感觉出"这句是补的"。
+        """
+        # 模型压根没触发过 {marker}（一次都没有）时，BilingualSplitter 找不到分隔符，
+        # 会把它见到的所有内容都当成"英文声道"发出去——如果模型这次是整段吐的中文，
+        # full_text 里躺的其实是中文，不是缺了中文字幕，是"英文正文"这个坑本身填错了。
+        # 不纠正的话：这段假英文会被当真英文喂给 TTS，命中 tts.synthesize 的
+        # off_language 检测后直接跳过合成，整轮一句话都不出声——比"语言错了"更糟。
+        # 这里先把误标的内容挪回中文桶，再按"缺英文"正常走下面的翻译兜底。
+        if full_text and not chinese_text and tts.mostly_cjk(full_text):
+            chinese_text = full_text
+            full_text = ""
+            # 面板此前已经把这段内容当"英文"实时流过一遍了（改不回去），
+            # 这里至少把它按真实身份补发一份 assistant_delta_zh，
+            # 字幕区域和最终的 text_zh 才对得上，不是内部变量正确、界面上却没有。
+            self.emit({"type": "assistant_delta_zh", "id": message_id, "text": chinese_text})
+
+        if full_text and chinese_text:
+            return full_text, chinese_text
+        if not full_text and not chinese_text:
+            return full_text, chinese_text   # 这轮本来就没有正文（纯工具调用），不用补
+
+        if not full_text:
+            translated = self._translate(chinese_text, "en")
+            if translated:
+                self.emit({"type": "assistant_delta", "id": message_id, "text": translated})
+                self._feed_speech(translated)
+                full_text = translated
+        elif not chinese_text:
+            translated = self._translate(full_text, "zh")
+            if translated:
+                self.emit({"type": "assistant_delta_zh", "id": message_id, "text": translated})
+                chinese_text = translated
+        return full_text, chinese_text
+
+    def _translate(self, text, target):
+        """双语兜底专用的一次性翻译请求：不流式吐给面板，直接拿完整结果。"""
+        if not text.strip():
+            return ""
+        if target == "zh":
+            prompt = ("Translate the following into natural, concise Chinese. "
+                      "Output ONLY the translation, nothing else.\n\n" + text)
+        else:
+            prompt = ("Translate the following into natural, concise English, in the voice "
+                      "of a refined British butler (dry, understated, precise). "
+                      "Output ONLY the translation, nothing else.\n\n" + text)
+        try:
+            parts = []
+            for kind, value in self.provider.stream([{"role": "user", "content": prompt}], tools=None):
+                if kind == "text":
+                    parts.append(value)
+            return "".join(parts).strip()
+        except Exception as exc:
+            self.log("双语兜底翻译失败: %s" % exc)
+            return ""
 
     # ------------------------------------------------------------ 播报
 
@@ -299,8 +447,27 @@ class SessionCoordinator:
         if len(sentences) <= 1:
             return
         for sentence in sentences[:-1]:
-            self._speech_queue.put((self._generation, sentence))
+            self._queue_sentence(sentence)
         self._speech_buffer = sentences[-1]
+
+    def _queue_sentence(self, sentence):
+        """入队前查重——长对话里模型偶尔卡进复读循环，同一句反复吐，
+        不拦的话播报就是"反复念叨同一个词/句子"，比看着字幕重复刺耳得多。
+
+        本轮任何位置再次出现同一句都直接丢弃、不进队列；累计撞到两次重复
+        （原句 + 2 次重复）便判定模型跑飞并截断生成。原句只会播放一次。
+        """
+        norm = _speech_key(sentence)
+        if norm and norm in self._speech_seen:
+            self._repeat_streak += 1
+            self.log("拦截重复播报：%s" % sentence.strip()[:80])
+            if self._repeat_streak >= 2:
+                self._degenerate = True
+            return                                    # 整轮已经播过，不再入队
+        if norm:
+            self._speech_seen.add(norm)
+        self._repeat_streak = 0
+        self._speech_queue.put((self._generation, sentence))
 
     def _flush_speech(self):
         if not self._tts_enabled:
@@ -312,7 +479,7 @@ class SessionCoordinator:
         # 收尾这一段也要切：一句话的回复整段都留在 buffer 里，
         # 不切的话前面 _feed_speech 的分段努力在最常见的情形下等于没做
         for piece in tts.split_sentences(remainder, max_chars=self._speech_max_chars):
-            self._speech_queue.put((self._generation, piece))
+            self._queue_sentence(piece)
 
     def speak_text(self, text):
         """用户点了某条消息的「朗读」。走同一个串行 worker，
@@ -359,14 +526,17 @@ class SessionCoordinator:
 
     # ------------------------------------------------------------ 主循环
 
-    def _run_turn(self, message_id, query=""):
+    def _run_turn(self, message_id, query, generation):
         started = time.time()
         self._turn_started = started
         self._turn_first_token = None
         self._turn_first_audio = None
+        self._repeat_streak = 0
+        self._degenerate = False
+        self._speech_seen = set()
         try:
             self.set_state("thinking")
-            self._loop(message_id, self._memory_block(query))
+            self._loop(message_id, self._memory_block(query), generation)
         except Cancelled:
             self.emit({"type": "turn_cancelled", "id": message_id})
         except ProviderError as exc:
@@ -375,31 +545,54 @@ class SessionCoordinator:
             self.log("turn 崩了: %s\n%s" % (exc, traceback.format_exc()))
             self.emit({"type": "error", "message": "内部错误：%s" % exc})
         finally:
-            # 无论怎么退出都必须落回 idle
-            self.set_state("idle")
+            # 只有还没被顶替时才落回 idle——顶替它的那一轮有自己的状态要管，
+            # 这里再插一脚会把刚起步的新一轮又拽回 idle。
+            if generation == self._turn_generation:
+                self.set_state("idle")
             self._log_turn_timing(started)
             self.emit({"type": "turn_done", "id": message_id})
 
+            # 忙碌时被接住、排队等着续上的那一句，现在轮到它了
+            queued, self._queued = self._queued, None
+            if queued:
+                self._start_turn(*queued)
+
     def _log_turn_timing(self, started):
         """一轮的延迟账单。三个数各自指向不同的锅：
-        首字慢 = 网络或模型；首音慢 = 合成；总时长远大于首音 = 回复太长。"""
+        首字慢 = 网络或模型；首音慢 = 合成；总时长远大于首音 = 回复太长。
+
+        带上这一轮实际打的 base_url/model——排查"到底走没走自定义模型"时，
+        与其从回复内容或延迟去猜，不如直接在日志里给一句实锤。"""
         def since(mark):
             return "%.2fs" % (mark - started) if mark else "—"
-        self.log("一轮 首字 %s 首音 %s 总 %.2fs" % (
+        self.log("一轮 首字 %s 首音 %s 总 %.2fs · %s / %s" % (
             since(self._turn_first_token), since(self._turn_first_audio),
-            time.time() - started))
+            time.time() - started, self.provider.base_url, self.provider.model))
 
-    def _loop(self, message_id, memory_block=""):
+    def _commit_history(self, history, generation):
+        """把这一轮的历史写回去——前提是这一轮还没被 reset()/新一轮顶替。
+
+        全程只操作本轮自己的快照 `history`，不直接读写 self.history：
+        否则并发的 reset() 清空 self.history 之后，这里还在写的东西会
+        把清空后的新会话重新弄脏。generation 对不上就说明已经被顶替，
+        安静地当作被取消处理，不提交、不再往下走。
+        """
+        if generation != self._turn_generation:
+            raise Cancelled()
+        self.history = history
+
+    def _loop(self, message_id, memory_block, generation):
         max_rounds = self.cfg["session"]["max_tool_rounds"]
+        history = list(self.history)   # 本轮私有快照，reset() 清得动 self.history，清不动这份
 
         for round_index in range(max_rounds + 1):
-            if self._cancel.is_set():
+            if self._cancel.is_set() or generation != self._turn_generation:
                 raise Cancelled()
 
             # 提醒贴在最后一条：工具结果常常是中文（文件名、工具摘要），
             # 隔着这些内容，开头的系统提示压不住格式，模型会整段滑回中文。
             # 这条只在请求里出现，不进 history。
-            messages = ([self._system_message(memory_block)] + self.history
+            messages = ([self._system_message(memory_block)] + history
                         + [self._format_reminder()])
             tools = registry.openai_schema() if round_index < max_rounds else None
 
@@ -424,6 +617,13 @@ class SessionCoordinator:
                     for channel, chunk in splitter.feed(value):
                         self._emit_segment(message_id, channel, chunk,
                                            english_parts, chinese_parts)
+                    # 复读防线跳闸：模型卡循环了，别再往下读——继续读只是白烧
+                    # token、让球体多"speaking"几秒，句子早在 _queue_sentence
+                    # 那层就已经被拦住、不会真播出来。
+                    if self._degenerate:
+                        self.provider.cancel()
+                        self.log("检测到复读循环，提前截断这一轮")
+                        break
                 elif kind == "tool_calls":
                     tool_calls = value
 
@@ -433,16 +633,18 @@ class SessionCoordinator:
             # 历史只留英文：中文是给眼睛看的字幕，喂回上下文只会让 token 翻倍
             full_text = "".join(english_parts)
             chinese_text = "".join(chinese_parts).strip()
+            full_text, chinese_text = self._ensure_bilingual(message_id, full_text, chinese_text)
 
             if not tool_calls:
                 if full_text:
-                    self.history.append({"role": "assistant", "content": full_text})
+                    history.append({"role": "assistant", "content": full_text})
+                self._commit_history(history, generation)
                 self._flush_speech()
                 self.emit({"type": "assistant_done", "id": message_id,
                            "text": full_text, "text_zh": chinese_text})
                 return
 
-            self.history.append({
+            history.append({
                 "role": "assistant",
                 "content": full_text or None,
                 "tool_calls": [{
@@ -457,12 +659,13 @@ class SessionCoordinator:
 
             for index, call in enumerate(tool_calls):
                 result = self._execute(call["name"], call["arguments"], call["id"] or ("call_%d" % index))
-                self.history.append({
+                history.append({
                     "role": "tool",
                     "tool_call_id": call["id"] or ("call_%d" % index),
                     "content": json.dumps(result, ensure_ascii=False)[:16000],
                 })
-            self._trim()
+            history = self._trim_list(history)
+            self._commit_history(history, generation)
             # 工具跑完了，接下来是等模型消化结果——这段是 thinking，不是 executing。
             # 不切回去的话顶栏会一直挂着最后一个工具名，看着像卡死了。
             self.set_state("thinking")
@@ -605,11 +808,14 @@ class SessionCoordinator:
                 "Short and spoken aloud." % ZH_MARKER}
 
     def _trim(self):
+        self.history = self._trim_list(self.history)
+
+    def _trim_list(self, history):
         """裁历史。不能把 assistant(tool_calls) 和它的 tool 结果拆散，否则 API 报 400。"""
         limit = self.cfg["session"]["history_limit"]
-        if len(self.history) <= limit:
-            return
-        cut = len(self.history) - limit
-        while cut < len(self.history) and self.history[cut].get("role") == "tool":
+        if len(history) <= limit:
+            return history
+        cut = len(history) - limit
+        while cut < len(history) and history[cut].get("role") == "tool":
             cut += 1
-        self.history = self.history[cut:]
+        return history[cut:]

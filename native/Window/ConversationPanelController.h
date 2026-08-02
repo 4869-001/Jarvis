@@ -26,6 +26,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)conversationPanel:(ConversationPanelController *)panel
    didAnswerConfirmation:(NSString *)requestID
                 approved:(BOOL)approved;
+/// 用户在模型选择菜单里点了某一项
+- (void)conversationPanel:(ConversationPanelController *)panel didRequestSetModel:(NSString *)modelID;
+/// 用户填完「添加模型」表单点了保存。fields 里是 label/base_url/api_key/model 四个字符串
+- (void)conversationPanel:(ConversationPanelController *)panel didRequestAddModel:(NSDictionary *)fields;
+/// 用户修改已有模型；空 api_key 表示保留原 Key
+- (void)conversationPanel:(ConversationPanelController *)panel didRequestUpdateModel:(NSDictionary *)fields;
+/// 用户在模型列表里删了一个自定义模型
+- (void)conversationPanel:(ConversationPanelController *)panel didRequestRemoveModel:(NSString *)modelID;
 @end
 
 @interface ConversationPanelController : NSObject
@@ -46,6 +54,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 音频电平，驱动顶栏的动态条。高频调用，内部会限流并在面板不可见时直接丢弃。
 - (void)pushMicLevel:(float)level;
+
+/// 记一次用户真正发出的话（干净文本，不含附件/场景信息拼接的部分），
+/// 用来给输入框的 "/" 常用短语菜单按频率排序。见 AppDelegate 的 sendUserMessage:。
+- (void)trackUsage:(NSString *)text;
 
 @end
 

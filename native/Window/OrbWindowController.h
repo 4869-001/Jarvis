@@ -23,6 +23,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// 变化不大时会自行丢弃，不必调用方节流。
 - (void)applyLevel:(float)level;
 
+/// 启动进度 0–100，按真实里程碑推（进程起来/连上大脑/唤醒词就绪……），
+/// 不是假的计时器动画。只传百分比——壁纸上的启动动效只显示 "LOADING NN%"，
+/// 刻意不接受文案参数，免得哪天手滑传个中文字符串进去。
+- (void)applyBootProgress:(NSInteger)percent;
+
 @end
 
 NS_ASSUME_NONNULL_END

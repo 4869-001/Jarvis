@@ -21,6 +21,8 @@ static NSString *const kDevRoot = @"~/Projects/Jarvis";
 + (NSString *)statePath    { return [[self supportDirectory] stringByAppendingPathComponent:@"state"]; }
 + (NSString *)configPath   { return [[self supportDirectory] stringByAppendingPathComponent:@"config.json"]; }
 + (NSString *)brainLogPath { return [[self supportDirectory] stringByAppendingPathComponent:@"brain.log"]; }
++ (NSString *)skillsPath   { return [[self supportDirectory] stringByAppendingPathComponent:@"skills.json"]; }
++ (NSString *)skillUsagePath { return [[self supportDirectory] stringByAppendingPathComponent:@"skill_usage.json"]; }
 
 + (NSURL *)webPage:(NSString *)filename {
     NSURL *bundled = [[[NSBundle mainBundle] resourceURL]

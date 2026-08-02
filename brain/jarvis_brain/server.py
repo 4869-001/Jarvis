@@ -13,6 +13,7 @@ import time
 
 from . import config
 from . import memory
+from . import models
 from . import tts as tts_module
 from .session import SessionCoordinator
 
@@ -68,9 +69,12 @@ class BrainServer:
         self.listener.bind(self.socket_path)
         os.chmod(self.socket_path, 0o600)
         self.listener.listen(4)
-        self.log("Brain 就绪，监听 %s（模型 %s，key 来源：%s，音色 %s）" % (
+        # 用 session.provider 实际在用的那个，不是配置里的默认值——
+        # 上次选了自定义模型的话，重启后接着用的是那个，日志得如实反映。
+        self.log("Brain 就绪，监听 %s（模型 %s @ %s，key 来源：%s，音色 %s）" % (
             self.socket_path,
-            self.cfg["deepseek"]["model"],
+            self.session.provider.model,
+            self.session.provider.base_url,
             self.cfg.get("_key_source", "?"),
             self.cfg["tts"]["backend"] if self.cfg["tts"]["enabled"] else "关闭",
         ))
@@ -148,7 +152,7 @@ class BrainServer:
             "type": "ready",
             "protocol": PROTOCOL_VERSION,
             "session_id": self.session.session_id,
-            "model": self.cfg["deepseek"]["model"],
+            "model": self.session.provider.model,
             "configured": self.session.provider.configured,
             "config_path": config.CONFIG_PATH,
             "allow_shell": self.cfg["tools"]["allow_shell"],
@@ -158,6 +162,7 @@ class BrainServer:
                        "count": remembered},
             "tts": {"enabled": self.cfg["tts"]["enabled"],
                     "backend": self.cfg["tts"]["backend"]},
+            "models": self.session.models_payload(),
         }
 
     def _serve_client(self, conn):
@@ -213,6 +218,40 @@ class BrainServer:
             })
         elif kind == "speak_text":
             self.session.speak_text(message.get("text"))
+        elif kind == "set_model":
+            self.session.set_model(message.get("id"))
+            self.emit({"type": "models", **self.session.models_payload()})
+        elif kind == "add_model":
+            try:
+                models.STORE.add(message.get("label"), message.get("base_url"),
+                                 message.get("api_key"), message.get("model"))
+            except ValueError as exc:
+                self.emit({"type": "error", "message": str(exc)})
+            self.emit({"type": "models", **self.session.models_payload()})
+        elif kind == "update_model":
+            model_id = message.get("id")
+            try:
+                models.STORE.update(model_id, message.get("label"), message.get("base_url"),
+                                    message.get("api_key"), message.get("model"))
+                if models.STORE.active_id() == model_id:
+                    self.session.set_model(model_id)
+            except ValueError as exc:
+                self.emit({"type": "error", "message": str(exc)})
+            self.emit({"type": "models", **self.session.models_payload()})
+        elif kind == "remove_model":
+            model_id = message.get("id")
+            was_active = (models.STORE.active_id() == model_id)
+            try:
+                models.STORE.remove(model_id)
+            except ValueError as exc:
+                self.emit({"type": "error", "message": str(exc)})
+            else:
+                # 删的是正在用的那个：ModelStore 自己的 active 指针已经回落到
+                # default，但 session.provider 还是那个指向已删模型的旧实例，
+                # 必须显式切一次才能让真正在跑的 provider 也跟着回落。
+                if was_active:
+                    self.session.set_model(models.DEFAULT_MODEL_ID)
+            self.emit({"type": "models", **self.session.models_payload()})
         elif kind == "ping":
             self.emit({"type": "pong", "t": time.time()})
         elif kind == "reload_config":
@@ -223,7 +262,15 @@ class BrainServer:
     def _reload(self):
         self.cfg = config.load()
         self.session.cfg = self.cfg
-        self.session.provider = type(self.session.provider)(self.cfg["deepseek"])
+        # 重载配置不能悄悄退回默认模型：active 指针和菜单仍指向自定义模型时，
+        # Provider 也必须用同一条配置，否则 UI 与真实 API 会发生分叉。
+        active_id = models.STORE.active_id()
+        provider_cfg = models.STORE.get_provider_cfg(active_id, self.cfg["deepseek"])
+        if provider_cfg is None:
+            active_id = models.DEFAULT_MODEL_ID
+            models.STORE.set_active(active_id)
+            provider_cfg = self.cfg["deepseek"]
+        self.session.provider = type(self.session.provider)(provider_cfg)
         self.session.tool_ctx.update({
             "fs_roots": self.cfg["tools"]["fs_roots"],
             "allow_shell": self.cfg["tools"]["allow_shell"],

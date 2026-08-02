@@ -19,6 +19,8 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSString *)statePath;        // ~/.jarvis/state
 + (NSString *)configPath;       // ~/.jarvis/config.json
 + (NSString *)brainLogPath;     // ~/.jarvis/brain.log
++ (NSString *)skillsPath;       // ~/.jarvis/skills.json
++ (NSString *)skillUsagePath;   // ~/.jarvis/skill_usage.json
 
 /// 网页资源（Resources/web 优先，回落到源码 ui/）
 + (NSURL *)webPage:(NSString *)filename;

@@ -18,6 +18,15 @@ static const uint32_t kHotKeySignature = 'jrvs';
 static const uint32_t kHotKeyPanel = 1;
 static const uint32_t kHotKeyVoice = 2;
 
+/// 唤醒词是常驻麦克风 + 持续跑模型推理，最费 CPU 的就是它。
+/// 闲着没人说话时没必要一直听，30s 没有对话就把它关掉；
+/// 一旦又忙起来（收音/播报）过后重新闲下来，refreshWakeGate 会自动拉回来。
+static const NSTimeInterval kWakeIdleTimeout = 30.0;
+
+/// 关掉之后不能永远不管——那样"贾维斯"就再也叫不动它了，只能靠快捷键。
+/// 停 2 分钟、听 30 秒地占空转，CPU 省下来的同时唤醒词不会彻底死掉。
+static const NSTimeInterval kWakeRestartInterval = 120.0;
+
 @interface AppDelegate () <BrainIPCClientDelegate,
                            BrainProcessManagerDelegate,
                            ConversationPanelDelegate,
@@ -47,6 +56,12 @@ static const uint32_t kHotKeyVoice = 2;
 @property (nonatomic, copy)   NSString *brainDetail;
 @property (nonatomic, assign) BOOL transcribing;
 @property (nonatomic, assign) BOOL sleeping;
+@property (nonatomic, strong) NSTimer *wakeIdleTimer;
+@property (nonatomic, strong) NSTimer *wakeRestartTimer;
+@property (nonatomic, assign) BOOL bootComplete;
+@property (nonatomic, strong) NSMutableOrderedSet<NSString *> *seenAppsToday;
+@property (nonatomic, strong) NSDate *seenAppsDay;
+@property (nonatomic, copy)   NSString *pendingWakeContext;
 @end
 
 @implementation AppDelegate
@@ -55,6 +70,7 @@ static const uint32_t kHotKeyVoice = 2;
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];   // 无 Dock 图标
+    [self installEditingMenuForKeyboardShortcuts];
     [self terminateOtherInstances];
 
     self.brainState = @"idle";
@@ -63,6 +79,9 @@ static const uint32_t kHotKeyVoice = 2;
 
     self.orb = [[OrbWindowController alloc] init];
     [self.orb start];
+    [self.orb applyBootProgress:8];
+
+    [self startAppUsageTracking];
 
     self.conversation = [[ConversationPanelController alloc] init];
     self.conversation.delegate = self;
@@ -84,12 +103,50 @@ static const uint32_t kHotKeyVoice = 2;
     self.brainProcess.delegate = self;
     [self.brainProcess start];
     [self.brain start];
+    [self.orb applyBootProgress:20];
 
     [self registerHotKeys];
 }
 
+/// App 是 accessory 策略，没有可见菜单栏——但 ⌘C/⌘V/⌘X/⌘A 这些标准编辑快捷键
+/// 在 AppKit 里靠 `[NSApp mainMenu]` 做 key equivalent 匹配、再转发成
+/// copy:/paste:/cut:/selectAll: 发给第一响应者（这里就是 WKWebView）。
+/// 没有 mainMenu 的话，哪怕菜单本身不显示，这几个快捷键在对话面板的
+/// 输入框和消息区里也一律不生效。建一个不出现在屏幕上的 Edit 菜单，
+/// 只为了让这条路由链路存在。
+- (void)installEditingMenuForKeyboardShortcuts {
+    NSMenu *mainMenu = [[NSMenu alloc] init];
+    NSMenuItem *editMenuItem = [[NSMenuItem alloc] init];
+    [mainMenu addItem:editMenuItem];
+
+    NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
+    [editMenu addItemWithTitle:@"撤销" action:@selector(undo:) keyEquivalent:@"z"];
+    NSMenuItem *redo = [editMenu addItemWithTitle:@"重做" action:@selector(redo:) keyEquivalent:@"z"];
+    redo.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    [editMenu addItemWithTitle:@"剪切" action:@selector(cut:) keyEquivalent:@"x"];
+    [editMenu addItemWithTitle:@"拷贝" action:@selector(copy:) keyEquivalent:@"c"];
+    [editMenu addItemWithTitle:@"粘贴" action:@selector(paste:) keyEquivalent:@"v"];
+    [editMenu addItemWithTitle:@"全选" action:@selector(selectAll:) keyEquivalent:@"a"];
+    editMenuItem.submenu = editMenu;
+
+    [NSApp setMainMenu:mainMenu];
+}
+
+/// 启动进度只前进不回退、只完成一次——refreshWakeGate 之后每次闲下来都会
+/// 重新拉唤醒词，那条路不该把开机动画又拉回来放一遍。
+/// reason 只进日志，不进壁纸——壁纸上的启动动效只显示 "LOADING NN%"，不接受文案。
+- (void)markBootComplete:(NSString *)reason {
+    if (self.bootComplete) return;
+    self.bootComplete = YES;
+    NSLog(@"[jarvis] 启动完成：%@", reason ?: @"就绪");
+    [self.orb applyBootProgress:100];
+}
+
 - (void)applicationWillTerminate:(NSNotification *)note {
     [self unregisterHotKeys];
+    [self cancelWakeIdleTimer];
+    [self cancelWakeRestartTimer];
     [self.wake stop];
     [self.voice abort];
     [self.player stopAll];
@@ -207,6 +264,8 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
         [self.voice abort];             // 停采集，且不产出文本
         [self.player stopAll];          // 停播报
         [self.brain send:@{@"type": @"cancel"}];   // 取消模型请求与待执行工具
+        [self cancelWakeIdleTimer];     // 已经手动睡了，用不着空闲计时器再补一刀
+        [self cancelWakeRestartTimer];  // 睡眠期间不该有省电定时器把它自己叫醒
         [self.wake stop];               // 唤醒词一并停掉，麦克风才真的还回系统
         self.wake = nil;
         self.transcribing = NO;
@@ -224,7 +283,7 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 - (void)toggleVoice {
     if (self.sleeping) {
         [self.conversation pushEvent:@{@"type": @"error",
-                                       @"message": @"Jarvis 在睡眠中，先唤醒再说话"}];
+                                       @"message": @"J.A.R.V.I.S. 在睡眠中，先唤醒再说话"}];
         [self.conversation show];
         return;
     }
@@ -281,7 +340,7 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 /// 词表 = 唤醒词与固定术语 + 当前在跑的应用名（用户提到的应用几乎都在这里面）。
 - (NSArray<NSString *> *)contextualStringsFromConfig:(NSDictionary *)config {
     NSMutableOrderedSet<NSString *> *words = [NSMutableOrderedSet orderedSet];
-    [words addObjectsFromArray:@[@"贾维斯", @"Jarvis", @"J.A.R.V.I.S.",
+    [words addObjectsFromArray:@[@"贾维斯", @"Jarvis", @"JARVIS",
                                  @"网易云音乐", @"访达", @"剪贴板", @"截图",
                                  @"终端", @"系统设置", @"下一首", @"上一首"]];
 
@@ -299,19 +358,79 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
     return words.array;
 }
 
+#pragma mark - 场景信息
+
+/// 「今天用过的应用」不是历史日志——没有单独去记，就用 Jarvis 常驻期间
+/// 观察到的启动事件累积，每天早上第一次触发时清空重来。
+/// 这是"今天"这个词能诚实覆盖的范围：Jarvis 不在跑的那段时间不算数。
+- (void)startAppUsageTracking {
+    self.seenAppsToday = [NSMutableOrderedSet orderedSet];
+    self.seenAppsDay = [NSDate date];
+    for (NSRunningApplication *app in [NSWorkspace sharedWorkspace].runningApplications) {
+        if (app.activationPolicy == NSApplicationActivationPolicyRegular && app.localizedName.length) {
+            [self.seenAppsToday addObject:app.localizedName];
+        }
+    }
+    [[[NSWorkspace sharedWorkspace] notificationCenter]
+        addObserver:self selector:@selector(appDidLaunch:)
+               name:NSWorkspaceDidLaunchApplicationNotification object:nil];
+}
+
+- (void)appDidLaunch:(NSNotification *)note {
+    if (![[NSCalendar currentCalendar] isDateInToday:self.seenAppsDay]) {
+        [self.seenAppsToday removeAllObjects];
+        self.seenAppsDay = [NSDate date];
+    }
+    NSRunningApplication *app = note.userInfo[NSWorkspaceApplicationKey];
+    if (app.activationPolicy == NSApplicationActivationPolicyRegular && app.localizedName.length) {
+        [self.seenAppsToday addObject:app.localizedName];
+    }
+}
+
+/// 唤醒时把这段拼在用户话之前一起发给 Brain（只拼给 Brain 看，面板里仍然只显示
+/// 用户实际说的话，跟文件附件走的是同一个"面板干净、payload 带料"的路子）。
+/// 用词特意说"仅供参考、不必逐条复述"——不然模型会把这几行读成台词背一遍。
+- (NSString *)buildSceneContext {
+    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+    fmt.locale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
+    fmt.dateFormat = @"yyyy年M月d日 EEEE HH:mm";
+    NSString *now = [fmt stringFromDate:[NSDate date]];
+
+    NSTimeInterval uptime = [NSProcessInfo processInfo].systemUptime;
+    NSInteger hours = (NSInteger)uptime / 3600;
+    NSInteger minutes = ((NSInteger)uptime % 3600) / 60;
+    NSString *uptimeStr = hours > 0
+        ? [NSString stringWithFormat:@"%ld 小时 %ld 分钟", (long)hours, (long)minutes]
+        : [NSString stringWithFormat:@"%ld 分钟", (long)minutes];
+
+    NSString *appsStr = self.seenAppsToday.count
+        ? [self.seenAppsToday.array componentsJoinedByString:@"、"]
+        : @"（还没观察到）";
+
+    return [NSString stringWithFormat:
+        @"[场景信息，仅供参考，不必逐条复述，自然的时候才提]\n"
+        @"当前时间：%@\n本机已开机：%@\n今天用过的应用：%@\n\n", now, uptimeStr, appsStr];
+}
+
 #pragma mark - 唤醒词
 
 - (void)setUpWakeWordWithConfig:(NSDictionary *)config {
     self.wakeConfig = config;
+    [self cancelWakeRestartTimer];              // 走到这儿说明有别的路径在管唤醒词了，省电定时器让路
     if (self.sleeping) return;                 // 睡着时不重建，醒来那一刻才建
     BOOL enabled = [config[@"enabled"] boolValue];
-    if (!enabled) { [self.wake stop]; self.wake = nil; return; }
+    if (!enabled) {
+        [self.wake stop]; self.wake = nil;
+        [self markBootComplete:@"就绪（唤醒词已关闭）"];
+        return;
+    }
     if (self.wake.isRunning) return;
 
     NSString *modelDir = [JarvisPaths kwsModelDirectory];
     NSString *keywords = [JarvisPaths wakeKeywordsFile];
     if (!modelDir || !keywords) {
         NSLog(@"[jarvis] 唤醒词模型不存在，跳过（models/kws-zh-en 与 models/kws-jarvis.txt）");
+        [self markBootComplete:@"就绪"];
         return;
     }
 
@@ -327,22 +446,88 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
     [[AudioHub shared] requestPermission:^(BOOL granted, NSString *reason) {
         if (!granted) {
             NSLog(@"[jarvis] 唤醒词未启动：%@", reason);
+            [self markBootComplete:@"就绪（麦克风权限未授权）"];
             return;
         }
         [self.wake start];
+        [self scheduleWakeIdleTimer];
+        [self markBootComplete:nil];
     }];
 }
 
 /// 半双工门（评审 §6.5 第一层）：播报和收音期间都不让唤醒词触发。
 /// 前者防止 Jarvis 把自己念出来的"贾维斯"当成唤醒，后者防止一句话里
 /// 提到"贾维斯"时在收音中途再唤醒一次。
+///
+/// 兼职做空闲计时的入口：忙的时候（收音/播报）先把倒计时按住；
+/// 一旦又闲下来——唤醒词之前被空闲关掉了就重新拉起来，没关掉就重新数 30s。
 - (void)refreshWakeGate {
-    self.wake.muted = self.player.isPlaying || self.voice.isListening;
+    BOOL busy = self.player.isPlaying || self.voice.isListening;
+    self.wake.muted = busy;
+    if (busy || self.sleeping) {
+        [self cancelWakeIdleTimer];
+        return;
+    }
+    if (self.wakeConfig && !self.wake.isRunning) {
+        [self setUpWakeWordWithConfig:self.wakeConfig];
+    } else {
+        [self scheduleWakeIdleTimer];
+    }
+}
+
+- (void)scheduleWakeIdleTimer {
+    [self.wakeIdleTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    self.wakeIdleTimer = [NSTimer scheduledTimerWithTimeInterval:kWakeIdleTimeout
+                                                           repeats:NO
+                                                             block:^(NSTimer *timer) {
+        [weakSelf wakeIdleTimerFired];
+    }];
+}
+
+- (void)cancelWakeIdleTimer {
+    [self.wakeIdleTimer invalidate];
+    self.wakeIdleTimer = nil;
+}
+
+- (void)wakeIdleTimerFired {
+    self.wakeIdleTimer = nil;
+    if (self.sleeping || !self.wake.isRunning) return;
+    NSLog(@"[jarvis] 闲置 %.0f 秒无对话，关闭常开麦克风省 CPU，%.0f 秒后自动恢复",
+          kWakeIdleTimeout, kWakeRestartInterval);
+    [self.wake stop];
+    self.wake = nil;
+    [self scheduleWakeRestartTimer];
+}
+
+- (void)scheduleWakeRestartTimer {
+    [self.wakeRestartTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    self.wakeRestartTimer = [NSTimer scheduledTimerWithTimeInterval:kWakeRestartInterval
+                                                              repeats:NO
+                                                                block:^(NSTimer *timer) {
+        [weakSelf wakeRestartTimerFired];
+    }];
+}
+
+- (void)cancelWakeRestartTimer {
+    [self.wakeRestartTimer invalidate];
+    self.wakeRestartTimer = nil;
+}
+
+/// 省电窗口到点了，自己把唤醒词拉回来——不能指望用户先按一次快捷键才能救活它。
+- (void)wakeRestartTimerFired {
+    self.wakeRestartTimer = nil;
+    if (self.sleeping || !self.wakeConfig) return;
+    if (self.player.isPlaying || self.voice.isListening) return;   // 忙着就不插手，refreshWakeGate 会在闲下来时自己处理
+    NSLog(@"[jarvis] 省电窗口结束，恢复唤醒词监听");
+    [self setUpWakeWordWithConfig:self.wakeConfig];
 }
 
 - (void)wakeWordDetector:(WakeWordDetector *)detector didDetect:(NSString *)keyword {
     NSLog(@"[jarvis] 唤醒：%@", keyword);
     [self.conversation pushEvent:@{@"type": @"wake", @"keyword": keyword ?: @""}];
+    self.pendingWakeContext = [self buildSceneContext];   // 只用这一次，sendUserMessage 里消费掉
     [self toggleVoice];
 }
 
@@ -382,6 +567,7 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
                          [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (trimmed.length == 0) {
         [self.conversation pushEvent:@{@"type": @"transcript_empty"}];
+        self.pendingWakeContext = nil;   // 唤醒了但没听清，别把这份场景信息拖到下一条不相关的消息里
         return;
     }
     [self.conversation pushEvent:@{@"type": @"transcript_final", @"text": trimmed}];
@@ -401,6 +587,7 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
     [self.conversation pushEvent:@{@"type": @"error", @"message": message}];
     [self.conversation show];
     [self refreshUIState];
+    self.pendingWakeContext = nil;   // 识别失败，同样别把场景信息拖到下一条不相关的消息里
 }
 
 #pragma mark - SpeechPlayerDelegate
@@ -435,6 +622,7 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 - (void)brainClientDidConnect:(BrainIPCClient *)client {
     [self.statusItem updateBrainStatus:@"已连接" healthy:YES];
     [self.conversation pushEvent:@{@"type": @"connection", @"connected": @YES}];
+    [self.orb applyBootProgress:55];
 }
 
 - (void)brainClient:(BrainIPCClient *)client didDisconnectWithReason:(NSString *)reason {
@@ -472,6 +660,7 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
     } else if ([type isEqualToString:@"ready"]) {
         BOOL configured = [event[@"configured"] boolValue];
         [self.statusItem updateBrainStatus:configured ? @"已连接" : @"缺 API Key" healthy:configured];
+        [self.orb applyBootProgress:80];
 
         NSDictionary *voiceConfig = event[@"voice_input"];
         if ([voiceConfig isKindOfClass:[NSDictionary class]]) {
@@ -522,7 +711,7 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
         return;
     }
     NSLog(@"[jarvis] 辅助功能权限：未授权——播放器控制、媒体键都会失败。"
-          @"重新构建过的话要去系统设置里把 J.A.R.V.I.S. 关掉再打开（cdhash 变了）");
+          @"重新构建过的话要去系统设置里把 JARVIS 关掉再打开（cdhash 变了）");
     NSDictionary *options = @{(__bridge NSString *)kAXTrustedCheckOptionPrompt: @YES};
     AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
 }
@@ -548,12 +737,26 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 - (void)sendUserMessage:(NSString *)text {
     if (self.sleeping) {
         [self.conversation pushEvent:@{@"type": @"error",
-                                       @"message": @"Jarvis 在睡眠中，先唤醒再发送"}];
+                                       @"message": @"J.A.R.V.I.S. 在睡眠中，先唤醒再发送"}];
         return;
     }
+
+    // 记的是干净的原话（这个函数唯一同时接文字输入和语音终版结果的入口），
+    // 不是拼过场景信息/附件之后的 payload——"/" 菜单要的是用户真正说过什么。
+    [self.conversation trackUsage:text];
+
+    // 刚被唤醒词唤醒说的第一句话，把场景信息拼在前面一起发给 Brain——
+    // 面板里仍然只显示用户实际打的/说的这句，跟文件附件是同一套"面板干净、
+    // payload 带料"的路子。只用一次，用完就清，免得往后每条消息都夹带。
+    NSString *payload = text;
+    if (self.pendingWakeContext.length) {
+        payload = [self.pendingWakeContext stringByAppendingString:text];
+        self.pendingWakeContext = nil;
+    }
+
     self.messageCounter += 1;
     NSString *messageID = [NSString stringWithFormat:@"msg_%lu", (unsigned long)self.messageCounter];
-    [self.brain send:@{@"type": @"user_message", @"text": text, @"id": messageID}];
+    [self.brain send:@{@"type": @"user_message", @"text": payload, @"id": messageID}];
 }
 
 - (void)conversationPanel:(ConversationPanelController *)panel didSubmitText:(NSString *)text {
@@ -585,6 +788,37 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 - (void)conversationPanel:(ConversationPanelController *)panel didRequestSpeak:(NSString *)text {
     if (self.sleeping) return;
     [self.brain send:@{@"type": @"speak_text", @"text": text}];
+}
+
+- (void)conversationPanel:(ConversationPanelController *)panel didRequestSetModel:(NSString *)modelID {
+    [self.brain send:@{@"type": @"set_model", @"id": modelID}];
+}
+
+- (void)conversationPanel:(ConversationPanelController *)panel didRequestAddModel:(NSDictionary *)fields {
+    NSString *(^str)(id) = ^NSString *(id value) {
+        return [value isKindOfClass:[NSString class]] ? value : @"";
+    };
+    [self.brain send:@{@"type": @"add_model",
+                       @"label": str(fields[@"label"]),
+                       @"base_url": str(fields[@"base_url"]),
+                       @"api_key": str(fields[@"api_key"]),
+                       @"model": str(fields[@"model"])}];
+}
+
+- (void)conversationPanel:(ConversationPanelController *)panel didRequestUpdateModel:(NSDictionary *)fields {
+    NSString *(^str)(id) = ^NSString *(id value) {
+        return [value isKindOfClass:[NSString class]] ? value : @"";
+    };
+    [self.brain send:@{@"type": @"update_model",
+                       @"id": str(fields[@"id"]),
+                       @"label": str(fields[@"label"]),
+                       @"base_url": str(fields[@"base_url"]),
+                       @"api_key": str(fields[@"api_key"]),
+                       @"model": str(fields[@"model"])}];
+}
+
+- (void)conversationPanel:(ConversationPanelController *)panel didRequestRemoveModel:(NSString *)modelID {
+    [self.brain send:@{@"type": @"remove_model", @"id": modelID}];
 }
 
 /// 文件卡片上的「在访达中显示 / 打开」。走 NSWorkspace 而不是 open(1)：

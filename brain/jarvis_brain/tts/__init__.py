@@ -33,23 +33,23 @@ SENTENCE_END = re.compile(r"(?<=[。！？；;\n])|(?<=[a-z0-9][.!?])(?=\s)")
 
 
 def detect_language(text, cfg=None):
-    """返回 (语言, 是否是越过配置的兜底)。
+    """返回 (语言, 是否越过了配置强制的语言)。
 
-    现在 Jarvis 一律讲英文，而回复里可能夹着中文专有名词，
-    靠自动检测会把整句切到中文音色上去。
+    第二个值就是"这句其实是格式违规"的信号：Jarvis 固定讲英文，
+    但模型偶尔不守"英文在前 + {marker} + 中文字幕"的格式、整句吐中文。
+    调用方（tts.synthesize）现在看到 True 就直接跳过合成，不再退到中文音色——
+    "播报必须是英文"是绝对规则，不接受"用对的音色说错的语言"这种妥协。
     """
     forced = (cfg or {}).get("language")
     detected = "zh" if _CJK.search(text) else "en"
     if forced not in ("zh", "en"):
         return detected, False
-    # 兜底：强制英文但内容其实是中文（模型偶尔会不守"英文在前"的格式），
-    # 硬塞给 Piper 只会念出一串乱码。这时按内容走，宁可语言不对也别听着是坏的。
-    if forced == "en" and _mostly_cjk(text):
+    if forced == "en" and mostly_cjk(text):
         return "zh", True
     return forced, False
 
 
-def _mostly_cjk(text):
+def mostly_cjk(text):
     letters = [ch for ch in text if ch.isalpha() or _CJK.match(ch)]
     if not letters:
         return False
@@ -114,6 +114,14 @@ def clean_for_speech(text):
     text = re.sub(r"[|_~]+", " ", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip()
+
+
+def clean_for_english_speech(text):
+    """挡住 Piper 不支持的汉字，免得逐字念成 "Chinese letter"。"""
+    text = re.sub(r'["“「『]\s*[一-鿿㐀-䶿]+\s*["”」』]',
+                  "the quoted Chinese phrase", text)
+    text = re.sub(r"[一-鿿㐀-䶿]+", "the Chinese phrase", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
 def _cache_path(suffix):
@@ -186,18 +194,20 @@ def synthesize(text, cfg):
         return None, None
 
     lang, off_language = detect_language(text, cfg)
-    backend = cfg.get("backend", "system")
 
-    # 走到兜底语言时一律用系统音色，**不要**为它把另一个定稿模型也拉起来。
-    #
-    # 这是实测出来的一条大坑：模型偶尔不守"英文在前"的格式、整句吐中文，
-    # 而常驻合成进程只加载了英文模型。此时按定稿音色走会现场加载 Kokoro
-    # （约 500MB + jieba 词典），一句话要 18~35 秒，之后两个模型一起常驻，
-    # 把后面每一句也拖慢。系统音色 2 秒出声，而且金属滤镜链照样过——
-    # Jarvis 的声音本来就主要来自那条链子，不是音色本身。
-    # 一次格式跑偏的代价应该是"这句声音略不同"，不是"整个对话卡半分钟"。
-    if off_language and backend != "system":
-        backend = "system"
+    # 2026-08-02 用户把"播报必须是英文"收紧成绝对规则：宁可这句没声音，
+    # 也不能把中文念出来——哪怕音色是对的。以前这里退到系统中文音色把它
+    # 念完，现在直接跳过合成。文本已经通过字幕正常显示了，用户不会"看不到"，
+    # 只是这一句没有语音；比"中英文混杂播报"符合要求得多。
+    if off_language:
+        return None, None
+
+    # system 后端没有混合音色拼接能力，至少别把汉字交给英文 voice。
+    # neural 后端会在 synth_server 内按中英文片段切换，并统一走 Jarvis 后处理。
+    if lang == "en" and _CJK.search(text) and cfg.get("backend", "system") != "neural":
+        text = clean_for_english_speech(text)
+
+    backend = cfg.get("backend", "system")
 
     # 短句缓存。Jarvis 的说话风格决定了短句复现率很高——"Already done."、
     # "At your service, sir."、报时那几种句式。定稿音色合成一句要好几秒，

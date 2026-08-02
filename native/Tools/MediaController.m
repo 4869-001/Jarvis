@@ -572,10 +572,10 @@ static NSInteger MenuIndexForAction(NSArray<NSString *> *names, NSString *action
             //   -1728  errAENoSuchObject        同上
             if (code.integerValue == -1743) {
                 failure = [NSString stringWithFormat:@"%@（自动化）：系统设置 → 隐私与安全性 → "
-                           @"自动化，把 J.A.R.V.I.S. 下的「系统事件」打开", [self permissionHint]];
+                           @"自动化，把 JARVIS 下的「系统事件」打开", [self permissionHint]];
             } else if (code.integerValue == -25211) {
                 failure = [NSString stringWithFormat:@"%@（辅助功能）：系统设置 → 隐私与安全性 → "
-                           @"辅助功能，把 J.A.R.V.I.S. 打开", [self permissionHint]];
+                           @"辅助功能，把 JARVIS 打开", [self permissionHint]];
             } else if (code.integerValue == -1719 || code.integerValue == -1728) {
                 failure = @"网易云音乐的窗口/菜单还没就绪，稍后再试";
             } else {

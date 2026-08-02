@@ -7,6 +7,7 @@ static const NSTimeInterval kMeterInterval = 0.05;   // 20Hz，够球体跟得�
 @interface SpeechPlayer () <AVAudioPlayerDelegate>
 @property (nonatomic, strong) NSMutableArray<NSString *> *queue;
 @property (nonatomic, strong) AVAudioPlayer *player;
+@property (nonatomic, copy) NSString *currentPath;
 @property (nonatomic, strong) NSTimer *meterTimer;
 @property (nonatomic, assign) float smoothedLevel;
 @property (nonatomic, assign) BOOL announcedStart;
@@ -27,6 +28,12 @@ static const NSTimeInterval kMeterInterval = 0.05;   // 20Hz，够球体跟得�
 
 - (void)enqueue:(NSString *)wavPath {
     if (wavPath.length == 0) return;
+    // Brain 已经按文本去重；播放器再按音频路径守一道。短句缓存会让相同内容
+    // 指向同一个 wav，IPC 重发或重连时若再次收到，不能把同一句排两遍。
+    if ([wavPath isEqualToString:self.currentPath] || [self.queue containsObject:wavPath]) {
+        NSLog(@"[jarvis] 忽略重复播报：%@", wavPath.lastPathComponent);
+        return;
+    }
     [self.queue addObject:wavPath];
     if (!self.player.isPlaying) [self playNext];
 }
@@ -35,6 +42,7 @@ static const NSTimeInterval kMeterInterval = 0.05;   // 20Hz，够球体跟得�
     [self.queue removeAllObjects];
     [self.player stop];
     self.player = nil;
+    self.currentPath = nil;
     [self finishIfIdle];
 }
 
@@ -57,6 +65,7 @@ static const NSTimeInterval kMeterInterval = 0.05;   // 20Hz，够球体跟得�
     player.meteringEnabled = YES;
     [player prepareToPlay];
     self.player = player;
+    self.currentPath = path;
     [player play];
 
     if (!self.announcedStart) {
@@ -109,6 +118,7 @@ static const NSTimeInterval kMeterInterval = 0.05;   // 20Hz，够球体跟得�
 - (void)audioPlayerDidFinishPlaying:(AVAudioPlayer *)player successfully:(BOOL)flag {
     if (player != self.player) return;      // stopAll 之后来的迟到回调
     self.player = nil;
+    self.currentPath = nil;
     [self playNext];
 }
 
@@ -116,6 +126,7 @@ static const NSTimeInterval kMeterInterval = 0.05;   // 20Hz，够球体跟得�
     NSLog(@"[jarvis] 解码失败：%@", error.localizedDescription);
     if (player != self.player) return;
     self.player = nil;
+    self.currentPath = nil;
     [self playNext];
 }
 

@@ -147,8 +147,8 @@ TOOLS = [
           "同一件事再次被提到会就地更新，不会记成两条。",
           {"text": _p("要记住的一句话，用第三人称陈述，如「用户偏好简短的回答」"),
            "kind": {"type": "string",
-                    "enum": ["identity", "preference", "project", "fact"],
-                    "description": "identity 用户是谁；preference 偏好习惯；"
+                    "enum": ["self", "identity", "preference", "project", "fact"],
+                    "description": "self Jarvis 对自己的认知；identity 用户是谁；preference 偏好习惯；"
                                    "project 手上在做的事；fact 其他事实。"
                                    "identity 与 preference 会在每一轮对话中常驻"},
            "tags": {"type": "array", "items": _STR,
@@ -164,7 +164,7 @@ TOOLS = [
 
     _tool("memory_list", "列出全部长期记忆。用户问「你都记得我什么」时用。",
           {"kind": {"type": "string",
-                    "enum": ["identity", "preference", "project", "fact"],
+                    "enum": ["self", "identity", "preference", "project", "fact"],
                     "description": "只看某一类，不填则全部"}},
           "L0", "python", memory_impl.memory_list),
 
