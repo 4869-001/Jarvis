@@ -1482,6 +1482,15 @@ function handle(event) {
       finishTool(event);
       break;
 
+    case 'tool_retry':
+      addStep(event.id, `${event.message || '自动重试'}（第 ${event.attempt || 2} 次）`);
+      break;
+
+    case 'task_done':
+      if (event.status === 'failed') addNotice(`任务失败 · 已记录 ${event.steps || 0} 个步骤`, true);
+      else if (event.status === 'interrupted') addNotice(`任务已中断 · 已保留 ${event.steps || 0} 个步骤`);
+      break;
+
     case 'speak_failed':
       addNotice('播报失败：' + (event.message || ''), true);
       break;

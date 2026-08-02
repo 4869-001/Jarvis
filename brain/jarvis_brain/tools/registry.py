@@ -16,6 +16,7 @@ from . import fs as fs_impl
 from . import memory_tools as memory_impl
 from . import shell as shell_impl
 from . import web as web_impl
+from .. import tasking as tasking_impl
 
 CONFIRM_FROM = "L2"
 _ORDER = {"L0": 0, "L1": 1, "L2": 2, "L3": 3, "L4": 4}
@@ -172,6 +173,13 @@ TOOLS = [
           {"id": _p("记忆 id，来自 memory_list / memory_recall"),
            "query": _p("没有 id 时，按关键词删掉最匹配的一条")},
           "L1", "python", memory_impl.memory_forget),
+
+    _tool("task_history",
+          "查看最近工具任务的真实执行步骤、结果与验证证据。用户要求继续、重试、"
+          "检查刚才做到哪里时使用；已完成步骤不得盲目重复执行。",
+          {"limit": _p("返回条数，默认 5", _INT),
+           "recoverable_only": _p("只看失败或中断的任务", _BOOL)},
+          "L0", "python", tasking_impl.task_history),
 
     # ------------------------------------------------ 兜底
     _tool("shell_run", "执行一条 zsh 命令。仅在没有任何其他工具能完成时使用；默认被禁用。",

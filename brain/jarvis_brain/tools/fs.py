@@ -1,4 +1,5 @@
 """文件工具。全部经 paths.resolve 过闸，写操作在 policy 层要确认。"""
+import hashlib
 import os
 import shutil
 import subprocess
@@ -92,10 +93,28 @@ def fs_write(args, ctx):
     with open(path, "a" if mode == "append" else "w", encoding="utf-8") as fh:
         fh.write(content)
 
+    # 写成功不等于落盘内容正确。流式计算哈希，避免为了验证大文件再整份读进内存。
+    expected = content.encode("utf-8")
+    digest = hashlib.sha256()
+    size = os.path.getsize(path)
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        if mode == "append" and len(expected) <= size:
+            fh.seek(-len(expected), os.SEEK_END) if expected else fh.seek(0, os.SEEK_END)
+            verified = fh.read() == expected
+        else:
+            verified = size == len(expected) and digest.digest() == hashlib.sha256(expected).digest()
+
     return {
         "path": display(path),
         "mode": mode,
         "bytes": len(content.encode("utf-8")),
+        "verified": verified,
+        "sha256": digest.hexdigest(),
         "backup": display(path + ".jarvis.bak") if (existed and mode == "overwrite") else None,
     }
 
@@ -111,7 +130,8 @@ def fs_move(args, ctx):
 
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     shutil.move(source, destination)
-    return {"from": display(source), "to": display(destination)}
+    verified = os.path.exists(destination) and not os.path.exists(source)
+    return {"from": display(source), "to": display(destination), "verified": verified}
 
 
 def fs_search(args, ctx):
