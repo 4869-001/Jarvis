@@ -7,6 +7,7 @@
 #import <IOKit/ps/IOPowerSources.h>
 #import <IOKit/ps/IOPSKeys.h>
 #include <mach/mach.h>
+#include <unistd.h>
 
 static NSArray<NSString *> *ApplicationSearchPaths(void) {
     return @[@"/Applications",
@@ -304,7 +305,37 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     info[@"hostname"] = [[NSProcessInfo processInfo] hostName];
 
     NSRunningApplication *front = [[NSWorkspace sharedWorkspace] frontmostApplication];
-    if (front) info[@"frontmost_app"] = front.localizedName ?: @"";
+    if (front) {
+        info[@"frontmost_app"] = front.localizedName ?: @"";
+        info[@"frontmost_bundle_id"] = front.bundleIdentifier ?: @"";
+    }
+
+    // 面板一获得键盘焦点，frontmostApplication 就会变成 Jarvis 自己。再看一眼
+    // 窗口层级中 Jarvis 后面的第一个普通应用，才能知道用户唤出面板前在做什么。
+    CFArrayRef windowBlob = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID);
+    for (NSDictionary *window in (__bridge NSArray *)windowBlob) {
+        pid_t pid = [window[(id)kCGWindowOwnerPID] intValue];
+        NSInteger layer = [window[(id)kCGWindowLayer] integerValue];
+        if (pid == getpid() || layer != 0) continue;
+        NSRunningApplication *behind = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+        if (!behind || behind.activationPolicy != NSApplicationActivationPolicyRegular) continue;
+        info[@"previous_app"] = behind.localizedName ?: @"";
+        info[@"previous_bundle_id"] = behind.bundleIdentifier ?: @"";
+        break;
+    }
+    if (windowBlob) CFRelease(windowBlob);
+
+    NSMutableArray *displays = [NSMutableArray array];
+    for (NSScreen *screen in [NSScreen screens]) {
+        NSRect frame = screen.frame;
+        [displays addObject:@{@"width": @((NSInteger)frame.size.width),
+                              @"height": @((NSInteger)frame.size.height),
+                              @"scale": @(screen.backingScaleFactor),
+                              @"main": @(screen == [NSScreen mainScreen])}];
+    }
+    info[@"displays"] = displays;
 
     info[@"battery"] = [self batteryInfo];
     info[@"memory"] = [self memoryInfo];

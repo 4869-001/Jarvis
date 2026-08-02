@@ -50,6 +50,12 @@ DEFAULTS = {
         "auto_approve": [],
         "max_output_chars": 12000,
     },
+    "environment_awareness": {
+        # 每轮把前台应用、电源、内存、磁盘和屏幕布局作为只读上下文交给模型。
+        # 全部在本机采集；设为 false 可完全停止采集与注入。
+        "enabled": True,
+        "timeout": 2.0,
+    },
     "tts": {
         "enabled": True,
         # neural = 定稿音色（中文 zm_029 / 英文 jarvis-high），需要 voices/.venv；
