@@ -515,7 +515,7 @@ body.collapsed #composer { padding-top: 7px; }
     <span id="status">连接中</span>
     <span id="bars"><i></i><i></i><i></i><i></i><i></i></span>
     <button id="btn-opacity" title="面板透明度">◐</button>
-    <button id="btn-wake" title="唤醒方式" aria-label="唤醒方式">
+    <button id="btn-wake" title="唤醒方式" aria-label="唤醒方式" aria-expanded="false">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
         <rect x="8" y="3" width="8" height="12" rx="4"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M9 21h6"/>
       </svg>
@@ -624,6 +624,7 @@ const S = {
   sleeping: false,
   collapsed: false,
   listening: false,
+  wakeWordEnabled: true,
   hasMessages: false,
   textBeforeVoice: '',   // 开麦前输入框里已有的内容，转写要接在它后面
   pendingConfirm: null,  // 未回答的确认卡片，Esc 优先关它
@@ -1392,6 +1393,7 @@ function applyTint(value) {
    界面却已经"看起来"切换成功。 */
 $('btn-wake').addEventListener('click', () => {
   const open = $('wakeMode').classList.toggle('on');
+  $('btn-wake').setAttribute('aria-expanded', String(open));
   $('btn-wake').classList.toggle('on', open || !S.wakeWordEnabled);
   if (open) {
     $('opacity').classList.remove('on');
@@ -1407,6 +1409,8 @@ function applyWakeMode(cfg) {
   S.wakeWordEnabled = enabled;
   $('wake-auto').classList.toggle('active', enabled);
   $('wake-manual').classList.toggle('active', !enabled);
+  $('wake-auto').setAttribute('aria-pressed', String(enabled));
+  $('wake-manual').setAttribute('aria-pressed', String(!enabled));
   $('btn-wake').classList.toggle('on', !enabled);   // 手动模式时点亮，提醒"唤醒词已关"
   $('wake-hint').textContent = enabled
     ? '自动聆听已开启 · 闲置时进入省电周期'
