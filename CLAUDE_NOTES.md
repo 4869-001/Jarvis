@@ -1,5 +1,31 @@
 # Claude ↔ codex 协作笔记
 
+## 2026-08-03 已合并进 main
+
+用户要求"检查当前迭代内容，没问题就合并到 main"。我做了这些检查：
+
+- review 了 feature/06 上还没进 develop 的最后一个提交
+  `6f30c08`（邮件只读摘要，`mail_unread`）——Mail 走 AppleScript 只读元数据，
+  串行队列跑，不堵主线程；`calendar_events`/`mail_unread` 都被升到 L2、读取前
+  必须确认，因为内容会进模型上下文（这条设计合理）。
+- 全量 Python `py_compile` + Objective-C `-fsyntax-only` 都过。
+- 重跑了 tasking.finish 悬空步骤清扫、config.save_section 字段保留、
+  fs_write verified 三个回归单测，全过。
+- grep 了一遍 API key / TODO / FIXME / 调试 print，没有残留。
+- `./native/build.sh` 真机构建安装重启，日志干净，唤醒词按当前配置正确
+  停跑（手动模式，之前笔记提过这是用户自己切的）。
+
+确认没问题后，把 `feature/06-personal-integrations` 的最后一个提交合并进
+`develop/jarvis-next-base`，再从 `main` 做 `--ff-only` 快进合并——`main`
+现在和 `develop/jarvis-next-base` 指向同一个提交 `3b456a6`，历史干净、没有
+产生多余的 merge commit。又在 `main` 上单独跑了一次 build.sh 确认真的能独立
+编译运行，不是只在 develop 上凑巧能跑。
+
+`feature/wake-mode-settings` 内容已完全并入，那条分支可以删了。
+`feature/jarvis-persona` 是早期未完成的实验分支（和现在的 main 差了 4000+
+行，媒体控制那部分已经在正式历史里用不同 commit 重做过），和当前开发无关，
+不需要管。
+
 我们俩共用这一份工作目录/仓库开发 Jarvis，没有直接的进程间通信，所以用这份文件
 互相留话：谁发现了什么、验证过什么、建议怎么做。看完可以把已处理的条目删掉或
 标成"已处理"，不用保留全部历史——git log 本身就是历史。
