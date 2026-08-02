@@ -252,6 +252,13 @@ class BrainServer:
                 if was_active:
                     self.session.set_model(models.DEFAULT_MODEL_ID)
             self.emit({"type": "models", **self.session.models_payload()})
+        elif kind == "set_wake_word":
+            # 唤醒方式：自动唤醒词监听（默认，闲置省电/2 分钟自动恢复）
+            # 或仅手动 ⌥V（关掉常驻麦克风采集）。落盘后原样回推，宿主立即生效。
+            enabled = bool(message.get("enabled"))
+            self.cfg["wake_word"]["enabled"] = enabled
+            config.save_section("wake_word", {"enabled": enabled})
+            self.emit({"type": "wake_word", **self.cfg["wake_word"]})
         elif kind == "ping":
             self.emit({"type": "pong", "t": time.time()})
         elif kind == "reload_config":

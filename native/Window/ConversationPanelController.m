@@ -386,6 +386,9 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
         if ([modelID isKindOfClass:[NSString class]] && modelID.length) {
             [self.delegate conversationPanel:self didRequestRemoveModel:modelID];
         }
+    } else if ([action isEqualToString:@"set_wake_word"]) {
+        [self.delegate conversationPanel:self
+           didRequestSetWakeWordEnabled:[body[@"enabled"] boolValue]];
     } else if ([action isEqualToString:@"open_path"]) {
         NSString *path = body[@"path"];
         if ([path isKindOfClass:[NSString class]] && path.length) {
