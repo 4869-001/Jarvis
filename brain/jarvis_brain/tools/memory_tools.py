@@ -11,7 +11,8 @@ def _brief(entry):
     return {"id": entry["id"], "kind": entry["kind"], "text": entry["text"],
             "tags": entry.get("tags") or [], "subject": entry.get("subject"),
             "source": entry.get("source"), "confidence": entry.get("confidence", 1.0),
-            "status": entry.get("status")}
+            "status": entry.get("status"), "remind_at": entry.get("remind_at"),
+            "last_reminded": entry.get("last_reminded")}
 
 
 def memory_save(args, ctx):
@@ -25,7 +26,7 @@ def memory_save(args, ctx):
         entry, created = STORE.save(text, args.get("kind") or "fact", tags,
                                     subject=args.get("subject"), source="user",
                                     confidence=args.get("confidence", 1.0),
-                                    status=args.get("status"))
+                                    status=args.get("status"), remind_at=args.get("remind_at"))
     except ValueError as exc:
         return {"error": str(exc)}
     return {"saved": _brief(entry), "created": created,
@@ -69,7 +70,7 @@ def memory_update(args, ctx):
         return {"error": "缺少 id"}
     try:
         entry = STORE.update(entry_id, args.get("text"), args.get("status"),
-                             args.get("confidence"))
+                             args.get("confidence"), args.get("remind_at"))
     except ValueError as exc:
         return {"error": str(exc)}
     if not entry:

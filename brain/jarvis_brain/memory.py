@@ -194,7 +194,7 @@ class MemoryStore:
     # ------------------------------------------------------------ 写
 
     def save(self, text, kind="fact", tags=None, subject=None, source="user", confidence=1.0,
-             status=None):
+             status=None, remind_at=None):
         """新增或就地更新一条。返回 (entry, created)。"""
         text = (text or "").strip()[:MAX_TEXT]
         if not text:
@@ -219,6 +219,8 @@ class MemoryStore:
                 existing["confidence"] = max(0.0, min(float(confidence), 1.0))
                 if status:
                     existing["status"] = status
+                if remind_at is not None:
+                    existing["remind_at"] = (remind_at or "").strip()[:40] or None
                 existing["updated"] = now
                 self._save()
                 return existing, False
@@ -237,6 +239,8 @@ class MemoryStore:
             }
             if status:
                 entry["status"] = status
+            if remind_at:
+                entry["remind_at"] = remind_at.strip()[:40]
             self._entries.append(entry)
             self._evict()
             self._save()
@@ -261,7 +265,7 @@ class MemoryStore:
             self._save()
             return target
 
-    def update(self, entry_id, text=None, status=None, confidence=None):
+    def update(self, entry_id, text=None, status=None, confidence=None, remind_at=None):
         """按稳定 id 修改状态或内容；用于承诺完成、事实纠正。"""
         with self._lock:
             self._load()
@@ -277,9 +281,22 @@ class MemoryStore:
                 entry["status"] = status
             if confidence is not None:
                 entry["confidence"] = max(0.0, min(float(confidence), 1.0))
+            if remind_at is not None:
+                entry["remind_at"] = (remind_at or "").strip()[:40] or None
             entry["updated"] = time.time()
             self._save()
             return entry
+
+    def mark_reminded(self, entry_id, when=None):
+        """记录通知时间；不改变承诺状态，用户确认完成后才真正收口。"""
+        with self._lock:
+            self._load()
+            entry = next((e for e in self._entries if e.get("id") == entry_id), None)
+            if not entry:
+                return False
+            entry["last_reminded"] = float(when or time.time())
+            self._save()
+            return True
 
     def clear(self):
         with self._lock:

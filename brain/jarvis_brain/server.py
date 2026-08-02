@@ -14,6 +14,7 @@ import time
 from . import config
 from . import memory
 from . import models
+from .proactive import ProactiveReminderEngine
 from . import tts as tts_module
 from .session import SessionCoordinator
 
@@ -28,6 +29,9 @@ class BrainServer:
         self.client = None
         self._client_lock = threading.Lock()
         self.session = SessionCoordinator(cfg, self.emit, self.log)
+        self.reminders = ProactiveReminderEngine(cfg.get("proactive") or {}, memory.STORE,
+                                                  self.emit, self.log,
+                                                  lambda: self.client is not None)
 
     # ------------------------------------------------------------ 日志
 
@@ -79,6 +83,7 @@ class BrainServer:
             self.cfg["tts"]["backend"] if self.cfg["tts"]["enabled"] else "关闭",
         ))
         self._prewarm_tts()
+        self.reminders.start()
 
         try:
             while True:
@@ -128,6 +133,7 @@ class BrainServer:
         threading.Thread(target=warm, daemon=True).start()
 
     def shutdown(self):
+        self.reminders.stop()
         try:
             if self.listener:
                 self.listener.close()
@@ -269,6 +275,7 @@ class BrainServer:
     def _reload(self):
         self.cfg = config.load()
         self.session.cfg = self.cfg
+        self.reminders.cfg = self.cfg.get("proactive") or {}
         # 重载配置不能悄悄退回默认模型：active 指针和菜单仍指向自定义模型时，
         # Provider 也必须用同一条配置，否则 UI 与真实 API 会发生分叉。
         active_id = models.STORE.active_id()
