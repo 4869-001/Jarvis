@@ -102,11 +102,11 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 
 ## 工具
 
-25 个，固定工具集，没有「让模型自己拼命令行」这条路（`shell_run` 除外，见下）。
+26 个，固定工具集，没有「让模型自己拼命令行」这条路（`shell_run` 除外，见下）。
 
 | 由谁执行 | 工具 |
 |---|---|
-| ObjC 宿主 | `app_open` `app_quit` `app_list_running` `url_open` `finder_reveal` `clipboard_read` `clipboard_write` `system_notify` `system_info` `calendar_events` `media_control` |
+| ObjC 宿主 | `app_open` `app_quit` `app_list_running` `url_open` `finder_reveal` `clipboard_read` `clipboard_write` `system_notify` `system_info` `calendar_events` `mail_unread` `media_control` |
 | Python Brain | `fs_list` `fs_read` `fs_search` `fs_write` `fs_move` `web_search` `web_fetch` `memory_save` `memory_recall` `memory_list` `memory_update` `memory_forget` `task_history` `shell_run` |
 
 原生那半留在 ObjC，因为 **TCC 权限按 app bundle 授予**：Python 子进程去发 Apple Events
@@ -114,6 +114,7 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 
 风险分级 L0–L4，**L2 起弹确认框**（`fs_write` / `fs_move` / `app_quit` / `shell_run`）。
 写进 `tools.auto_approve` 的工具跳过确认。
+日历和邮件虽是只读，但结果会进入当前模型上下文，也按 L2 处理并在读取前确认。
 `shell_run` 默认禁用，开启后仍有命令黑名单（rm -rf / sudo / 磁盘操作 / 下载即执行 …），
 `tools.shell_unrestricted = true` 可以摘掉黑名单、并把超时上限从 120s 放宽到 600s。
 文件工具全部经过路径闸门：越出 `fs_roots` 或命中 `.ssh` / Keychains 一律拒绝。

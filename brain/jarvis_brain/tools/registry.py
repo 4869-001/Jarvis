@@ -87,10 +87,17 @@ TOOLS = [
           {}, "L0", "native"),
 
     _tool("calendar_events", "只读查看 macOS 日历中接下来的安排。询问今天、明天、"
-          "近期会议或空闲时间时使用；不会新增或修改日程。",
+          "近期会议或空闲时间时使用；不会新增或修改日程。日程标题、时间、日历名和"
+          "地点会进入当前模型上下文，因此每次读取前必须让用户确认。",
           {"hours": _p("从现在起查看多少小时，默认 24，最多 336", _INT),
            "limit": _p("最多返回多少条，默认 20，最多 50", _INT)},
-          "L0", "native"),
+          "L2", "native"),
+
+    _tool("mail_unread", "查看 Apple Mail 的未读邮件元数据，用于概括哪些邮件需要关注。"
+          "只读取发件人、主题、收件时间和内部 id，不读取正文或附件。"
+          "这些字段会进入当前模型上下文，因此每次读取前必须让用户确认。",
+          {"limit": _p("最多返回多少封，默认 10，最多 20", _INT)},
+          "L2", "native"),
 
     _tool("media_control",
           "控制正在播放的音乐/视频：播放、暂停、切歌、调音量、查看当前曲目。"
@@ -241,6 +248,7 @@ def describe(name, arguments):
         "system_notify": "发送通知「{title}」",
         "media_control": "播放控制：{action}",
         "calendar_events": "查看近期日历",
+        "mail_unread": "查看未读邮件摘要",
         "fs_list": "列出 {path} 的内容",
         "fs_read": "读取 {path}",
         "fs_search": "搜索文件「{query}」",
@@ -276,6 +284,7 @@ _ACTIONS = {
     "clipboard_read": "读取剪贴板", "clipboard_write": "写入剪贴板",
     "system_notify": "发送通知", "system_info": "查看本机状态", "media_control": "播放控制",
     "calendar_events": "查看近期日历",
+    "mail_unread": "查看未读邮件摘要",
     "fs_list": "列出目录", "fs_read": "读取文件", "fs_search": "搜索文件",
     "fs_write": "写入文件", "fs_move": "移动文件",
     "web_search": "联网搜索", "web_fetch": "抓取网页",

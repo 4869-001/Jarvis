@@ -21,6 +21,7 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
 @interface NativeToolExecutor ()
 @property (nonatomic, strong) MediaController *media;
 @property (nonatomic, strong) EKEventStore *eventStore;
+@property (nonatomic) dispatch_queue_t mailQueue;
 @end
 
 @implementation NativeToolExecutor
@@ -34,6 +35,7 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
                                       @"clipboard_read", @"clipboard_write",
                                       @"system_notify", @"system_info",
                                       @"calendar_events",
+                                      @"mail_unread",
                                       @"media_control"]];
     });
     return [names containsObject:name];
@@ -58,8 +60,72 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     else if ([name isEqualToString:@"system_notify"])   { [self notify:arguments completion:completion]; }
     else if ([name isEqualToString:@"system_info"])     { completion([self systemInfo], nil); }
     else if ([name isEqualToString:@"calendar_events"]) { [self calendarEvents:arguments completion:completion]; }
+    else if ([name isEqualToString:@"mail_unread"])      { [self unreadMail:arguments completion:completion]; }
     else if ([name isEqualToString:@"media_control"])   { [self controlMedia:arguments completion:completion]; }
     else { completion(nil, [NSString stringWithFormat:@"宿主不认识工具 %@", name]); }
+}
+
+#pragma mark - 邮件（只读元数据）
+
+- (dispatch_queue_t)mailQueue {
+    if (!_mailQueue) _mailQueue = dispatch_queue_create("com.jarvis.mail-read", DISPATCH_QUEUE_SERIAL);
+    return _mailQueue;
+}
+
+- (void)unreadMail:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    NSInteger limit = [arguments[@"limit"] respondsToSelector:@selector(integerValue)]
+        ? [arguments[@"limit"] integerValue] : 10;
+    limit = MAX(1, MIN(limit, 20));
+
+    // Mail 的 Apple Event 有时要等应用/账户响应，不能堵住 AppKit 主线程。
+    // 只取 id、发件人、主题和收件时间；正文、附件与收件人都不读取。
+    NSString *source = [NSString stringWithFormat:
+        @"tell application \"Mail\"\n"
+         "set unreadMessages to (messages of inbox whose read status is false)\n"
+         "set resultRows to {}\n"
+         "set rowCount to count of unreadMessages\n"
+         "if rowCount > %ld then set rowCount to %ld\n"
+         "repeat with i from 1 to rowCount\n"
+         "set m to item i of unreadMessages\n"
+         "set end of resultRows to {(id of m as text), (sender of m as text), "
+         "(subject of m as text), (date received of m as text)}\n"
+         "end repeat\n"
+         "return resultRows\n"
+         "end tell", (long)limit, (long)limit];
+
+    dispatch_async(self.mailQueue, ^{
+        NSAppleScript *script = [[NSAppleScript alloc] initWithSource:source];
+        NSDictionary *errorInfo = nil;
+        NSAppleEventDescriptor *answer = [script executeAndReturnError:&errorInfo];
+        NSMutableArray *messages = [NSMutableArray array];
+        if (!errorInfo && answer.numberOfItems) {
+            for (NSInteger i = 1; i <= answer.numberOfItems; i++) {
+                NSAppleEventDescriptor *row = [answer descriptorAtIndex:i];
+                if (row.numberOfItems < 4) continue;
+                NSString *(^clean)(NSString *) = ^NSString *(NSString *value) {
+                    value = value ?: @"";
+                    NSString *oneLine = [[value stringByReplacingOccurrencesOfString:@"\r" withString:@" "]
+                                         stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+                    return oneLine.length > 300 ? [oneLine substringToIndex:300] : oneLine;
+                };
+                [messages addObject:@{
+                    @"id": clean([row descriptorAtIndex:1].stringValue),
+                    @"sender": clean([row descriptorAtIndex:2].stringValue),
+                    @"subject": clean([row descriptorAtIndex:3].stringValue),
+                    @"received": clean([row descriptorAtIndex:4].stringValue)
+                }];
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (errorInfo) {
+                NSString *message = errorInfo[NSAppleScriptErrorMessage] ?: @"Apple Mail 没有响应";
+                completion(nil, [NSString stringWithFormat:@"读取未读邮件失败：%@", message]);
+            } else {
+                completion(@{@"count": @(messages.count), @"messages": messages,
+                             @"content_included": @NO}, nil);
+            }
+        });
+    });
 }
 
 #pragma mark - 日历
