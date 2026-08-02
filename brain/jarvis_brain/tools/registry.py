@@ -159,7 +159,8 @@ TOOLS = [
            "confidence": {"type": "number", "minimum": 0, "maximum": 1,
                           "description": "可信度，用户明确陈述填 1"},
            "status": {"type": "string", "enum": ["pending", "active", "completed", "cancelled"],
-                      "description": "主要用于 commitment/project"}},
+                      "description": "主要用于 commitment/project"},
+           "remind_at": _p("仅用于定时承诺，ISO 8601 本地时间，如 2026-08-03T15:00:00+08:00")},
           "L1", "python", memory_impl.memory_save, required=["text"]),
 
     _tool("memory_recall",
@@ -186,7 +187,8 @@ TOOLS = [
           {"id": _p("记忆 id，来自 memory_list / memory_recall"),
            "text": _p("修正后的内容，可选"),
            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-           "status": {"type": "string", "enum": ["pending", "active", "completed", "cancelled"]}},
+           "status": {"type": "string", "enum": ["pending", "active", "completed", "cancelled"]},
+           "remind_at": _p("修改提醒时间；ISO 8601，空字符串表示取消定时提醒")},
           "L1", "python", memory_impl.memory_update, required=["id"]),
 
     _tool("task_history",

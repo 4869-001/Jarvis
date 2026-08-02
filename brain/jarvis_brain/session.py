@@ -139,6 +139,9 @@ facts a subject key so later corrections replace the original. Write it as a
 third-person statement ("The user prefers short answers"), not as a quote. Do it
 silently, in the same turn — don't ask permission and don't announce it. When a
 commitment is completed or an existing fact changes, use memory_update on its id.
+If the user explicitly asks for a reminder, save it as a pending commitment with
+an absolute ISO 8601 remind_at in the user's local timezone. Never invent a reminder
+time when the user did not provide one.
 
 Do NOT save: passing chit-chat, one-off requests, anything you can look up, or
 anything the user would be uncomfortable seeing written down. When the user says

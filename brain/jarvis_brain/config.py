@@ -108,6 +108,14 @@ DEFAULTS = {
         # 每轮按当前这句话检索回来的条数上限（identity/preference 类另外常驻）
         "max_recall": 8,
     },
+    "proactive": {
+        "enabled": True,
+        "check_interval": 30,
+        "quiet_start": "22:30",
+        "quiet_end": "08:00",
+        "cooldown_minutes": 120,
+        "daily_limit": 6,
+    },
     "session": {
         # 一轮对话里最多连续调多少次工具，防止模型自己转圈
         "max_tool_rounds": 8,
