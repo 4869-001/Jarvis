@@ -12,7 +12,7 @@ import time
 import traceback
 import uuid
 
-from . import models, tts
+from . import models, tasking, tts
 from .memory import STORE as MEMORY
 from .providers.deepseek import Cancelled, DeepSeekProvider, ProviderError
 from .tools import registry
@@ -227,6 +227,8 @@ class SessionCoordinator:
         # submit 可能已经到了。与其直接拒绝、把这句话丢在地上，不如接住它，
         # 等当前这轮真正退出后自动续上。
         self._queued = None
+        self._task_runs = {}          # turn generation -> 持久化任务记录
+        self._task_queries = {}
 
         # 等宿主回话的两类阻塞：确认弹窗、原生工具执行
         self._pending = {}              # id -> {"event": Event, "value": any}
@@ -539,15 +541,23 @@ class SessionCoordinator:
         self._repeat_streak = 0
         self._degenerate = False
         self._speech_seen = set()
+        self._task_queries[generation] = query
         try:
             self.set_state("thinking")
             environment = self._capture_environment()
-            self._loop(message_id, self._memory_block(query), generation, environment)
+            memory_block = self._memory_block(query)
+            recovery = self._recovery_block(query)
+            if recovery:
+                memory_block = (memory_block + "\n\n" + recovery).strip()
+            self._loop(message_id, memory_block, generation, environment)
         except Cancelled:
+            self._finish_task(generation, "interrupted")
             self.emit({"type": "turn_cancelled", "id": message_id})
         except ProviderError as exc:
+            self._finish_task(generation, "failed")
             self.emit({"type": "error", "message": str(exc)})
         except Exception as exc:
+            self._finish_task(generation, "failed")
             self.log("turn 崩了: %s\n%s" % (exc, traceback.format_exc()))
             self.emit({"type": "error", "message": "内部错误：%s" % exc})
         finally:
@@ -562,6 +572,7 @@ class SessionCoordinator:
             queued, self._queued = self._queued, None
             if queued:
                 self._start_turn(*queued)
+            self._task_queries.pop(generation, None)
 
     def _log_turn_timing(self, started):
         """一轮的延迟账单。三个数各自指向不同的锅：
@@ -648,6 +659,7 @@ class SessionCoordinator:
                 self._flush_speech()
                 self.emit({"type": "assistant_done", "id": message_id,
                            "text": full_text, "text_zh": chinese_text})
+                self._finish_task(generation, "completed")
                 return
 
             history.append({
@@ -664,7 +676,8 @@ class SessionCoordinator:
             self._flush_speech()
 
             for index, call in enumerate(tool_calls):
-                result = self._execute(call["name"], call["arguments"], call["id"] or ("call_%d" % index))
+                result = self._execute(call["name"], call["arguments"],
+                                       call["id"] or ("call_%d" % index), generation)
                 history.append({
                     "role": "tool",
                     "tool_call_id": call["id"] or ("call_%d" % index),
@@ -677,10 +690,11 @@ class SessionCoordinator:
             self.set_state("thinking")
 
         self.emit({"type": "error", "message": "工具调用超过 %d 轮，已中止。" % max_rounds})
+        self._finish_task(generation, "failed")
 
     # ------------------------------------------------------------ 工具执行
 
-    def _execute(self, name, raw_arguments, call_id):
+    def _execute(self, name, raw_arguments, call_id, generation):
         tool = registry.BY_NAME.get(name)
         if not tool:
             return {"error": "没有名为 %s 的工具" % name}
@@ -700,34 +714,59 @@ class SessionCoordinator:
                    "action": registry.action_of(name),
                    "target": registry.target_of(name, arguments)})
 
+        task = self._task_runs.get(generation)
+        if task is None:
+            task = tasking.JOURNAL.start(self._task_queries.get(generation, ""), self.session_id)
+            self._task_runs[generation] = task
+            self.emit({"type": "task_started", "id": task["id"], "goal": task["goal"]})
+        step = tasking.JOURNAL.step_started(task, call_id, name, arguments,
+                                            tool["risk"], summary)
+
         if registry.needs_confirmation(tool) and name not in self.auto_approve:
             self.set_state("executing", "等待你确认：%s" % summary)
-            approved = self._ask_confirmation(call_id, name, arguments, tool["risk"], summary)
+            try:
+                approved = self._ask_confirmation(call_id, name, arguments, tool["risk"], summary)
+            except Cancelled:
+                tasking.JOURNAL.step_finished(task, step, False, "确认期间中断")
+                raise
             if not approved:
                 self.emit({"type": "tool_result", "id": call_id, "name": name,
                            "success": False, "declined": True,
                            "summary": "已取消，未做任何修改"})
+                tasking.JOURNAL.step_finished(task, step, False, "用户拒绝执行")
                 return {"error": "用户拒绝执行", "declined": True}
             self.set_state("executing", summary)
 
         started = time.time()
-        try:
-            if tool["executor"] == "native":
-                result = self._call_native(call_id, name, arguments)
-            else:
-                result = tool["fn"](arguments, self.tool_ctx)
-        except PathDenied as exc:
-            result = {"error": str(exc)}
-        except Cancelled:
-            raise
-        except Exception as exc:
-            self.log("工具 %s 抛异常: %s\n%s" % (name, exc, traceback.format_exc()))
-            result = {"error": "%s 执行失败：%s" % (name, exc)}
+        max_attempts = 2 if tool["risk"] == "L0" else 1
+        for attempt in range(max_attempts):
+            try:
+                if tool["executor"] == "native":
+                    result = self._call_native(call_id, name, arguments)
+                else:
+                    result = tool["fn"](arguments, self.tool_ctx)
+            except PathDenied as exc:
+                result = {"error": str(exc)}
+            except Cancelled:
+                tasking.JOURNAL.step_finished(task, step, False, "执行期间中断")
+                raise
+            except Exception as exc:
+                self.log("工具 %s 抛异常: %s\n%s" % (name, exc, traceback.format_exc()))
+                result = {"error": "%s 执行失败：%s" % (name, exc)}
+            if not isinstance(result, dict):
+                result = {"result": result}
+            if "error" not in result or attempt + 1 >= max_attempts:
+                break
+            tasking.JOURNAL.retry(task, step)
+            self.emit({"type": "tool_retry", "id": call_id, "attempt": attempt + 2,
+                       "message": "只读操作失败，自动重试"})
 
         if not isinstance(result, dict):
             result = {"result": result}
 
         ok = "error" not in result
+        evidence = {k: result[k] for k in ("verified", "sha256", "path", "to") if k in result}
+        tasking.JOURNAL.step_finished(task, step, ok, result.get("error") or summary, evidence)
         event = {"type": "tool_result", "id": call_id, "name": name, "success": ok,
                  "summary": result.get("error") or summary,
                  "ms": int((time.time() - started) * 1000)}
@@ -738,6 +777,14 @@ class SessionCoordinator:
             event["payload"] = payload
         self.emit(event)
         return result
+
+    def _finish_task(self, generation, status):
+        task = self._task_runs.pop(generation, None)
+        if not task:
+            return
+        tasking.JOURNAL.finish(task, status)
+        self.emit({"type": "task_done", "id": task["id"], "status": status,
+                   "steps": len(task.get("steps") or [])})
 
     def _ask_confirmation(self, call_id, name, arguments, risk, summary):
         request_id = "confirm_" + call_id
@@ -824,6 +871,19 @@ class SessionCoordinator:
         except Exception as exc:
             self.log("记忆检索失败（本轮跳过）：%s" % exc)
             return ""
+
+    def _recovery_block(self, query):
+        """用户说继续/重试时带上最近中断证据，禁止模型从头盲目重放。"""
+        lowered = (query or "").casefold()
+        cues = ("继续", "接着", "重试", "刚才", "恢复", "resume", "continue", "retry")
+        if not any(cue in lowered for cue in cues):
+            return ""
+        items = tasking.JOURNAL.recent(1, recoverable_only=True)
+        if not items:
+            return ""
+        return ("RECOVERABLE TASK EVIDENCE (do not repeat completed side effects; "
+                "verify current state before resuming):\n" +
+                json.dumps(items[0], ensure_ascii=False, separators=(",", ":")))
 
     def _format_reminder(self):
         return {"role": "system", "content":
