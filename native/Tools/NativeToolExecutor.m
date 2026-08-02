@@ -304,7 +304,20 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     info[@"hostname"] = [[NSProcessInfo processInfo] hostName];
 
     NSRunningApplication *front = [[NSWorkspace sharedWorkspace] frontmostApplication];
-    if (front) info[@"frontmost_app"] = front.localizedName ?: @"";
+    if (front) {
+        info[@"frontmost_app"] = front.localizedName ?: @"";
+        info[@"frontmost_bundle_id"] = front.bundleIdentifier ?: @"";
+    }
+
+    NSMutableArray *displays = [NSMutableArray array];
+    for (NSScreen *screen in [NSScreen screens]) {
+        NSRect frame = screen.frame;
+        [displays addObject:@{@"width": @((NSInteger)frame.size.width),
+                              @"height": @((NSInteger)frame.size.height),
+                              @"scale": @(screen.backingScaleFactor),
+                              @"main": @(screen == [NSScreen mainScreen])}];
+    }
+    info[@"displays"] = displays;
 
     info[@"battery"] = [self batteryInfo];
     info[@"memory"] = [self memoryInfo];

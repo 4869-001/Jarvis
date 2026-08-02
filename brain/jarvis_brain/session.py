@@ -536,7 +536,8 @@ class SessionCoordinator:
         self._speech_seen = set()
         try:
             self.set_state("thinking")
-            self._loop(message_id, self._memory_block(query), generation)
+            environment = self._capture_environment()
+            self._loop(message_id, self._memory_block(query), generation, environment)
         except Cancelled:
             self.emit({"type": "turn_cancelled", "id": message_id})
         except ProviderError as exc:
@@ -581,7 +582,7 @@ class SessionCoordinator:
             raise Cancelled()
         self.history = history
 
-    def _loop(self, message_id, memory_block, generation):
+    def _loop(self, message_id, memory_block, generation, environment=None):
         max_rounds = self.cfg["session"]["max_tool_rounds"]
         history = list(self.history)   # 本轮私有快照，reset() 清得动 self.history，清不动这份
 
@@ -592,7 +593,7 @@ class SessionCoordinator:
             # 提醒贴在最后一条：工具结果常常是中文（文件名、工具摘要），
             # 隔着这些内容，开头的系统提示压不住格式，模型会整段滑回中文。
             # 这条只在请求里出现，不进 history。
-            messages = ([self._system_message(memory_block)] + history
+            messages = ([self._system_message(memory_block, environment)] + history
                         + [self._format_reminder()])
             tools = registry.openai_schema() if round_index < max_rounds else None
 
@@ -778,16 +779,35 @@ class SessionCoordinator:
 
     # ------------------------------------------------------------ 杂项
 
-    def _system_message(self, memory_block=""):
+    def _system_message(self, memory_block="", environment=None):
         env = "macOS %s / %s / 用户主目录 %s" % (
             platform.mac_ver()[0] or platform.release(),
             platform.machine(),
             self.cfg["tools"]["fs_roots"][0] if self.cfg["tools"]["fs_roots"] else "~",
         )
+        if environment:
+            env += "\nLive environment snapshot: " + json.dumps(
+                environment, ensure_ascii=False, separators=(",", ":"))
         memory = ("\n== WHAT YOU REMEMBER ==\n%s\n" % memory_block) if memory_block else "\n"
         return {"role": "system", "content": SYSTEM_PROMPT.format(
             marker=ZH_MARKER, env=env, memory=memory,
             now=time.strftime("%Y-%m-%d %H:%M:%S %A"))}
+
+    def _capture_environment(self):
+        """每轮自动向宿主取一次只读快照，不再等模型主动调用 system_info。"""
+        awareness_cfg = self.cfg.get("environment_awareness") or {}
+        if not awareness_cfg.get("enabled", True):
+            return None
+        request_id = "environment_" + uuid.uuid4().hex[:10]
+        value = self._wait_for_host(request_id, {
+            "type": "native_tool_request", "request_id": request_id,
+            "name": "system_info", "arguments": {}, "background": True,
+        }, timeout=float(awareness_cfg.get("timeout") or 2.0))
+        if value.get("error") or value.get("timeout") or value.get("cancelled"):
+            self.log("环境快照获取失败：%s" % (value.get("error") or "timeout"))
+            return None
+        result = value.get("result")
+        return result if isinstance(result, dict) else None
 
     def _memory_block(self, query):
         """本轮要注入的记忆。检索失败绝不能拖垮一轮对话——记忆是加分项，不是依赖项。"""
