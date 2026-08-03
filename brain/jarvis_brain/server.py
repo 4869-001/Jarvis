@@ -13,6 +13,7 @@ import time
 
 from . import config
 from . import memory
+from .identity import STORE as IDENTITY
 from . import models
 from .proactive import ProactiveReminderEngine
 from . import tts as tts_module
@@ -162,6 +163,10 @@ class BrainServer:
             "wake_word": self.cfg["wake_word"],
             "memory": {"enabled": (self.cfg.get("memory") or {}).get("enabled", True),
                        "count": remembered},
+            "identity": {"name": IDENTITY.data["name"],
+                         "creator": IDENTITY.data["creator"],
+                         "created_at": IDENTITY.data["created_at"],
+                         "path": IDENTITY.path},
             "tts": {"enabled": self.cfg["tts"]["enabled"],
                     "backend": self.cfg["tts"]["backend"]},
             "models": self.session.models_payload(),

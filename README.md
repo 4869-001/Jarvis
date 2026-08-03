@@ -122,7 +122,8 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 ### 播放器控制
 
 `media_control`：`toggle` / `play` / `pause` / `next` / `previous` / `volume_up` /
-`volume_down` / `like` / `status`。默认自动挑当前在放的播放器，也可以 `player` 点名。
+`volume_down` / `like` / `status` / `search_play`。默认自动挑当前在放的播放器，也可以
+`player` 点名。检索播放使用 action=search_play、query=歌曲名、player=netease。
 
 **网易云音乐没有 AppleScript 字典**，`tell application "网易云音乐" to playpause` 这条路
 根本不存在——这就是它以前只能被打开、不能被控制的原因。实际走的是三条通道：
@@ -145,6 +146,14 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 启动日志：`grep 辅助功能权限 /tmp/jarvis.log`。
 
 ## 长期记忆
+
+Jarvis 的自我身份不再依赖模型提示词，权威文件是 ~/.jarvis/identity.json：名称、
+创造者 Frank、诞生日 2026-08-01、职责、称呼与原则都由本地 Brain 读取。切换
+DeepSeek、Claude 或其他兼容模型不会改变这份身份。
+
+低歧义指令先走本地快速路由，不请求聊天模型：身份/诞生日/运行时长、时间日期、
+网易云搜索播放与常用播放控制、打开应用。复杂对话才进入当前配置的模型，因此即使
+API 暂时不可用，这些基础能力仍能工作。
 
 跨会话、跨重启都还在的一小撮事实与经历——"这个人是谁、他偏好什么、手上在做什么、
 还有哪些承诺没有完成"。

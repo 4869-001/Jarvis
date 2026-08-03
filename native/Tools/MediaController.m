@@ -69,16 +69,49 @@ static NSRunningApplication *RunningAppWithBundleID(NSString *bundleID) {
     return apps.firstObject;
 }
 
+static BOOL MainWindowBoundsForPID(pid_t pid, CGRect *outBounds) {
+    NSArray *windows = CFBridgingRelease(CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
+    for (NSDictionary *window in windows) {
+        if ([window[(id)kCGWindowOwnerPID] intValue] != pid) continue;
+        if ([window[(id)kCGWindowLayer] integerValue] != 0) continue;
+        CGRect bounds = CGRectZero;
+        if (CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)window[(id)kCGWindowBounds],
+                                                   &bounds)) {
+            if (outBounds) *outBounds = bounds;
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static void PostClick(CGPoint point) {
+    CGEventRef down = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, point,
+                                              kCGMouseButtonLeft);
+    CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp, point,
+                                            kCGMouseButtonLeft);
+    CGEventPost(kCGHIDEventTap, down);
+    CGEventPost(kCGHIDEventTap, up);
+    CFRelease(down);
+    CFRelease(up);
+}
+
 #pragma mark -
 
 @implementation MediaController
 
 - (void)perform:(NSString *)action
          player:(NSString *)player
+          query:(NSString *)query
      completion:(JarvisMediaCompletion)completion {
 
     LoadMediaRemote();
     action = [(action ?: @"") lowercaseString];
+
+    if ([action isEqualToString:@"search_play"]) {
+        [self searchAndPlayNetEase:query completion:completion];
+        return;
+    }
 
     if ([action isEqualToString:@"status"]) {
         [self fetchStatus:^(NSDictionary *status) { completion(status, nil); }];
@@ -153,6 +186,110 @@ static NSRunningApplication *RunningAppWithBundleID(NSString *bundleID) {
 }
 
 #pragma mark - 网易云音乐
+
+/// 网易云 3.x 的主内容区是自绘 WebView，不暴露可点的 AX 元素，也没有 AppleScript
+/// 字典。可靠入口是它自己的搜索框：聚焦窗口左上角搜索框、提交，再点“单曲”的播放。
+/// 所有坐标都相对 window 1，不依赖窗口放在屏幕什么位置。
+- (void)searchAndPlayNetEase:(NSString *)query completion:(JarvisMediaCompletion)completion {
+    query = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (query.length == 0) { completion(nil, @"搜索歌曲时缺少 query"); return; }
+    if (!AXIsProcessTrusted()) {
+        completion(nil, [NSString stringWithFormat:@"%@（辅助功能）：系统设置 → 隐私与安全性 → "
+                         @"辅助功能，把 JARVIS 打开", [self permissionHint]]);
+        return;
+    }
+
+    void (^runSearch)(void) = ^{
+        NSString *safe = [query stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
+        safe = [safe stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
+        safe = [[safe stringByReplacingOccurrencesOfString:@"\r" withString:@" "]
+                stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+        NSString *source = [NSString stringWithFormat:
+            @"tell application \"System Events\"\n"
+             "tell process \"NeteaseMusic\"\n"
+             "set frontmost to true\n"
+             "set origin to position of window 1\n"
+             "set dimensions to size of window 1\n"
+             "set ox to item 1 of origin\n"
+             "set oy to item 2 of origin\n"
+             "set ww to item 1 of dimensions\n"
+             "set wh to item 2 of dimensions\n"
+             "keystroke \"f\" using command down\n"
+             "delay 0.3\n"
+             "keystroke \"a\" using command down\n"
+             "key code 51\n"
+             "keystroke \"%@\"\n"
+             "key code 36\n"
+             "delay 3\n"
+             "end tell\n"
+             "end tell", safe];
+        NSString *error = nil;
+        [self runAppleScript:source error:&error];
+        if (error) { completion(nil, error); return; }
+
+        CGRect bounds = CGRectZero;
+        NSRunningApplication *netEase = RunningAppWithBundleID(kNetEaseBundleID);
+        if (!netEase || !MainWindowBoundsForPID(netEase.processIdentifier, &bounds)) {
+            completion(nil, @"找不到网易云音乐主窗口");
+            return;
+        }
+        // 点“单曲”标题右侧的“播放”按钮，它会稳定播放第一条搜索结果。
+        // 旧实现双击窗口高度 46.4% 的位置；网易云 3.x 当前布局下那里已经是第三条
+        // 结果或空白区，所以搜索成功后仍会继续播放旧歌。主内容区是自绘 WebView，
+        // 只能用 CGEvent；使用相对窗口坐标可继续适配窗口移动和等比例缩放。
+        CGPoint playFirstResult = CGPointMake(CGRectGetMinX(bounds) + CGRectGetWidth(bounds) * 0.23,
+                                               CGRectGetMinY(bounds) + CGRectGetHeight(bounds) * 0.232);
+        PostClick(playFirstResult);
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [self fetchStatus:^(NSDictionary *status) {
+                NSMutableDictionary *result = [status mutableCopy];
+                result[@"action"] = @"search_play";
+                result[@"query"] = query;
+                NSString *actual = [NSString stringWithFormat:@"%@ %@", status[@"title"] ?: @"",
+                                    status[@"artist"] ?: @""];
+                actual = [[actual lowercaseString] stringByFoldingWithOptions:
+                    NSDiacriticInsensitiveSearch locale:[NSLocale currentLocale]];
+                NSCharacterSet *separators = [[NSCharacterSet alphanumericCharacterSet] invertedSet];
+                NSArray *tokens = [[[query lowercaseString]
+                    stringByFoldingWithOptions:NSDiacriticInsensitiveSearch
+                                        locale:[NSLocale currentLocale]]
+                    componentsSeparatedByCharactersInSet:separators];
+                NSInteger useful = 0, matched = 0;
+                for (NSString *token in tokens) {
+                    if (token.length < 2) continue;
+                    useful++;
+                    if ([actual containsString:token]) matched++;
+                }
+                BOOL sameTrack = useful == 0 ? NO : (matched >= MAX(1, (useful + 1) / 2));
+                result[@"verified"] = @([status[@"playing"] boolValue] && sameTrack);
+                if (![result[@"verified"] boolValue]) {
+                    result[@"note"] = status[@"title"]
+                        ? [NSString stringWithFormat:@"搜索结果已打开，但实际仍是 %@",
+                           status[@"title"]]
+                        : @"已打开搜索结果，但没有确认歌曲开始播放";
+                }
+                completion(result, nil);
+            }];
+        });
+    };
+
+    if (RunningAppWithBundleID(kNetEaseBundleID)) { runSearch(); return; }
+    NSURL *url = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:kNetEaseBundleID];
+    if (!url) { completion(nil, @"本机没装网易云音乐"); return; }
+    [[NSWorkspace sharedWorkspace] openApplicationAtURL:url
+                                          configuration:[NSWorkspaceOpenConfiguration configuration]
+                                      completionHandler:^(NSRunningApplication *app, NSError *error) {
+        if (error) {
+            completion(nil, [NSString stringWithFormat:@"启动网易云音乐失败：%@",
+                              error.localizedDescription]);
+            return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), runSearch);
+    }];
+}
 
 /// 「控制」菜单里的项。网易云是中文界面，但英文版和将来改名都兜一手。
 static NSInteger MenuIndexForAction(NSArray<NSString *> *names, NSString *action) {

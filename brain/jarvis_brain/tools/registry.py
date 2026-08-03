@@ -100,16 +100,17 @@ TOOLS = [
           "L2", "native"),
 
     _tool("media_control",
-          "控制正在播放的音乐/视频：播放、暂停、切歌、调音量、查看当前曲目。"
+          "控制或检索音乐/视频：播放、暂停、切歌、按歌名搜索并播放、调音量、查看当前曲目。"
           "网易云音乐、Apple Music、Spotify、QQ 音乐和浏览器里的播放都能控。"
           "注意：app_open 只能把播放器打开，控制播放一律用这个工具。",
           {"action": {"type": "string",
                       "enum": ["toggle", "play", "pause", "next", "previous",
-                               "volume_up", "volume_down", "like", "status"],
+                               "volume_up", "volume_down", "like", "status", "search_play"],
                       "description": "toggle 播放/暂停切换，like 把当前歌加入喜欢（仅网易云），"
-                                     "status 查当前在放什么"},
+                                     "status 查当前在放什么；search_play 按 query 搜索并播放（网易云）"},
            "player": _p("指定播放器，如 网易云音乐、spotify、apple music；"
-                        "不填则自动挑当前在放的那个")},
+                        "不填则自动挑当前在放的那个"),
+           "query": _p("search_play 必填；歌曲名，可同时带歌手名提高准确率")},
           "L1", "native", required=["action"]),
 
     # ------------------------------------------------ 文件（Brain 执行）

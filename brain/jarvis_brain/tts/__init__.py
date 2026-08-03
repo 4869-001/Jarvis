@@ -23,6 +23,8 @@ PHRASE_KEEP = 200                      # 数量与体积双上限，按最近使
 PHRASE_MAX_BYTES = 50 * 1024 * 1024
 # 超过这个长度就不进缓存了：长句几乎不会一字不差地重复，白占磁盘
 PHRASE_MAX_CHARS = 120
+# 音频后处理或响度策略变化时递增。它参与缓存 key，避免继续命中旧版低响度 wav。
+AUDIO_PROCESSING_VERSION = 2
 
 _CJK = re.compile(r"[一-鿿㐀-䶿]")
 
@@ -155,7 +157,8 @@ def prune_cache(keep_seconds=600):
 def _phrase_key(text, lang, cfg):
     """同样的文本、同样的合成参数 → 同一个 key。参数变了必须变 key，
     否则改了语速/关掉金属链之后还会拿到旧声音。"""
-    payload = json.dumps([text, lang, cfg.get("backend"), bool(cfg.get("metallic", True)),
+    payload = json.dumps([AUDIO_PROCESSING_VERSION, text, lang, cfg.get("backend"),
+                          bool(cfg.get("metallic", True)),
                           cfg.get("neural") or {}, cfg.get("system") or {}],
                          ensure_ascii=False, sort_keys=True)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:20]

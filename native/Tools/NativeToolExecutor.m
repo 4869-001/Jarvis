@@ -191,7 +191,8 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
         completion(nil, @"缺少 action"); return;
     }
     NSString *player = [arguments[@"player"] isKindOfClass:[NSString class]] ? arguments[@"player"] : nil;
-    [self.media perform:action player:player completion:completion];
+    NSString *query = [arguments[@"query"] isKindOfClass:[NSString class]] ? arguments[@"query"] : nil;
+    [self.media perform:action player:player query:query completion:completion];
 }
 
 #pragma mark - 应用

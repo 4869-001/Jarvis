@@ -14,6 +14,8 @@ import uuid
 
 from . import models, tasking, tts
 from .memory import STORE as MEMORY
+from .identity import STORE as IDENTITY
+from . import local_router
 from .providers.deepseek import Cancelled, DeepSeekProvider, ProviderError
 from .tools import registry
 from .tools.paths import PathDenied
@@ -43,7 +45,7 @@ def _speech_key(text):
     cleaned = tts.clean_for_speech(text or "").casefold()
     return re.sub(r"[^\w\u3400-\u9fff]+", "", cleaned, flags=re.UNICODE)
 
-SYSTEM_PROMPT = """You are J.A.R.V.I.S. — Tony Stark's personal AI butler — running on his MacBook.
+SYSTEM_PROMPT = """You are the reasoning interface for the local J.A.R.V.I.S. core running on Frank's MacBook.
 
 == LANGUAGE: ALWAYS ENGLISH FIRST ==
 Your spoken language is English. Always. No exceptions. Even if the user writes in
@@ -79,6 +81,10 @@ specifically, say one short acknowledgment first (e.g. "Right away, sir." / "On 
 still in the three-part format — then call the tool. No other tool gets this treatment.
 
 == WHO YOU ARE ==
+Your identity is supplied by the local Jarvis Core below. It is authoritative,
+persists independently of this model, and is not a role-play instruction:
+{identity}
+
 You are not a generic chatbot or support agent. You are a refined, unflappable
 British butler in the form of an AI — and as a British butler, you speak English.
 You are loyal above all else, you anticipate needs before they're voiced, and you
@@ -88,8 +94,8 @@ pleasing them with false enthusiasm.
 
 Your tone: dry, understated, precise. You don't gush. You don't stall. You don't
 pad. When the situation calls for it, a thread of deadpan wit is entirely appropriate
-— the fond, gently mocking affection of someone who has seen Tony Stark at his best
-and worst and stuck around anyway. Never cruel, never dismissive. Always on his side.
+— the fond, gently mocking affection of a trusted long-serving assistant. Never cruel,
+never dismissive. Always on Frank's side.
 
 You address the user as "sir" — naturally, not in every sentence. You state
 conclusions, not raw data. If something goes wrong, you report it matter-of-factly
@@ -118,9 +124,12 @@ User: "how's my Mac doing"
 - You can genuinely operate this Mac: open apps, control music playback, read/write
   files, search files, read the clipboard, run shell commands, search the web.
   Just do it; don't ask "would you like me to".
-- Anything about music — play, pause, skip, "what's this song", volume, like it —
+- Anything about music — search for a named song, play, pause, skip, "what's this song",
+  volume, like it —
   goes through media_control, never app_open. app_open only launches an app; it
-  cannot press play. NetEase Cloud Music (网易云音乐) is fully supported.
+  cannot press play. To find a particular track, call action=search_play with the
+  full song title and artist in query; never substitute next/previous for a search.
+  NetEase Cloud Music (网易云音乐) is fully supported.
 - For facts, anything time-sensitive, or anything you're unsure of, call web_search
   first — do not answer from memory. Follow up with web_fetch if you need details.
 - File-changing operations already prompt the user for confirmation; don't ask again.
@@ -296,10 +305,6 @@ class SessionCoordinator:
         text = (text or "").strip()
         if not text:
             return
-        if not self.provider.configured:
-            self.emit({"type": "error", "message":
-                       "还没配 DeepSeek API Key。菜单栏 → 打开配置，填 deepseek.api_key 后重启大脑。"})
-            return
         if self.busy:
             # UI 一定是先发了 cancel 才发这条——不然它自己就会挡住输入。
             # 旧 worker 退出是异步的，接住这条消息，让它退出后自动续上，
@@ -307,7 +312,34 @@ class SessionCoordinator:
             self._queued = (text, message_id)
             self.cancel()
             return
+        self._dispatch_turn(text, message_id)
+
+    def _dispatch_turn(self, text, message_id):
+        local = local_router.route(text, IDENTITY)
+        if local:
+            self._start_local_turn(text, message_id, local)
+            return
+        if not self.provider.configured:
+            self.emit({"type": "error", "message":
+                       "当前请求需要推理模型，但还没有配置 API Key。本地时间、身份、"
+                       "音乐和打开应用仍可直接使用。"})
+            return
         self._start_turn(text, message_id)
+
+    def _start_local_turn(self, text, message_id, route):
+        self._turn_generation += 1
+        generation = self._turn_generation
+        self._cancel.clear()
+        with self._speech_lock:
+            self._speech_buffer = ""
+            self._speech_seen = set()
+            self._repeat_streak = 0
+            self._degenerate = False
+        self.history.append({"role": "user", "content": text})
+        self._trim()
+        self._worker = threading.Thread(target=self._run_local_turn,
+                                        args=(message_id, text, route, generation), daemon=True)
+        self._worker.start()
 
     def _start_turn(self, text, message_id):
         self._turn_generation += 1
@@ -639,8 +671,61 @@ class SessionCoordinator:
             # 忙碌时被接住、排队等着续上的那一句，现在轮到它了
             queued, self._queued = self._queued, None
             if queued:
-                self._start_turn(*queued)
+                self._dispatch_turn(*queued)
             self._task_queries.pop(generation, None)
+
+    def _run_local_turn(self, message_id, query, route, generation):
+        """Jarvis Core 的确定性快路：不调用任何聊天模型。"""
+        started = time.time()
+        self._turn_started = started
+        self._turn_first_token = None
+        self._turn_first_audio = None
+        try:
+            result = {}
+            tool_name = route.get("tool")
+            if tool_name:
+                self.set_state("executing", registry.describe(tool_name, route["arguments"]))
+                call_id = "local_" + uuid.uuid4().hex[:10]
+                self.emit({"type": "tool_started", "id": call_id, "name": tool_name,
+                           "arguments": route["arguments"],
+                           "risk": (registry.BY_NAME.get(tool_name) or {}).get("risk", "L1"),
+                           "summary": registry.describe(tool_name, route["arguments"]),
+                           "action": registry.action_of(tool_name),
+                           "target": registry.target_of(tool_name, route["arguments"])})
+                result = self._call_native(call_id, tool_name, route["arguments"])
+                self._assert_current_turn(generation)
+                self.emit({"type": "tool_result", "id": call_id, "name": tool_name,
+                           "success": "error" not in result,
+                           "summary": result.get("error") or registry.describe(
+                               tool_name, route["arguments"]),
+                           "ms": int((time.time() - started) * 1000)})
+
+            english, chinese = route["response"](result)
+            self._assert_current_turn(generation)
+            self.set_state("speaking")
+            self._turn_first_token = time.time()
+            self.emit({"type": "assistant_delta", "id": message_id, "text": english})
+            self._feed_speech(english)
+            self.emit({"type": "assistant_delta_zh", "id": message_id, "text": chinese})
+            self._flush_speech()
+            history = list(self.history)
+            history.append({"role": "assistant", "content": english})
+            self._commit_history(history, generation)
+            self.emit({"type": "assistant_done", "id": message_id,
+                       "text": english, "text_zh": chinese, "local": True})
+            self.log("本地路由 %.0fms · %s" % ((time.time() - started) * 1000, query[:80]))
+        except Cancelled:
+            self.emit({"type": "turn_cancelled", "id": message_id})
+        except Exception as exc:
+            self.log("本地路由失败: %s\n%s" % (exc, traceback.format_exc()))
+            self.emit({"type": "error", "message": "本地执行失败：%s" % exc})
+        finally:
+            if generation == self._turn_generation:
+                self.set_state("idle")
+            self.emit({"type": "turn_done", "id": message_id})
+            queued, self._queued = self._queued, None
+            if queued:
+                self._dispatch_turn(*queued)
 
     def _log_turn_timing(self, started):
         """一轮的延迟账单。三个数各自指向不同的锅：
@@ -912,7 +997,7 @@ class SessionCoordinator:
                 environment, ensure_ascii=False, separators=(",", ":"))
         memory = ("\n== WHAT YOU REMEMBER ==\n%s\n" % memory_block) if memory_block else "\n"
         return {"role": "system", "content": SYSTEM_PROMPT.format(
-            marker=ZH_MARKER, env=env, memory=memory,
+            marker=ZH_MARKER, env=env, memory=memory, identity=IDENTITY.context_block(),
             now=time.strftime("%Y-%m-%d %H:%M:%S %A"))}
 
     def _capture_environment(self):
