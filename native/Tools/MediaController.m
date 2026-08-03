@@ -85,20 +85,15 @@ static BOOL MainWindowBoundsForPID(pid_t pid, CGRect *outBounds) {
     return NO;
 }
 
-static void PostDoubleClick(CGPoint point) {
-    for (int click = 1; click <= 2; click++) {
-        CGEventRef down = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, point,
-                                                  kCGMouseButtonLeft);
-        CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp, point,
-                                                kCGMouseButtonLeft);
-        CGEventSetIntegerValueField(down, kCGMouseEventClickState, click);
-        CGEventSetIntegerValueField(up, kCGMouseEventClickState, click);
-        CGEventPost(kCGHIDEventTap, down);
-        CGEventPost(kCGHIDEventTap, up);
-        CFRelease(down);
-        CFRelease(up);
-        if (click == 1) usleep(120000);
-    }
+static void PostClick(CGPoint point) {
+    CGEventRef down = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, point,
+                                              kCGMouseButtonLeft);
+    CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp, point,
+                                            kCGMouseButtonLeft);
+    CGEventPost(kCGHIDEventTap, down);
+    CGEventPost(kCGHIDEventTap, up);
+    CFRelease(down);
+    CFRelease(up);
 }
 
 #pragma mark -
@@ -238,11 +233,13 @@ static void PostDoubleClick(CGPoint point) {
             completion(nil, @"找不到网易云音乐主窗口");
             return;
         }
-        // 双击“单曲”第一条。用 CGEvent 是因为网易云 WebView 不响应 System Events
-        // 的 click-at 伪点击；坐标按窗口比例计算，窗口移动或缩放后仍落在第一条。
-        CGPoint firstSong = CGPointMake(CGRectGetMinX(bounds) + CGRectGetWidth(bounds) * 0.25,
-                                         CGRectGetMinY(bounds) + CGRectGetHeight(bounds) * 0.464);
-        PostDoubleClick(firstSong);
+        // 点“单曲”标题右侧的“播放”按钮，它会稳定播放第一条搜索结果。
+        // 旧实现双击窗口高度 46.4% 的位置；网易云 3.x 当前布局下那里已经是第三条
+        // 结果或空白区，所以搜索成功后仍会继续播放旧歌。主内容区是自绘 WebView，
+        // 只能用 CGEvent；使用相对窗口坐标可继续适配窗口移动和等比例缩放。
+        CGPoint playFirstResult = CGPointMake(CGRectGetMinX(bounds) + CGRectGetWidth(bounds) * 0.23,
+                                               CGRectGetMinY(bounds) + CGRectGetHeight(bounds) * 0.232);
+        PostClick(playFirstResult);
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
