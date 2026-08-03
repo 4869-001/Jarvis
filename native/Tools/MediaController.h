@@ -23,10 +23,11 @@ typedef void (^JarvisMediaCompletion)(NSDictionary *_Nullable result, NSString *
 
 @interface MediaController : NSObject
 
-/// action: toggle / play / pause / next / previous / volume_up / volume_down / like / status
+/// action: toggle / play / pause / next / previous / volume_up / volume_down / like / status / search_play
 /// player: 可空，auto（默认）/ netease / music / spotify / system
 - (void)perform:(NSString *)action
          player:(nullable NSString *)player
+          query:(nullable NSString *)query
      completion:(JarvisMediaCompletion)completion;
 
 @end

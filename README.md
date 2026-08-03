@@ -122,7 +122,8 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 ### 播放器控制
 
 `media_control`：`toggle` / `play` / `pause` / `next` / `previous` / `volume_up` /
-`volume_down` / `like` / `status`。默认自动挑当前在放的播放器，也可以 `player` 点名。
+`volume_down` / `like` / `status` / `search_play`。默认自动挑当前在放的播放器，也可以
+`player` 点名。检索播放使用 action=search_play、query=歌曲名、player=netease。
 
 **网易云音乐没有 AppleScript 字典**，`tell application "网易云音乐" to playpause` 这条路
 根本不存在——这就是它以前只能被打开、不能被控制的原因。实际走的是三条通道：
