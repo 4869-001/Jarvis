@@ -61,8 +61,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key>        <string>${BUNDLE_ID}</string>
   <key>CFBundleExecutable</key>        <string>${APP_NAME}</string>
   <key>CFBundlePackageType</key>       <string>APPL</string>
+  <key>CFBundleIconFile</key>          <string>Jarvis.icns</string>
   <key>CFBundleShortVersionString</key><string>2.0</string>
-  <key>CFBundleVersion</key>           <string>2</string>
+  <key>CFBundleVersion</key>           <string>3</string>
   <key>LSMinimumSystemVersion</key>    <string>13.0</string>
   <key>LSUIElement</key>               <true/>
   <key>NSHighResolutionCapable</key>   <true/>
@@ -106,6 +107,9 @@ echo "▸ 打包网页资源"
 mkdir -p "$APP/Contents/Resources/web"
 cp "$ROOT/ui/wallpaper.html" "$ROOT/ui/conversation.html" "$ROOT/ui/three.min.js" \
    "$APP/Contents/Resources/web/"
+
+echo "▸ 打包应用图标"
+cp "$ROOT/assets/Jarvis.icns" "$APP/Contents/Resources/Jarvis.icns"
 
 echo "▸ 打包 Brain"
 mkdir -p "$APP/Contents/Resources/brain"
