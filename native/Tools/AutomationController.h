@@ -26,6 +26,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (BOOL)handlesToolNamed:(NSString *)name;
 
+/// 中文应用名 → 磁盘上的 bundle 名（备忘录→Notes）。NativeToolExecutor 的
+/// app_open 也用它，两处必须是同一份表。
++ (NSDictionary<NSString *, NSString *> *)nameAliases;
+
 - (void)execute:(NSString *)name
       arguments:(NSDictionary *)arguments
      completion:(JarvisToolCompletion)completion;

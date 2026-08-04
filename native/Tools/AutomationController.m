@@ -181,8 +181,34 @@ static const NSInteger kMaxUINodes = 220;
                     @"没有控制「%@」的权限：系统设置 → 隐私与安全性 → 自动化，"
                     @"把 JARVIS 下面的「%@」打开。%@", appName, appName,
                     AXIsProcessTrusted() ? @"" : @"（重新构建过的话，开关要关掉再打开一次）"];
-        case procNotFound:
-            return [NSString stringWithFormat:@"「%@」没在运行，先用 app_open 打开它。", appName];
+        case procNotFound: {
+            // AppleScript 的 `tell application "X"` 本来就会自己把 X 拉起来，
+            // 所以"没在运行"不该是错误——真当错误报，模型就会先去 app_open
+            // 再回来重试，白花两步。这里替它把应用拉起来再复检一次权限。
+            NSURL *url = [self urlForAppNamed:appName];
+            if (!url) return nil;                       // 认不出来就交给脚本自己去报
+            NSWorkspaceOpenConfiguration *config = [NSWorkspaceOpenConfiguration configuration];
+            config.activates = NO;                      // 别抢用户正在用的窗口
+            dispatch_semaphore_t launched = dispatch_semaphore_create(0);
+            [[NSWorkspace sharedWorkspace] openApplicationAtURL:url configuration:config
+                                              completionHandler:^(NSRunningApplication *app, NSError *error) {
+                dispatch_semaphore_signal(launched);
+            }];
+            dispatch_semaphore_wait(launched,
+                                    dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)));
+            // 进程起来了不等于它已经能收 Apple Event，给它一点时间注册。
+            for (int i = 0; i < 20 && ![self runningAppNamed:appName]; i++) {
+                [NSThread sleepForTimeInterval:0.25];
+            }
+            OSStatus again = AEDeterminePermissionToAutomateTarget(
+                target.aeDesc, typeWildCard, typeWildCard, YES);
+            if (again == errAEEventNotPermitted) {
+                return [NSString stringWithFormat:
+                        @"没有控制「%@」的权限：系统设置 → 隐私与安全性 → 自动化，"
+                        @"把 JARVIS 下面的「%@」打开。", appName, appName];
+            }
+            return nil;
+        }
         default:
             return nil;                        // 其它情况交给脚本本身去报，信息更具体
     }

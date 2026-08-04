@@ -222,6 +222,13 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     NSWorkspace *workspace = [NSWorkspace sharedWorkspace];
     NSFileManager *fm = [NSFileManager defaultManager];
 
+    // 中文名先过一遍别名表。磁盘上的 bundle 叫 Notes.app，用户和模型说的是
+    // "备忘录"——这张表在 AutomationController 里，两边共用同一份，
+    // 不然会出现"app_script 认得备忘录、app_open 不认得"这种割裂
+    // （真机上就撞到过：模型自己改口说 Notes 才成功）。
+    NSString *alias = [AutomationController nameAliases][name];
+    if (alias.length) name = alias;
+
     if ([name containsString:@"."] && ![name hasSuffix:@".app"]) {
         NSURL *byID = [workspace URLForApplicationWithBundleIdentifier:name];
         if (byID) return byID;

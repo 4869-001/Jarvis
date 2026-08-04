@@ -85,6 +85,16 @@ explore 档只给只读工具、报告必须是结论不是过程（见 `REPORT_
   整个脚本从那里开始语法错误。改用 `//` 行注释。`node --check` 能一眼查出来，
   改完 `ui/conversation.html` 建议顺手跑一下。
 
+### 收尾时真机跑出来的两个问题（已修）
+
+- **别名表当时只在 AutomationController 里**，`app_open` 不认识"备忘录"。
+  真机上的表现是模型先用中文名开应用失败、自己改口说 Notes 才成功，白花一步。
+  现在 `+[AutomationController nameAliases]` 公开出来，`urlForApplicationNamed:`
+  也走同一份表。
+- **预检把"应用没在运行"当成了错误**。`tell application "X"` 本来就会自己把 X
+  拉起来，报错等于让模型多绕一趟 app_open。现在 procNotFound 时替它拉起
+  （`activates = NO`，不抢前台）再复检一次权限。
+
 ### 一个可复现的 UI 验证手段
 
 `/tmp/uishot.m`（临时文件，没进仓库）：把真实的 `conversation.html` 装进
