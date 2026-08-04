@@ -377,8 +377,11 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
         if ([requestID isKindOfClass:[NSString class]]) {
             [self.delegate conversationPanel:self
                        didAnswerConfirmation:requestID
-                                    approved:[body[@"approved"] boolValue]];
+                                    approved:[body[@"approved"] boolValue]
+                                       scope:body[@"scope"]];
         }
+    } else if ([action isEqualToString:@"agent"]) {
+        [self forwardAgentMessage:body[@"message"]];
     } else if ([action isEqualToString:@"collapse"]) {
         NSNumber *header = body[@"header"];
         [self setCollapsed:[body[@"collapsed"] boolValue]
@@ -432,6 +435,27 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
     } else if ([action isEqualToString:@"open_config"]) {
         [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:[JarvisPaths configPath]]];
     }
+}
+
+/// Agent 模式的四条控制消息原样转给 Brain。
+///
+/// 这里做的是**白名单**，不是通用透传：页面能让 Brain 执行的东西只该是页面上
+/// 真的有那个开关的东西。少了这层，`postMessage` 就等于给页面开了一条通往
+/// Brain 全部指令的直连口子——面板加载的是本地文件，但没有理由把这条口子留着。
+- (void)forwardAgentMessage:(id)raw {
+    if (![raw isKindOfClass:[NSDictionary class]]) return;
+    NSDictionary *message = raw;
+    NSString *type = message[@"type"];
+    if (![type isKindOfClass:[NSString class]]) return;
+
+    static NSSet<NSString *> *allowed = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        allowed = [NSSet setWithArray:@[@"set_agent_mode", @"set_permission_mode",
+                                        @"set_workspace", @"undo_edit"]];
+    });
+    if (![allowed containsObject:type]) return;
+    [self.delegate conversationPanel:self didRequestBrainMessage:message];
 }
 
 /// 页面上报顶栏可拖区域，及区域内不可拖的按钮矩形（都是 getBoundingClientRect()

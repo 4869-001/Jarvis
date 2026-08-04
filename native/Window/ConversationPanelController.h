@@ -23,9 +23,15 @@ NS_ASSUME_NONNULL_BEGIN
 /// 用户在文件卡片上点了「在访达中显示」或「打开」
 - (void)conversationPanel:(ConversationPanelController *)panel
           didRequestOpen:(NSString *)path reveal:(BOOL)reveal;
+/// scope 为 @"session" 时表示用户点的是「本次会话内总是允许」，只在 approved 为真时有意义
 - (void)conversationPanel:(ConversationPanelController *)panel
    didAnswerConfirmation:(NSString *)requestID
-                approved:(BOOL)approved;
+                approved:(BOOL)approved
+                   scope:(nullable NSString *)scope;
+/// Agent 模式的控制消息（切模式 / 换权限档位 / 换工作目录 / 撤销一次编辑）。
+/// 已在面板层按白名单过滤过 type，宿主直接转发给 Brain 即可。
+- (void)conversationPanel:(ConversationPanelController *)panel
+   didRequestBrainMessage:(NSDictionary *)message;
 /// 用户在模型选择菜单里点了某一项
 - (void)conversationPanel:(ConversationPanelController *)panel didRequestSetModel:(NSString *)modelID;
 /// 用户填完「添加模型」表单点了保存。fields 里是 label/base_url/api_key/model 四个字符串

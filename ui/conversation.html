@@ -311,6 +311,104 @@ header button svg { display: block; width: 13px; height: 13px; }
 .notice.bad { color: var(--bad); }
 .notice .link { color: var(--gold); cursor: pointer; text-decoration: underline; margin: 0 4px; }
 
+/* ── Agent 模式 ─────────────────────────────────────── */
+/* 顶栏下面那条常驻状态带。Agent 跑起来之后用户最需要随时看见的三件事：
+   动的是哪个目录、当前放行到什么程度、跑到第几步——所以它们不藏在菜单里。 */
+#agentBar {
+  display: none; flex-direction: column; gap: 6px; flex: none;
+  padding: 7px 12px; border-bottom: 1px solid var(--line);
+  background: rgba(255, 140, 26, 0.05);
+}
+body.agent #agentBar { display: flex; }
+body.collapsed #agentBar { display: none; }
+#agentBar .ag-row { display: flex; align-items: center; gap: 8px; }
+#agentBar .ag-badge {
+  flex: none; font: 600 9px/1 var(--mono); letter-spacing: 0.18em;
+  color: #120a04; background: var(--amber); border-radius: 3px; padding: 3px 5px;
+}
+#agentBar .ag-ws {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; text-align: left;
+  font: 11px/1.5 var(--mono); color: var(--gold); background: none; border: none;
+  cursor: pointer; padding: 0;
+}
+#agentBar .ag-ws:hover { text-decoration: underline; }
+#agentBar .ag-step { flex: none; font: 10px var(--mono); color: var(--text-dim); }
+#agentBar .ag-off {
+  flex: none; width: 18px; height: 18px; line-height: 1; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 4px; background: none;
+  color: var(--text-dim); font-size: 11px;
+}
+#agentBar .ag-off:hover { color: var(--bad); border-color: var(--bad); }
+
+/* 权限档位。bypass 单独染红——它把所有闸都拆了，不该和另外两档看起来一样。 */
+#agentBar .ag-modes { display: flex; gap: 4px; }
+#agentBar .ag-modes button {
+  flex: 1; padding: 4px 2px; border-radius: 5px; cursor: pointer;
+  font-size: 10.5px; color: var(--text-dim);
+  border: 1px solid var(--line); background: rgba(255, 200, 130, 0.04);
+}
+#agentBar .ag-modes button:hover { color: var(--text); border-color: var(--line-lit); }
+#agentBar .ag-modes button.on { color: #120a04; background: var(--gold); border-color: var(--gold); }
+#agentBar .ag-modes button.on[data-mode="bypass"] { background: var(--bad); border-color: var(--bad); color: #1a0500; }
+
+#agentBar .ag-wsform { display: none; gap: 6px; }
+#agentBar .ag-wsform.on { display: flex; }
+#agentBar .ag-wsform input {
+  flex: 1; min-width: 0; padding: 4px 7px; border-radius: 5px;
+  border: 1px solid var(--line); background: rgba(0, 0, 0, 0.25);
+  color: var(--text); font: 11px var(--mono);
+}
+#agentBar .ag-wsform button {
+  flex: none; padding: 4px 9px; border-radius: 5px; cursor: pointer; font-size: 11px;
+  border: 1px solid var(--line-lit); background: rgba(255, 200, 130, 0.1); color: var(--text);
+}
+
+/* 待办。同一时刻只有一条 in_progress，所以"正在做的那件事"必须一眼可辨。 */
+#agentBar .ag-todos { display: none; flex-direction: column; gap: 2px; max-height: 132px; overflow-y: auto; }
+#agentBar .ag-todos.on { display: flex; }
+#agentBar .ag-todo { display: flex; gap: 6px; font-size: 11.5px; color: var(--text-dim); line-height: 1.5; }
+#agentBar .ag-todo .box { flex: none; width: 1em; color: var(--text-dim); }
+#agentBar .ag-todo.doing { color: var(--text); }
+#agentBar .ag-todo.doing .box { color: var(--amber); }
+#agentBar .ag-todo.done { opacity: 0.5; text-decoration: line-through; }
+#agentBar .ag-todo.done .box { color: var(--ok); text-decoration: none; }
+#agentBar .ag-count { font: 10px var(--mono); color: var(--text-dim); }
+
+/* 步骤旁白：模型说"接下来我要…"。它不是回答，所以不给气泡，只给一行灰字。 */
+.agent-note {
+  align-self: stretch; font-size: 12px; line-height: 1.6; color: var(--text-dim);
+  padding: 1px 2px 1px 10px; border-left: 2px solid rgba(255, 140, 26, 0.35);
+}
+
+/* diff 卡片 */
+.diff { border-top: 1px solid var(--line); }
+.diff pre {
+  margin: 0; padding: 7px 10px; max-height: 260px; overflow: auto;
+  font: 10.5px/1.55 var(--mono); white-space: pre; color: rgba(255, 230, 196, 0.8);
+}
+.diff .ln-add { color: var(--ok); }
+.diff .ln-del { color: var(--bad); }
+.diff .ln-hunk { color: var(--gold); opacity: 0.75; }
+.diff .diff-acts { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-top: 1px solid rgba(255,140,26,0.09); }
+.diff .diff-acts .stat { flex: 1; font: 10px var(--mono); color: var(--text-dim); }
+.diff .diff-acts button {
+  padding: 4px 9px; border-radius: 5px; cursor: pointer; font-size: 11px;
+  border: 1px solid var(--line); background: rgba(255, 200, 130, 0.06); color: var(--text);
+}
+.diff .diff-acts button:hover:not(:disabled) { border-color: var(--line-lit); background: rgba(255, 200, 130, 0.14); }
+.diff .diff-acts button:disabled { opacity: 0.4; cursor: default; }
+
+/* 命令输出。实时那份和最终那份用同一块地方，不然同一条命令会显示两遍。 */
+.term { border-top: 1px solid var(--line); }
+.term pre {
+  margin: 0; padding: 7px 10px; max-height: 220px; overflow: auto;
+  font: 10.5px/1.5 var(--mono); white-space: pre-wrap; word-break: break-all;
+  color: rgba(255, 230, 196, 0.72);
+}
+.term .exit { padding: 0 10px 6px; font: 10px var(--mono); color: var(--text-dim); }
+.term .exit.bad { color: var(--bad); }
+
 /* ── 技能 / 常用短语菜单（输入框敲 "/" 触发）──────────── */
 #skillMenu {
   display: none; flex-direction: column; gap: 2px;
@@ -527,6 +625,12 @@ body.resizing #body { visibility: hidden; }
     <span id="brand">J.A.R.V.I.S.</span>
     <span id="status">连接中</span>
     <span id="bars"><i></i><i></i><i></i><i></i><i></i></span>
+    <button id="btn-agent" title="Agent 模式（⌥A）：长程任务、编辑与检索工具"
+            aria-label="Agent 模式" aria-pressed="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z"/>
+      </svg>
+    </button>
     <button id="btn-opacity" title="面板透明度">◐</button>
     <button id="btn-wake" title="唤醒方式" aria-label="唤醒方式" aria-expanded="false">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -541,6 +645,25 @@ body.resizing #body { visibility: hidden; }
     </button>
     <button id="btn-collapse" title="收起面板">⌃</button>
   </header>
+
+  <div id="agentBar">
+    <div class="ag-row">
+      <span class="ag-badge">AGENT</span>
+      <button class="ag-ws" id="agent-ws" title="点击切换工作目录">~</button>
+      <span class="ag-step" id="agent-step"></span>
+      <button class="ag-off" id="agent-off" title="退出 Agent 模式" aria-label="退出 Agent 模式">✕</button>
+    </div>
+    <div class="ag-modes" id="agent-modes">
+      <button type="button" data-mode="ask" title="每个文件改动和命令都要你点确认">每步确认</button>
+      <button type="button" data-mode="accept_edits" title="文件编辑与只读命令直接执行，写操作仍确认">自动改文件</button>
+      <button type="button" data-mode="bypass" title="不再有任何确认，包括不可逆操作">全免确认</button>
+    </div>
+    <div class="ag-wsform" id="agent-wsform">
+      <input id="agent-wsinput" placeholder="工作目录，如 ~/Projects/Jarvis" spellcheck="false">
+      <button id="agent-wsok" type="button">切换</button>
+    </div>
+    <div class="ag-todos" id="agent-todos"></div>
+  </div>
 
   <div id="opacity">
     <label>OPACITY</label>
@@ -641,6 +764,8 @@ const S = {
   hasMessages: false,
   textBeforeVoice: '',   // 开麦前输入框里已有的内容，转写要接在它后面
   pendingConfirm: null,  // 未回答的确认卡片，Esc 优先关它
+  agent: { enabled: false, workspace: '~', permission_mode: 'accept_edits',
+           max_steps: 60, step: 0, todos: [] },
 };
 
 const STATUS_TEXT = {
@@ -709,8 +834,65 @@ function render() {
   $('btn-sleep').classList.toggle('on', S.sleeping);
 
   input.disabled = S.sleeping;
-  input.placeholder = S.sleeping ? '先唤醒 J.A.R.V.I.S.…' : '给 J.A.R.V.I.S. 发消息';
+  input.placeholder = S.sleeping ? '先唤醒 J.A.R.V.I.S.…'
+                    : (S.agent.enabled ? '交给 J.A.R.V.I.S. 去做' : '给 J.A.R.V.I.S. 发消息');
   sendBtn.disabled = S.sleeping || (!input.value.trim() && attachments.size === 0);
+  renderAgent();
+}
+
+/* ── Agent 模式 ─────────────────────────────────────── */
+
+function renderAgent() {
+  const a = S.agent;
+  document.body.classList.toggle('agent', a.enabled);
+  $('btn-agent').classList.toggle('on', a.enabled);
+  $('btn-agent').setAttribute('aria-pressed', String(a.enabled));
+  if (!a.enabled) return;
+
+  $('agent-ws').textContent = a.workspace || '~';
+  $('agent-ws').title = '工作目录：' + (a.workspace || '~') + '（点击切换）';
+  // 步数只在跑起来之后才有意义，闲着时显示上限反而像在倒计时
+  $('agent-step').textContent = a.step ? a.step + ' / ' + a.max_steps + ' 步' : '';
+  [...$('agent-modes').children].forEach((btn) => {
+    btn.classList.toggle('on', btn.dataset.mode === a.permission_mode);
+  });
+
+  const box = $('agent-todos');
+  box.textContent = '';
+  box.classList.toggle('on', a.todos.length > 0);
+  const done = a.todos.filter((t) => t.status === 'completed').length;
+  if (a.todos.length) {
+    const head = el('div', 'ag-count', '待办 ' + done + '/' + a.todos.length);
+    box.appendChild(head);
+  }
+  a.todos.forEach((todo) => {
+    const cls = todo.status === 'in_progress' ? 'doing' : (todo.status === 'completed' ? 'done' : '');
+    const row = el('div', 'ag-todo ' + cls);
+    row.appendChild(el('span', 'box',
+      todo.status === 'completed' ? '✓' : (todo.status === 'in_progress' ? '▶' : '○')));
+    row.appendChild(el('span', 'txt',
+      todo.status === 'in_progress' ? (todo.active_form || todo.content) : todo.content));
+    box.appendChild(row);
+  });
+}
+
+function applyAgent(payload) {
+  if (!payload) return;
+  const a = S.agent;
+  if ('enabled' in payload) a.enabled = !!payload.enabled;
+  if ('workspace' in payload) a.workspace = payload.workspace;
+  if ('permission_mode' in payload) a.permission_mode = payload.permission_mode;
+  if ('max_steps' in payload) a.max_steps = payload.max_steps;
+  if ('todos' in payload) a.todos = payload.todos || [];
+  render();
+}
+
+function setAgentMode(enabled) {
+  // 本地先反应，不等 Brain 回话——切换是即时的，等一个往返会让按钮像没点上
+  S.agent.enabled = !!enabled;
+  if (!enabled) S.agent.todos = [];
+  render();
+  post('agent', { message: { type: 'set_agent_mode', enabled: !!enabled } });
 }
 
 function setState(state, detail) {
@@ -872,9 +1054,94 @@ function finishTool(event) {
   node.head.querySelector('.mark').textContent = cancelled ? '—' : (event.success ? '✓' : '✗');
   if (event.ms) node.head.querySelector('.ms').textContent = event.ms + 'ms';
   if (!event.success) addStep(event.id, event.summary || '执行失败', 'fail');
-  else if (node.steps.childElementCount === 0) addStep(event.id, '完成', 'done');
-  if (event.payload && event.payload.kind === 'files') renderFiles(node.card, event.payload);
+  else if (node.steps.childElementCount === 0 && !event.payload) addStep(event.id, '完成', 'done');
+  const payload = event.payload;
+  if (payload) {
+    if (payload.kind === 'files') renderFiles(node.card, payload);
+    else if (payload.kind === 'diff') renderDiff(node.card, payload);
+    else if (payload.kind === 'matches') renderMatches(node.card, payload);
+    else if (payload.kind === 'shell') renderShell(node, payload);
+  }
   toolNodes.delete(event.id);
+  scroll();
+}
+
+/* 每行按 +/-/@ 上色。整段当纯文本塞进去就只是一堆看不出改了什么的字，
+   而 diff 恰恰是"一眼看出改动"才有价值。 */
+function renderDiff(card, payload) {
+  const wrap = el('div', 'diff');
+  const pre = el('pre');
+  (payload.diff || '').split('\n').forEach((line) => {
+    let cls = '';
+    if (line.startsWith('+++') || line.startsWith('---')) cls = '';
+    else if (line.startsWith('+')) cls = 'ln-add';
+    else if (line.startsWith('-')) cls = 'ln-del';
+    else if (line.startsWith('@@')) cls = 'ln-hunk';
+    const row = el('div', cls, line);
+    pre.appendChild(row);
+  });
+  wrap.appendChild(pre);
+
+  const acts = el('div', 'diff-acts');
+  const stat = el('span', 'stat',
+    '+' + (payload.added || 0) + ' −' + (payload.removed || 0) +
+    (payload.truncated ? ' · diff 过长已截断' : ''));
+  acts.appendChild(stat);
+  if (payload.undoable && payload.path) {
+    const undo = el('button', null, '撤销这次改动');
+    undo.addEventListener('click', () => {
+      undo.disabled = true;
+      undo.textContent = '已请求撤销';
+      post('agent', { message: { type: 'undo_edit', path: payload.path } });
+    });
+    acts.appendChild(undo);
+  }
+  wrap.appendChild(acts);
+  card.appendChild(wrap);
+}
+
+function renderMatches(card, payload) {
+  const wrap = el('div', 'term');
+  const pre = el('pre', null, (payload.lines || []).join('\n'));
+  wrap.appendChild(pre);
+  if (payload.total > (payload.lines || []).length) {
+    wrap.appendChild(el('div', 'exit', '共 ' + payload.total + ' 行，只显示前 ' + payload.lines.length + ' 行'));
+  }
+  card.appendChild(wrap);
+}
+
+/* 命令输出：实时流已经画过的那块直接复用，只补最终状态。
+   再画一遍的话同一条命令的输出会在卡片里出现两次。 */
+function renderShell(node, payload) {
+  let term = node.card.querySelector('.term');
+  if (!term) {
+    term = el('div', 'term');
+    term.appendChild(el('pre', null, payload.output || ''));
+    node.card.appendChild(term);
+  } else if (!node.streamed) {
+    term.querySelector('pre').textContent = payload.output || '';
+  }
+  const code = payload.exit_code;
+  if (code !== undefined && code !== null) {
+    term.appendChild(el('div', 'exit' + (code === 0 ? '' : ' bad'), '退出码 ' + code));
+  }
+}
+
+/* 命令还在跑时的实时回显。滚动只在用户没有自己往上翻时才跟着走。 */
+function appendToolOutput(id, text) {
+  const node = toolNodes.get(id);
+  if (!node || !text) return;
+  let term = node.card.querySelector('.term');
+  if (!term) {
+    term = el('div', 'term');
+    term.appendChild(el('pre'));
+    node.card.appendChild(term);
+  }
+  const pre = term.querySelector('pre');
+  const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
+  pre.textContent += text;
+  if (atBottom) pre.scrollTop = pre.scrollHeight;
+  node.streamed = true;
   scroll();
 }
 
@@ -946,14 +1213,19 @@ function renderConfirm(event) {
   const no = el('button', null, '取消');
   const yes = el('button', 'yes', '确认执行');
   row.append(no, yes);
+  // 一个任务里同一类操作要点十几次头，人就会直接去开"全免确认"——那是把所有闸
+  // 一起拆掉。这个按钮只放行这一个工具，且新会话即失效。
+  const always = el('button', null, '本次会话内总是允许');
+  if (S.agent.enabled) row.appendChild(always);
   card.appendChild(row);
 
-  const answer = (approved) => {
+  const answer = (approved, scope) => {
     if (S.pendingConfirm !== entry) return;
     S.pendingConfirm = null;
-    post('confirm', { request_id: event.request_id, approved: approved });
+    post('confirm', { request_id: event.request_id, approved: approved, scope: scope || 'once' });
     card.classList.add('done');
-    card.querySelector('.head').textContent = approved ? '已确认执行' : '已取消，未做任何修改';
+    card.querySelector('.head').textContent = !approved ? '已取消，未做任何修改'
+      : (scope === 'session' ? '已确认，本次会话内不再询问' : '已确认执行');
     addStep(event.id, approved ? '你确认了这次操作' : '你取消了这次操作', approved ? 'done' : 'fail');
   };
   const entry = { answer: answer };
@@ -961,6 +1233,7 @@ function renderConfirm(event) {
 
   yes.addEventListener('click', () => answer(true));
   no.addEventListener('click', () => answer(false));
+  always.addEventListener('click', () => answer(true, 'session'));
 
   log.appendChild(card);
   scroll(true);
@@ -1459,6 +1732,47 @@ $('btn-wake').addEventListener('click', () => {
 $('wake-auto').addEventListener('click', () => post('set_wake_word', { enabled: true }));
 $('wake-manual').addEventListener('click', () => post('set_wake_word', { enabled: false }));
 
+/* ── Agent 模式的控件 ───────────────────────────────── */
+
+$('btn-agent').addEventListener('click', () => setAgentMode(!S.agent.enabled));
+$('agent-off').addEventListener('click', () => setAgentMode(false));
+
+$('agent-modes').addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-mode]');
+  if (!button) return;
+  const mode = button.dataset.mode;
+  if (mode === 'bypass' && S.agent.permission_mode !== 'bypass') {
+    // 这一档把不可逆操作前的最后一道闸也拆了。让人多点一次，不是走流程，
+    // 是因为切过去之后就再没有任何一处会拦住 rm -rf 了。
+    addNotice('全免确认已开启：接下来所有操作直接执行，包括不可逆的。再点一次「自动改文件」可退回。', true);
+  }
+  S.agent.permission_mode = mode;
+  render();
+  post('agent', { message: { type: 'set_permission_mode', mode: mode } });
+});
+
+$('agent-ws').addEventListener('click', () => {
+  const form = $('agent-wsform');
+  form.classList.toggle('on');
+  if (form.classList.contains('on')) {
+    $('agent-wsinput').value = S.agent.workspace || '~';
+    $('agent-wsinput').focus();
+    $('agent-wsinput').select();
+  }
+});
+
+function submitWorkspace() {
+  const path = $('agent-wsinput').value.trim();
+  if (!path) return;
+  $('agent-wsform').classList.remove('on');
+  post('agent', { message: { type: 'set_workspace', path: path } });
+}
+$('agent-wsok').addEventListener('click', submitWorkspace);
+$('agent-wsinput').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') { event.preventDefault(); submitWorkspace(); }
+  if (event.key === 'Escape') { event.stopPropagation(); $('agent-wsform').classList.remove('on'); }
+});
+
 function applyWakeMode(cfg) {
   if (!cfg) return;
   const enabled = !!cfg.enabled;
@@ -1480,6 +1794,13 @@ document.addEventListener('keydown', (event) => {
   if (event.metaKey && event.shiftKey && event.key.toLowerCase() === 'n') {
     event.preventDefault();
     post('new_session');
+    return;
+  }
+  // ⌥A 切 Agent 模式。用 event.code 而不是 event.key：macOS 上按住 Option
+  // 会把 a 变成 "å"，比 key 判断稳。
+  if (event.altKey && !event.metaKey && !event.ctrlKey && event.code === 'KeyA') {
+    event.preventDefault();
+    setAgentMode(!S.agent.enabled);
     return;
   }
   if (event.key !== 'Escape') return;
@@ -1538,6 +1859,7 @@ function handle(event) {
       setState('idle', event.configured ? (event.model || '') : '缺 API Key');
       if (event.models) applyModels(event.models);
       if (event.wake_word) applyWakeMode(event.wake_word);
+      if (event.agent) applyAgent(event.agent);
       if (!event.configured) {
         const notice = addNotice('还没配 DeepSeek API Key，点这里打开配置文件', true);
         notice.style.cursor = 'pointer';
@@ -1703,6 +2025,10 @@ function handle(event) {
       completedAssistantIds.clear();
       abandonedAssistantIds.clear();
       S.pendingConfirm = null;
+      // Brain 那边新会话会清掉待办、免确认名单和后台进程，这里跟上，
+      // 别让上一个任务的进度条留在新会话的顶栏里。
+      S.agent.todos = [];
+      S.agent.step = 0;
       endStreaming();
       S.hasMessages = false;
       showEmpty();
@@ -1738,6 +2064,55 @@ function handle(event) {
 
     case 'usage':
       applyUsage(event.items);
+      break;
+
+    /* ── Agent 模式 ── */
+
+    case 'agent_state':
+      applyAgent(event);
+      break;
+
+    case 'agent_todos':
+      S.agent.todos = event.todos || [];
+      render();
+      break;
+
+    case 'agent_step':
+      S.agent.step = event.step || 0;
+      if (event.max) S.agent.max_steps = event.max;
+      render();
+      break;
+
+    /* 模型开工前那句"接下来我要…"。不进回答气泡：留在气泡里，用户会以为
+       任务已经做完了，而它后面还跟着十几个工具调用。 */
+    case 'agent_note': {
+      const note = el('div', 'agent-note', event.text || '');
+      log.appendChild(note);
+      hideEmpty();
+      scroll();
+      break;
+    }
+
+    case 'agent_goal':
+      S.agent.enabled = true;
+      addNotice('已进入 Agent 模式 · ' + (event.goal || ''));
+      render();
+      break;
+
+    case 'agent_compacted':
+      addNotice('上下文已压缩（' + (event.before || 0) + ' → ' + (event.after || 0) + ' 条），任务继续');
+      break;
+
+    case 'agent_undone':
+      addNotice('已撤销改动：' + (event.path || ''));
+      break;
+
+    case 'agent_allowlist':
+      addNotice('本次会话内不再询问：' + (event.tools || []).join('、'));
+      break;
+
+    case 'tool_output':
+      appendToolOutput(event.id, event.text);
       break;
   }
 }

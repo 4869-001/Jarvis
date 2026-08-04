@@ -874,10 +874,17 @@ static OSStatus JarvisHotKeyHandler(EventHandlerCallRef caller, EventRef event, 
 
 - (void)conversationPanel:(ConversationPanelController *)panel
    didAnswerConfirmation:(NSString *)requestID
-                approved:(BOOL)approved {
+                approved:(BOOL)approved
+                   scope:(NSString *)scope {
     [self.brain send:@{@"type": @"tool_confirm_response",
                        @"request_id": requestID,
-                       @"approved": @(approved)}];
+                       @"approved": @(approved),
+                       @"scope": ([scope isKindOfClass:[NSString class]] ? scope : @"once")}];
+}
+
+- (void)conversationPanel:(ConversationPanelController *)panel
+   didRequestBrainMessage:(NSDictionary *)message {
+    [self.brain send:message];
 }
 
 #pragma mark - 菜单栏

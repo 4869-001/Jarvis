@@ -12,9 +12,11 @@ Python 子进程去发 Apple Events 或调 NSWorkspace，授权弹窗归属会�
     L2 改动文件        L4 任意命令
 L2 起需要用户确认。
 """
+from . import code as code_impl
 from . import fs as fs_impl
 from . import memory_tools as memory_impl
 from . import shell as shell_impl
+from . import todo as todo_impl
 from . import web as web_impl
 from .. import tasking as tasking_impl
 
@@ -22,13 +24,18 @@ CONFIRM_FROM = "L2"
 _ORDER = {"L0": 0, "L1": 1, "L2": 2, "L3": 3, "L4": 4}
 
 
-def _tool(name, desc, params, risk, executor, fn=None, required=None, recover=None):
+def _tool(name, desc, params, risk, executor, fn=None, required=None, recover=None,
+          agent_only=False):
     return {
         "name": name,
         "description": desc,
         "risk": risk,
         "executor": executor,
         "fn": fn,
+        # Agent 模式专用的工具不进平时那份工具表。不是怕它们危险，是怕它们**吵**：
+        # 多挂十个工具，每一轮普通闲聊都要多带一份 Schema，而管家在"现在几点"
+        # 这种问题上不该有 grep 这个选项。
+        "agent_only": agent_only,
         # 确认框要回答"这事能不能撤"。写不出具体撤法的就别编，留空由 UI 显示"无法自动撤销"
         # ——含糊的安慰比没有更危险。
         "recover": recover,
@@ -229,11 +236,90 @@ TOOLS = [
           "L0", "python", tasking_impl.task_history),
 
     # ------------------------------------------------ 兜底
-    _tool("shell_run", "执行一条 zsh 命令。仅在没有任何其他工具能完成时使用；默认被禁用。",
+    _tool("shell_run", "执行一条 zsh 命令。仅在没有任何其他工具能完成时使用；默认被禁用。"
+          "Agent 模式下可以用 run_in_background 起长跑进程（开发服务器、监听器），"
+          "立刻返回 shell_id，之后用 shell_output 看输出。",
           {"command": _p("命令行"),
-           "cwd": _p("工作目录，默认 ~"),
-           "timeout": _p("超时秒数，默认 30", _INT)},
+           "cwd": _p("工作目录，默认为当前工作目录"),
+           "timeout": _p("超时秒数，默认 30", _INT),
+           "run_in_background": _p("放到后台跑，不等它结束（仅 Agent 模式）", _BOOL)},
           "L4", "python", shell_impl.shell_run, required=["command"]),   # 撤法未知，故意留空
+
+    # ------------------------------------------------ Agent 模式专用
+    _tool("agent_enter",
+          "切换到 Agent 模式：解锁精确编辑、内容检索、后台进程和待办清单，"
+          "步数上限从 8 抬到几十步。用户要求的是一件需要连续动手做完的事"
+          "（改代码、整理一批文件、跑通一个构建、排查一个问题）时，先调这个，"
+          "然后在同一轮里直接把事做完。只是聊天或单个动作不要调。",
+          {"goal": _p("一句话说明这次要完成什么，会显示在面板上")},
+          "L1", "session", None, required=["goal"]),
+
+    _tool("file_edit",
+          "把文件里唯一一处 old_string 精确替换成 new_string。改已有文件一律用它，"
+          "不要用 fs_write 整份重写——后者会丢掉你没读到的部分。"
+          "old_string 必须逐字对上（含缩进），且在文件中唯一；不唯一就多带几行上下文。",
+          {"path": _p("文件路径，可以是相对工作目录的路径"),
+           "old_string": _p("要被替换掉的原文，必须唯一"),
+           "new_string": _p("替换成的新内容"),
+           "replace_all": _p("替换全部匹配处，用于改名这类批量操作", _BOOL)},
+          "L2", "python", code_impl.file_edit,
+          required=["path", "old_string", "new_string"],
+          recover="改动前会留一份 .jarvis.bak，用 file_restore 一步还原",
+          agent_only=True),
+
+    _tool("file_restore", "把某个文件还原到上一次编辑之前（用 .jarvis.bak）。",
+          {"path": _p("文件路径")},
+          "L2", "python", code_impl.file_restore, required=["path"],
+          recover="还原本身也可以再改回去", agent_only=True),
+
+    _tool("grep",
+          "按内容检索文件（有 ripgrep 就用 ripgrep）。找函数定义、找调用点、"
+          "找报错信息出处都用它，比 shell_run 里手写 grep 快且安全。",
+          {"pattern": _p("正则表达式"),
+           "path": _p("检索目录或文件，默认当前工作目录"),
+           "glob": _p("只搜匹配这个模式的文件，如 *.py"),
+           "case_insensitive": _p("忽略大小写", _BOOL),
+           "context": _p("每处匹配额外带几行上下文，最多 5", _INT),
+           "mode": {"type": "string", "enum": ["content", "files", "count"],
+                    "description": "content 返回匹配行（默认），files 只返回文件名，count 只计数"},
+           "limit": _p("最多返回多少行，默认 80", _INT)},
+          "L0", "python", code_impl.grep, required=["pattern"], agent_only=True),
+
+    _tool("glob",
+          "按文件名模式找文件，结果按修改时间从新到旧。如 **/*.py、build.sh。",
+          {"pattern": _p("文件名模式"),
+           "path": _p("搜索根目录，默认当前工作目录"),
+           "limit": _p("最多返回多少个，默认 100", _INT)},
+          "L0", "python", code_impl.glob_files, required=["pattern"], agent_only=True),
+
+    _tool("shell_output",
+          "读取某个后台进程自上次读取以来的新输出。",
+          {"shell_id": _p("shell_run 后台启动时返回的 id"),
+           "filter": _p("只保留匹配这个正则的行，可选"),
+           "limit": _p("最多返回多少行，默认 200", _INT)},
+          "L0", "python", shell_impl.shell_output, required=["shell_id"], agent_only=True),
+
+    _tool("shell_kill", "结束一个后台进程。",
+          {"shell_id": _p("后台进程 id")},
+          "L1", "python", shell_impl.shell_kill, required=["shell_id"], agent_only=True),
+
+    _tool("shell_list", "列出还在跑的后台进程。",
+          {}, "L0", "python", shell_impl.shell_list, agent_only=True),
+
+    _tool("todo_write",
+          "写入或更新本次任务的待办清单，用户会在面板上实时看到。"
+          "任务超过三步就先列出来，之后每完成一项立刻更新状态；"
+          "同一时刻只能有一条 in_progress。",
+          {"todos": {"type": "array",
+                     "description": "完整的待办列表，每次都传全量（不是增量）",
+                     "items": {"type": "object",
+                               "properties": {
+                                   "content": _p("待办内容，祈使句，如「修复登录超时」"),
+                                   "active_form": _p("进行时说法，如「正在修复登录超时」"),
+                                   "status": {"type": "string",
+                                              "enum": ["pending", "in_progress", "completed"]}},
+                               "required": ["content", "status"]}}},
+          "L0", "python", todo_impl.todo_write, required=["todos"], agent_only=True),
 ]
 
 BY_NAME = {tool["name"]: tool for tool in TOOLS}
@@ -243,8 +329,22 @@ def needs_confirmation(tool):
     return _ORDER.get(tool["risk"], 9) >= _ORDER[CONFIRM_FROM]
 
 
-def openai_schema(tools=None):
-    """转成 DeepSeek（OpenAI 兼容）要的 tools 数组。"""
+def openai_schema(tools=None, agent_mode=False):
+    """转成 DeepSeek（OpenAI 兼容）要的 tools 数组。
+
+    非 Agent 模式下把 agent_only 那批藏起来，只留 agent_enter 当入口——
+    普通对话里发现"这活得连续动手做"时，模型靠它把自己切进 Agent 模式。
+    进去之后 agent_enter 反过来要藏掉，否则模型会在已经进来的情况下再调一次。
+    """
+    if tools is None:
+        selected = []
+        for tool in TOOLS:
+            if tool["name"] == "agent_enter":
+                if not agent_mode:
+                    selected.append(tool)
+            elif agent_mode or not tool["agent_only"]:
+                selected.append(tool)
+        tools = selected
     return [{
         "type": "function",
         "function": {
@@ -252,7 +352,7 @@ def openai_schema(tools=None):
             "description": tool["description"],
             "parameters": tool["schema"],
         },
-    } for tool in (tools if tools is not None else TOOLS)]
+    } for tool in tools]
 
 
 def describe(name, arguments):
@@ -283,6 +383,15 @@ def describe(name, arguments):
         "memory_update": "更新一条记忆",
         "task_history": "检查最近任务记录",
         "shell_run": "执行命令：{command}",
+        "agent_enter": "进入 Agent 模式：{goal}",
+        "file_edit": "编辑 {path}",
+        "file_restore": "还原 {path}",
+        "grep": "检索「{pattern}」",
+        "glob": "查找文件 {pattern}",
+        "shell_output": "读取后台输出 {shell_id}",
+        "shell_kill": "结束后台进程 {shell_id}",
+        "shell_list": "查看后台进程",
+        "todo_write": "更新待办清单",
     }
     template = templates.get(name)
     if not template:
@@ -313,8 +422,12 @@ _ACTIONS = {
     "memory_forget": "忘掉一条记忆", "memory_update": "更新记忆",
     "task_history": "检查任务记录",
     "shell_run": "执行命令",
+    "agent_enter": "进入 Agent 模式", "file_edit": "编辑文件", "file_restore": "还原文件",
+    "grep": "检索内容", "glob": "查找文件", "shell_output": "读取后台输出",
+    "shell_kill": "结束后台进程", "shell_list": "查看后台进程", "todo_write": "更新待办",
 }
-_TARGET_KEYS = ("path", "source", "command", "name", "url", "text", "query", "id", "contact")
+_TARGET_KEYS = ("path", "source", "command", "name", "url", "text", "query", "id", "contact",
+                "pattern", "shell_id", "goal")
 
 
 def action_of(name):
@@ -336,13 +449,32 @@ def target_of(name, arguments):
 # 哪些工具的结果值得让 UI 画成可交互卡片，以及从结果里取哪个列表。
 # 只放确定是"文件路径列表"的：UI 会给每一项加"在访达中显示 / 打开"，
 # 拿别的东西当路径会点出一堆失败。
-_FILE_LIST_TOOLS = {"fs_search": "results", "fs_list": "entries"}
+_FILE_LIST_TOOLS = {"fs_search": "results", "fs_list": "entries", "glob": "files"}
 
 
 def ui_payload(name, arguments, result):
     """把工具结果整理成 UI 能直接渲染的形状。认不出来就返回 None，UI 退回纯文字摘要。"""
     if not isinstance(result, dict) or result.get("error"):
         return None
+
+    if name == "file_edit":
+        # diff 卡片。带上 path 是为了卡片上那个「撤销」按钮知道还原谁。
+        return {"kind": "diff", "path": result.get("path"),
+                "diff": result.get("diff") or "",
+                "added": result.get("added_lines") or 0,
+                "removed": result.get("removed_lines") or 0,
+                "truncated": bool(result.get("diff_truncated")),
+                "undoable": bool(result.get("backup"))}
+    if name == "grep":
+        return {"kind": "matches", "pattern": result.get("pattern"),
+                "engine": result.get("engine"),
+                "lines": result.get("matches") or [],
+                "total": result.get("count") or 0}
+    if name == "shell_run" and not result.get("background"):
+        return {"kind": "shell", "command": result.get("command"),
+                "exit_code": result.get("exit_code"),
+                "output": (result.get("output") or "")[-4000:]}
+
     key = _FILE_LIST_TOOLS.get(name)
     if not key:
         return None

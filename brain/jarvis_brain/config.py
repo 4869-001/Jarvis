@@ -121,6 +121,27 @@ DEFAULTS = {
         "max_tool_rounds": 8,
         "history_limit": 40,
     },
+    "agent": {
+        # Agent 模式：长程任务循环（面板 ⌥A 开关，这里是重启后的默认值）。
+        # 开启后工具集扩展出编辑/检索/进程那一组，步数上限抬高，中间步骤不播报。
+        "enabled": False,
+        # 工作目录。模型给的相对路径按它解析，项目上下文文件也从这里读。
+        "workspace": "~",
+        # ask         每个 L2+ 操作都确认（最保守）
+        # accept_edits 文件编辑与只读命令免确认，shell 写操作和退出应用仍确认
+        # bypass      全免确认。等于把终端交给模型，顶栏会亮红标识
+        "permission_mode": "accept_edits",
+        # 一轮任务最多几步工具调用。到顶不报错，而是让模型收尾并交回控制权。
+        "max_steps": 60,
+        # history 超过这么多条就把最早的一批压成摘要。长任务撞不到上下文上限，
+        # 代价是早期细节只剩摘要——所以压缩产物里明确保留"已改过哪些文件"。
+        "compact_after": 30,
+        # 工作目录下这几个文件会作为项目上下文注入（取第一个存在的）
+        "context_files": ["JARVIS.md", "CLAUDE.md", "AGENTS.md"],
+        # 单个命令实时回显给面板的最大行数，以及后台进程保留的输出行数
+        "stream_lines": 200,
+        "buffer_lines": 2000,
+    },
 }
 
 
@@ -180,6 +201,10 @@ def load():
     cfg["tools"]["fs_roots"] = [
         os.path.realpath(os.path.expanduser(p)) for p in cfg["tools"]["fs_roots"]
     ]
+    workspace = os.path.realpath(os.path.expanduser(cfg["agent"].get("workspace") or "~"))
+    if not os.path.isdir(workspace):
+        workspace = os.path.expanduser("~")
+    cfg["agent"]["workspace"] = workspace
     return cfg
 
 

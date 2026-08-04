@@ -170,6 +170,7 @@ class BrainServer:
             "tts": {"enabled": self.cfg["tts"]["enabled"],
                     "backend": self.cfg["tts"]["backend"]},
             "models": self.session.models_payload(),
+            "agent": self.session.agent.payload(),
         }
 
     def _serve_client(self, conn):
@@ -221,7 +222,16 @@ class BrainServer:
             self.session.reset()
         elif kind == "tool_confirm_response":
             self.session.resolve_pending(message.get("request_id"),
-                                         {"approved": bool(message.get("approved"))})
+                                         {"approved": bool(message.get("approved")),
+                                          "scope": message.get("scope") or "once"})
+        elif kind == "set_agent_mode":
+            self.session.set_agent_mode(bool(message.get("enabled")))
+        elif kind == "set_permission_mode":
+            self.session.set_permission_mode(message.get("mode"))
+        elif kind == "set_workspace":
+            self.session.set_workspace(message.get("path"))
+        elif kind == "undo_edit":
+            self.session.undo_edit(message.get("path"))
         elif kind == "native_tool_result":
             self.session.resolve_pending(message.get("request_id"), {
                 "result": message.get("result"),
@@ -298,5 +308,8 @@ class BrainServer:
             "search": self.cfg["search"],
         })
         self.session.auto_approve = set(self.cfg["tools"].get("auto_approve") or [])
+        # 重载会把 Agent 档位拉回配置文件里的值。这是有意的——面板上的切换是
+        # 临时的，config.json 才是"下次启动按什么来"。
+        self.session.agent.apply_config(self.cfg)
         self.log("配置已重载")
         self.emit(self._ready_event())

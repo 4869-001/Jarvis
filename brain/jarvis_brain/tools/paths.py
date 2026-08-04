@@ -20,11 +20,21 @@ class PathDenied(Exception):
     pass
 
 
-def resolve(raw, roots, must_exist=False):
+def resolve(raw, roots, must_exist=False, base=None):
+    """base 是相对路径的锚点（agent 模式下的工作目录）。
+
+    不给 base 时相对路径会按 Brain 进程的 cwd 解析——那是 launchd 拉起来的
+    进程，cwd 是 `/`，模型写 `src/main.py` 会解析到 `/src/main.py` 然后报
+    "不在允许范围内"。Agent 模式下模型天然会用相对路径，所以必须有锚点。
+    """
     if not raw or not isinstance(raw, str):
         raise PathDenied("路径为空")
 
-    path = os.path.realpath(os.path.expanduser(raw.strip()))
+    raw = raw.strip()
+    expanded = os.path.expanduser(raw)
+    if base and not os.path.isabs(expanded) and not raw.startswith("~"):
+        expanded = os.path.join(base, expanded)
+    path = os.path.realpath(expanded)
 
     lowered = path.lower() + "/"
     for bad in DENY_SUFFIXES:

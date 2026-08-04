@@ -13,11 +13,13 @@ import traceback
 import uuid
 
 from . import models, tasking, tts
+from .agent import AgentRuntime, COMPACT_PROMPT, compaction_marker
 from .memory import STORE as MEMORY
 from .identity import STORE as IDENTITY
 from . import local_router
 from .providers.deepseek import Cancelled, DeepSeekProvider, ProviderError
 from .tools import registry
+from .tools import shell as shell_impl
 from .tools.paths import PathDenied
 
 # ── 语言策略：已锁定，改前先跟用户确认 ──────────────────────────
@@ -252,12 +254,15 @@ class SessionCoordinator:
         self._pending = {}              # id -> {"event": Event, "value": any}
         self._pending_lock = threading.Lock()
 
+        self.agent = AgentRuntime(cfg, emit, log)
+
         self.tool_ctx = {
             "fs_roots": cfg["tools"]["fs_roots"],
             "allow_shell": cfg["tools"]["allow_shell"],
             "shell_unrestricted": cfg["tools"].get("shell_unrestricted", False),
             "max_output_chars": cfg["tools"]["max_output_chars"],
             "search": cfg["search"],
+            "set_todos": self.agent.set_todos,
         }
         self.auto_approve = set(cfg["tools"].get("auto_approve") or [])
 
@@ -283,6 +288,10 @@ class SessionCoordinator:
         self._repeat_streak = 0
         self._degenerate = False
         self._speech_seen = set()
+        # Agent 模式下中间步骤静音（用户 2026-08-04 定的策略）：一轮任务几十步，
+        # 每步都念一遍会把人淹掉，且大段路径和代码根本不适合听。只有最终那次
+        # 回答（后面不再跟工具调用的那次）才解除静音、照常英文播报 + 双语字幕。
+        self._speech_muted = False
         threading.Thread(target=self._speech_worker, daemon=True).start()
 
     # ------------------------------------------------------------ 状态
@@ -376,8 +385,44 @@ class SessionCoordinator:
         self._turn_generation += 1   # 老 worker 就算这会儿才反应过来，号也已经对不上了
         self.history = []
         self.session_id = uuid.uuid4().hex[:12]
+        # 后台进程绑在会话上：开了新会话就没人再管它们了，留着只会变成
+        # 谁也不知道还在跑的构建/开发服务器。免确认名单同理，跟着会话一起清。
+        shell_impl.kill_all()
+        self.agent.session_allow.clear()
+        self.agent.set_todos([])
+        self.agent.reset_turn()
         self.set_state("idle")
         self.emit({"type": "session_reset", "session_id": self.session_id})
+
+    # ------------------------------------------------------------ Agent 控制
+
+    def set_agent_mode(self, enabled):
+        self.agent.set_enabled(enabled)
+
+    def set_permission_mode(self, mode):
+        if not self.agent.set_permission_mode(mode):
+            self.emit({"type": "error", "message": "未知的权限档位：%s" % mode})
+
+    def set_workspace(self, path):
+        ok, detail = self.agent.set_workspace(path)
+        if not ok:
+            self.emit({"type": "error", "message": detail})
+
+    def undo_edit(self, path):
+        """面板上 diff 卡片的「撤销」。走和模型同一个 file_restore，
+        因此同样受路径闸门约束——UI 传来的路径不比模型传来的更可信。"""
+        from .tools import code as code_impl
+        try:
+            result = code_impl.file_restore({"path": path},
+                                            self._call_ctx("undo", self._turn_generation))
+        except PathDenied as exc:
+            result = {"error": str(exc)}
+        except Exception as exc:
+            result = {"error": "还原失败：%s" % exc}
+        if result.get("error"):
+            self.emit({"type": "error", "message": result["error"]})
+        else:
+            self.emit({"type": "agent_undone", "path": result["path"]})
 
     def models_payload(self):
         return {"active": models.STORE.active_id(),
@@ -537,7 +582,7 @@ class SessionCoordinator:
 
     def _feed_speech(self, delta):
         """把流式增量攒成整句就送去合成——不等整段说完，听感上快很多。"""
-        if not self._tts_enabled:
+        if not self._tts_enabled or self._speech_muted:
             return
         with self._speech_lock:
             self._speech_buffer += delta
@@ -648,6 +693,7 @@ class SessionCoordinator:
         self._degenerate = False
         self._speech_seen = set()
         self._task_queries[generation] = query
+        self.agent.reset_turn()
         try:
             self.set_state("thinking")
             environment = self._capture_environment()
@@ -667,6 +713,9 @@ class SessionCoordinator:
             self.log("turn 崩了: %s\n%s" % (exc, traceback.format_exc()))
             self.emit({"type": "error", "message": "内部错误：%s" % exc})
         finally:
+            # 静音是"这一轮中间步骤"的属性，不能漏回下一轮：异常或取消从中间
+            # 退出时若不复位，下一次普通对话会全程哑掉，且现象是"模型答了但没声音"。
+            self._speech_muted = False
             # 只有还没被顶替时才落回 idle——顶替它的那一轮有自己的状态要管，
             # 这里再插一脚会把刚起步的新一轮又拽回 idle。
             if generation == self._turn_generation:
@@ -758,25 +807,42 @@ class SessionCoordinator:
         self.history = history
 
     def _loop(self, message_id, memory_block, generation, environment=None):
-        max_rounds = self.cfg["session"]["max_tool_rounds"]
         history = list(self.history)   # 本轮私有快照，reset() 清得动 self.history，清不动这份
+        round_index = -1
 
-        for round_index in range(max_rounds + 1):
+        # Agent 模式的步数上限比普通对话高一个数量级，而且**每轮重新读**：
+        # 模型可能在第一步用 agent_enter 把自己切进 Agent 模式，预算要当场跟上。
+        while True:
+            round_index += 1
+            agent_mode = self.agent.enabled
+            max_rounds = (self.agent.max_steps if agent_mode
+                          else self.cfg["session"]["max_tool_rounds"])
+            if round_index > max_rounds:
+                break
             if self._cancel.is_set() or generation != self._turn_generation:
                 raise Cancelled()
+
+            if agent_mode:
+                self.agent.steps = round_index
+                self.emit({"type": "agent_step", "step": round_index, "max": max_rounds})
+                history = self._maybe_compact(history, generation)
 
             # 提醒贴在最后一条：工具结果常常是中文（文件名、工具摘要），
             # 隔着这些内容，开头的系统提示压不住格式，模型会整段滑回中文。
             # 这条只在请求里出现，不进 history。
             messages = ([self._system_message(memory_block, environment)] + history
                         + [self._format_reminder()])
-            tools = registry.openai_schema() if round_index < max_rounds else None
+            tools = (registry.openai_schema(agent_mode=agent_mode)
+                     if round_index < max_rounds else None)
 
             english_parts = []
             chinese_parts = []
             tool_calls = []
             started_speaking = False
             splitter = BilingualSplitter()
+            # 这一轮先按"可能是中间步骤"处理。是不是最终回答，要等流结束、
+            # 看有没有工具调用才知道——那时再解除静音、把整段补给合成。
+            self._speech_muted = agent_mode
 
             for kind, value in self.provider.stream(messages, tools):
                 self._assert_current_turn(generation)
@@ -788,7 +854,9 @@ class SessionCoordinator:
                         self._turn_first_token = time.time()
                     if not started_speaking:
                         started_speaking = True
-                        self.set_state("speaking")
+                        # 静音时别切 speaking：球体亮着"在说话"却没有声音，
+                        # 比停在 thinking 更让人以为坏了。
+                        self.set_state("speaking" if not self._speech_muted else "thinking")
                     for channel, chunk in splitter.feed(value):
                         self._emit_segment(message_id, channel, chunk,
                                            english_parts, chinese_parts, generation)
@@ -809,10 +877,17 @@ class SessionCoordinator:
             # 历史只留英文：中文是给眼睛看的字幕，喂回上下文只会让 token 翻倍
             full_text = "".join(english_parts)
             chinese_text = "".join(chinese_parts).strip()
-            full_text, chinese_text = self._ensure_bilingual(
-                message_id, full_text, chinese_text, generation)
 
             if not tool_calls:
+                # 这才是最终回答：解除静音，把整段一次补给合成。
+                # 双语兜底也只在这里做——中间步骤的一句话旁白不值得为它多打一次
+                # 翻译请求，而 Agent 一轮里那种旁白可能有几十条。
+                self._speech_muted = False
+                full_text, chinese_text = self._ensure_bilingual(
+                    message_id, full_text, chinese_text, generation)
+                if agent_mode and full_text:
+                    self.set_state("speaking")
+                    self._feed_speech(full_text)
                 if full_text:
                     history.append({"role": "assistant", "content": full_text})
                 self._commit_history(history, generation)
@@ -823,13 +898,25 @@ class SessionCoordinator:
                 self._finish_task(generation, "completed")
                 return
 
-            # 有些兼容接口会在 tool_calls 之前先流出一份看起来已经完整的答案，
-            # 工具执行后又按工具结果生成第二份。第一份只是工具前草稿：继续留在
-            # 面板和播报队列里，就会造成“一问两答”。发现工具调用后统一撤回草稿，
-            # 最终只保留工具完成后的、可验证的那一次回答。
-            if full_text or chinese_text:
-                self.emit({"type": "assistant_discard", "id": message_id})
-                self._abandon_speech()
+            if agent_mode:
+                # Agent 模式下这段文字是"接下来我要干什么"的旁白，有价值，但它不是
+                # 回答——留在回答气泡里，用户会以为任务已经做完了。移到单独的步骤
+                # 说明里显示，气泡清空等最终回答。
+                if full_text.strip():
+                    self.emit({"type": "agent_note", "id": message_id,
+                               "text": full_text.strip()})
+                if full_text or chinese_text:
+                    self.emit({"type": "assistant_discard", "id": message_id})
+            else:
+                full_text, chinese_text = self._ensure_bilingual(
+                    message_id, full_text, chinese_text, generation)
+                # 有些兼容接口会在 tool_calls 之前先流出一份看起来已经完整的答案，
+                # 工具执行后又按工具结果生成第二份。第一份只是工具前草稿：继续留在
+                # 面板和播报队列里，就会造成“一问两答”。发现工具调用后统一撤回草稿，
+                # 最终只保留工具完成后的、可验证的那一次回答。
+                if full_text or chinese_text:
+                    self.emit({"type": "assistant_discard", "id": message_id})
+                    self._abandon_speech()
 
             history.append({
                 "role": "assistant",
@@ -858,6 +945,7 @@ class SessionCoordinator:
             # 不切回去的话顶栏会一直挂着最后一个工具名，看着像卡死了。
             self.set_state("thinking")
 
+        self._speech_muted = False
         self.emit({"type": "error", "message": "工具调用超过 %d 轮，已中止。" % max_rounds})
         self._finish_task(generation, "failed")
 
@@ -891,7 +979,7 @@ class SessionCoordinator:
         step = tasking.JOURNAL.step_started(task, call_id, name, arguments,
                                             tool["risk"], summary)
 
-        if registry.needs_confirmation(tool) and name not in self.auto_approve:
+        if self.agent.requires_confirmation(name, tool, arguments, self.auto_approve):
             self.set_state("executing", "等待你确认：%s" % summary)
             try:
                 approved = self._ask_confirmation(call_id, name, arguments, tool["risk"], summary)
@@ -912,8 +1000,10 @@ class SessionCoordinator:
             try:
                 if tool["executor"] == "native":
                     result = self._call_native(call_id, name, arguments)
+                elif tool["executor"] == "session":
+                    result = self._call_session_tool(name, arguments)
                 else:
-                    result = tool["fn"](arguments, self.tool_ctx)
+                    result = tool["fn"](arguments, self._call_ctx(call_id, generation))
             except PathDenied as exc:
                 result = {"error": str(exc)}
             except Cancelled:
@@ -947,6 +1037,42 @@ class SessionCoordinator:
         self.emit(event)
         return result
 
+    def _call_ctx(self, call_id, generation):
+        """给这一次工具调用的上下文：共享配置 + 只属于这次调用的三个回调。
+
+        stream/cancelled 必须带 call_id 和 generation，不能挂在共享的 tool_ctx 上——
+        并行工具调用时两个 shell_run 的输出会串到同一张卡片上去。
+        """
+        ctx = dict(self.tool_ctx)
+        ctx.update({
+            "workspace": self.agent.workspace,
+            "agent_mode": self.agent.enabled,
+            "stream_lines": self.agent.stream_lines,
+            "buffer_lines": self.agent.buffer_lines,
+            "stream": lambda text: self.emit({"type": "tool_output", "id": call_id,
+                                              "text": text}),
+            "cancelled": lambda: (self._cancel.is_set()
+                                  or generation != self._turn_generation),
+        })
+        return ctx
+
+    def _call_session_tool(self, name, arguments):
+        """由会话自己执行的工具——它们改的是会话状态，不是外部世界。"""
+        if name == "agent_enter":
+            already = self.agent.enabled
+            self.agent.set_enabled(True)
+            goal = (arguments.get("goal") or "").strip()
+            if goal:
+                self.emit({"type": "agent_goal", "goal": goal})
+            return {"agent_mode": True,
+                    "workspace": self.agent.workspace,
+                    "permission_mode": self.agent.permission_mode,
+                    "max_steps": self.agent.max_steps,
+                    "note": ("本来就在 Agent 模式" if already else
+                             "已进入 Agent 模式：编辑、检索、后台进程和待办清单现在可用，"
+                             "继续把这件事做完，别停下来问。")}
+        return {"error": "未知的会话工具：%s" % name}
+
     def _finish_task(self, generation, status):
         task = self._task_runs.pop(generation, None)
         if not task:
@@ -965,10 +1091,18 @@ class SessionCoordinator:
             "action": registry.action_of(name),
             "target": registry.target_of(name, arguments),
             "recover": (registry.BY_NAME.get(name) or {}).get("recover") or "",
+            "permission_mode": self.agent.permission_mode,
         }, timeout=180)
         if value.get("cancelled"):
             raise Cancelled()
-        return bool(value.get("approved"))
+        approved = bool(value.get("approved"))
+        # 「本次会话内总是允许」：同一个任务里同一类操作要点十几次头，用户会
+        # 直接切到 bypass 图省事——那是把所有闸一起拆了。给一个只覆盖这个工具、
+        # 且重启即失效的中间档，比逼人做非此即彼的选择安全。
+        if approved and value.get("scope") == "session":
+            self.agent.allow_for_session(name)
+            self.emit({"type": "agent_allowlist", "tools": sorted(self.agent.session_allow)})
+        return approved
 
     def _call_native(self, call_id, name, arguments):
         request_id = "native_" + call_id
@@ -1010,9 +1144,15 @@ class SessionCoordinator:
             env += "\nLive environment snapshot: " + json.dumps(
                 environment, ensure_ascii=False, separators=(",", ":"))
         memory = ("\n== WHAT YOU REMEMBER ==\n%s\n" % memory_block) if memory_block else "\n"
-        return {"role": "system", "content": SYSTEM_PROMPT.format(
+        content = SYSTEM_PROMPT.format(
             marker=ZH_MARKER, env=env, memory=memory, identity=IDENTITY.context_block(),
-            now=time.strftime("%Y-%m-%d %H:%M:%S %A"))}
+            now=time.strftime("%Y-%m-%d %H:%M:%S %A"))
+        agent_block = self.agent.prompt_block(ZH_MARKER)
+        if agent_block:
+            # 贴在最后：Agent 段里的"别停下来问""中间旁白不要双语"是对前面
+            # 管家段的定向覆盖，位置靠后模型才会以它为准。
+            content += "\n" + agent_block
+        return {"role": "system", "content": content}
 
     def _capture_environment(self):
         """每轮自动向宿主取一次只读快照，不再等模型主动调用 system_info。"""
@@ -1055,6 +1195,14 @@ class SessionCoordinator:
                 json.dumps(items[0], ensure_ascii=False, separators=(",", ":")))
 
     def _format_reminder(self):
+        if self.agent.enabled:
+            # Agent 模式下"短、口语"是错的目标：最终回报要写清改了哪些文件、
+            # 验证了什么。但英文在前这条不变——播报仍然只念英文那段。
+            return {"role": "system", "content":
+                    "ENGLISH FIRST. Always. If you are about to call tools, emit them with at "
+                    "most one short English line of narration and no %s marker. If this is your "
+                    "final answer, use the full three-part format and report what you actually "
+                    "changed and verified." % ZH_MARKER}
         return {"role": "system", "content":
                 "ENGLISH FIRST. Always. Whatever you are about to write — write it in English. "
                 "Only AFTER a line with %s may you write Chinese. "
@@ -1067,9 +1215,80 @@ class SessionCoordinator:
     def _trim_list(self, history):
         """裁历史。不能把 assistant(tool_calls) 和它的 tool 结果拆散，否则 API 报 400。"""
         limit = self.cfg["session"]["history_limit"]
+        if self.agent.enabled:
+            # Agent 模式靠压缩（_maybe_compact）保上下文，裁剪只当兜底：
+            # 阈值必须高于压缩阈值，否则刚压出来的摘要转头就被裁掉了。
+            limit = max(limit, self.agent.compact_after + 20)
         if len(history) <= limit:
             return history
         cut = len(history) - limit
         while cut < len(history) and history[cut].get("role") == "tool":
             cut += 1
         return history[cut:]
+
+    # ------------------------------------------------------------ 上下文压缩
+
+    def _maybe_compact(self, history, generation):
+        """历史太长时把最早的一批压成摘要，保住"改过哪些文件、验证过什么"。
+
+        直接裁掉最早那些消息是最省事的做法，但 Agent 恰恰会因此忘记自己开头
+        改过什么、用户提过什么约束，然后把已经做过的事再做一遍。宁可多打一次
+        模型请求，也不能让它失忆。
+        """
+        threshold = self.agent.compact_after
+        if len(history) <= threshold:
+            return history
+
+        keep = max(8, threshold // 3)         # 最近这些原样保留，模型要靠它们接着干
+        split = len(history) - keep
+        # 不能把 assistant(tool_calls) 和它的 tool 结果拆到摘要两边，否则 API 报 400
+        while split < len(history) and history[split].get("role") == "tool":
+            split += 1
+        head, tail = history[:split], history[split:]
+        if len(head) < 4:
+            return history
+
+        self.set_state("thinking", "正在压缩上下文")
+        summary = self._summarize(head)
+        self._assert_current_turn(generation)
+        if not summary:
+            self.log("上下文压缩失败，这一轮改用裁剪")
+            return self._trim_list(history)
+
+        self.log("上下文已压缩：%d 条 → 摘要 + %d 条" % (len(history), len(tail)))
+        self.emit({"type": "agent_compacted", "before": len(history),
+                   "after": len(tail) + 1})
+        return [compaction_marker(summary)] + tail
+
+    def _summarize(self, messages):
+        """把一段历史转成文本再请模型压缩。工具结果只留头部——摘要要的是
+        "跑过什么、结论是什么"，不是把整份日志再抄一遍。"""
+        lines = []
+        for message in messages:
+            role = message.get("role")
+            if role == "tool":
+                lines.append("TOOL RESULT: " + (message.get("content") or "")[:600])
+            elif role == "assistant" and message.get("tool_calls"):
+                names = ", ".join("%s(%s)" % (
+                    call["function"]["name"], (call["function"].get("arguments") or "")[:200])
+                    for call in message["tool_calls"])
+                if message.get("content"):
+                    lines.append("ASSISTANT: " + message["content"][:600])
+                lines.append("ASSISTANT CALLS: " + names)
+            elif message.get("content"):
+                lines.append("%s: %s" % (role.upper(), str(message["content"])[:1500]))
+        transcript = "\n".join(lines)[-40000:]
+
+        try:
+            compactor = DeepSeekProvider(self.cfg["deepseek"])
+            compactor.max_tokens = min(compactor.max_tokens, 2000)
+            parts = []
+            for kind, value in compactor.stream(
+                    [{"role": "system", "content": COMPACT_PROMPT},
+                     {"role": "user", "content": transcript}], tools=None):
+                if kind == "text":
+                    parts.append(value)
+            return "".join(parts).strip()
+        except Exception as exc:
+            self.log("压缩请求失败：%s" % exc)
+            return ""

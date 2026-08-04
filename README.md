@@ -102,12 +102,16 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 
 ## 工具
 
-27 个，固定工具集，没有「让模型自己拼命令行」这条路（`shell_run` 除外，见下）。
+固定工具集，没有「让模型自己拼命令行」这条路（`shell_run` 除外，见下）。
+平时 28 个；**Agent 模式 35 个**（见下一节），因为 grep/后台进程这类东西
+不该出现在「现在几点」的候选项里，每一轮都带着它们的 Schema 也是白烧 token。
 
 | 由谁执行 | 工具 |
 |---|---|
 | ObjC 宿主 | `app_open` `app_quit` `app_list_running` `url_open` `finder_reveal` `clipboard_read` `clipboard_write` `system_notify` `system_info` `calendar_events` `mail_unread` `wechat_read` `media_control` |
 | Python Brain | `fs_list` `fs_read` `fs_search` `fs_write` `fs_move` `web_search` `web_fetch` `memory_save` `memory_recall` `memory_list` `memory_update` `memory_forget` `task_history` `shell_run` |
+| 仅 Agent 模式 | `file_edit` `file_restore` `grep` `glob` `shell_output` `shell_kill` `shell_list` `todo_write` |
+| 会话自身 | `agent_enter`（普通对话里发现「这活得连续动手做」时，模型自己切进 Agent 模式） |
 
 原生那半留在 ObjC，因为 **TCC 权限按 app bundle 授予**：Python 子进程去发 Apple Events
 会让授权归属漂到解释器上，弹窗写的是 "Python" 而不是 "J.A.R.V.I.S."。
@@ -115,6 +119,88 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 风险分级 L0–L4，**L2 起弹确认框**（`fs_write` / `fs_move` / `app_quit` / `shell_run`）。
 写进 `tools.auto_approve` 的工具跳过确认。
 日历、邮件和微信虽是只读，但结果会进入当前模型上下文，也按 L2 处理并在读取前确认。
+
+## Agent 模式
+
+⌥A 开关，或者让 Jarvis 自己调 `agent_enter` 进来。开着的时候顶栏下面多一条状态带：
+**工作目录 / 权限档位 / 第几步 / 待办清单**——这四样是任务跑起来之后最需要随时看见的，
+所以不藏进菜单。
+
+它和普通对话共用同一个会话循环，只换四样东西：
+
+| | 普通对话 | Agent 模式 |
+|---|---|---|
+| 步数上限 | 8 轮工具 | `agent.max_steps`（默认 60） |
+| 工具集 | 28 个 | 35 个（多编辑、检索、后台进程、待办） |
+| 确认 | L2 起一律弹框 | 按权限档位放宽，见下 |
+| 播报 | 每段回复都念 | **只念最终结论**，中间步骤静音 |
+
+另起一套循环会立刻分叉成两套都得维护的东西——语音、记忆、双语字幕、任务日志
+全挂在原来那条链路上。所以是「同一条路，换四个参数」。
+
+### 播报：只念最终结论
+
+一轮 Agent 任务会产生几十条中间叙述和大段路径、代码、diff，全念一遍会把人淹掉。
+所以中间步骤全程静音，只有**后面不再跟工具调用的那一次回答**才解除静音、
+照常英文播报 + 中英双语字幕。语言规则本身一个字没改（见「语言」一节），
+改的只是「哪些句子进 TTS」。
+
+中间那句「接下来我要…」不进回答气泡，走 `agent_note` 显示成一行灰字：
+留在气泡里的话，用户会以为任务已经做完了，而它后面还跟着十几个工具调用。
+
+### 权限档位
+
+| 档位 | 编辑文件 | 只读命令 | 写操作 / 退出应用 / 读私人数据 |
+|---|---|---|---|
+| 每步确认 `ask` | 确认 | 确认 | 确认 |
+| 自动改文件 `accept_edits`（默认） | 直接跑 | 直接跑 | 确认 |
+| 全免确认 `bypass` | 直接跑 | 直接跑 | 直接跑 |
+
+「只读命令」按整条命令的第一个词判定，**带管道或 `&&` 的复合命令一律不算只读**
+——`git log | xargs rm` 也是 git 开头。
+
+确认框在 Agent 模式下多一个「本次会话内总是允许」：一个任务里同一类操作要点十几次头，
+人就会直接去开 `bypass`，那是把所有闸一起拆了。这个按钮只放行这一个工具，
+**只活在内存里，新会话即失效**——为了跑完手上这件事点的「总是」，
+不该在下次开机后还静默生效。要持久化就写 `tools.auto_approve`。
+
+### 上下文压缩
+
+历史超过 `agent.compact_after`（默认 30 条）时，把最早的一批交给模型压成摘要，
+保留最近 1/3 原文。摘要明确要求保住**改过哪些文件、跑过什么命令、结论是什么、
+还有什么没做**——直接裁掉最早那些消息更省事，但 Agent 会因此忘记自己开头改过什么，
+然后把做过的事再做一遍。宁可多打一次请求，也不能让它失忆。
+
+### 工作目录
+
+模型给的相对路径按它解析（Brain 是 launchd 拉起来的，cwd 是 `/`，
+不给锚点的话 `src/main.py` 会解析到 `/src/main.py`）。工作目录下的
+`JARVIS.md` / `CLAUDE.md` / `AGENTS.md` 会作为项目约定注入上下文，
+第一层目录列表也一并给出去，省掉开局那次必然的 `fs_list`。
+
+### 后台进程
+
+`npm run dev`、`tail -f` 这种不会自己结束的东西用 `run_in_background` 起，
+立刻返回 `shell_id`，之后 `shell_output` 取**增量**（取过就不再重复给，
+否则上下文会被同一批日志灌满）、`shell_kill` 收工。
+子进程一律 `start_new_session=True` 单独成组——不这样的话超时后 kill 掉的只有
+`/bin/zsh` 本身，它 fork 出去的编译进程会变成孤儿继续吃 CPU。
+**新会话会把所有后台进程收掉**：没人再管它们了，留着只会变成谁也不知道还在跑的东西。
+
+### 配置
+
+```jsonc
+"agent": {
+  "enabled": false,             // 重启后的默认状态；面板 ⌥A 随时切
+  "workspace": "~",
+  "permission_mode": "accept_edits",
+  "max_steps": 60,
+  "compact_after": 30,
+  "context_files": ["JARVIS.md", "CLAUDE.md", "AGENTS.md"],
+  "stream_lines": 200,          // 单条命令实时回显给面板的最大行数
+  "buffer_lines": 2000          // 后台进程保留的输出行数
+}
+```
 
 ### 微信读取（只读，没有发送能力）
 
@@ -287,7 +373,7 @@ Brain 可以用 `detail` 把通用文案覆盖成具体动作（`{"state":"execu
 
 ### 键盘
 
-`Enter` 发送 · `⌥Enter` 换行 · `⌘⇧N` 新会话 · `⌥Space` 面板 · `⌥V` 说话。
+`Enter` 发送 · `⌥Enter` 换行 · `⌘⇧N` 新会话 · `⌥A` Agent 模式 · `⌥Space` 面板 · `⌥V` 说话。
 
 `Esc` 有优先级，顺序不能反：**确认框 > 停止收音 > 停止任务 > 收起面板**。
 任务跑着的时候按 Esc 却把面板收了，是最容易吓到人的一种。

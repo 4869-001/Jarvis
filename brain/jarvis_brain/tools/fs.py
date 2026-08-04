@@ -14,8 +14,15 @@ TEXT_SUFFIXES = {
 }
 
 
+def _base(ctx):
+    """相对路径的锚点。Agent 模式下模型天然会写 `src/main.py` 这种相对路径，
+    而 Brain 是 launchd 拉起来的、cwd 是 `/`——不给锚点就会解析成 `/src/main.py`
+    然后被闸门拒掉。真机端到端跑第一次就撞上了这个，模型白费两步才绕开。"""
+    return ctx.get("workspace")
+
+
 def fs_list(args, ctx):
-    path = resolve(args.get("path", "~"), ctx["fs_roots"], must_exist=True)
+    path = resolve(args.get("path", "~"), ctx["fs_roots"], must_exist=True, base=_base(ctx))
     if not os.path.isdir(path):
         return {"error": "不是目录：%s" % display(path)}
 
@@ -46,7 +53,7 @@ def fs_list(args, ctx):
 
 
 def fs_read(args, ctx):
-    path = resolve(args.get("path", ""), ctx["fs_roots"], must_exist=True)
+    path = resolve(args.get("path", ""), ctx["fs_roots"], must_exist=True, base=_base(ctx))
     if os.path.isdir(path):
         return {"error": "这是目录，用 fs_list：%s" % display(path)}
 
@@ -72,7 +79,7 @@ def fs_read(args, ctx):
 
 
 def fs_write(args, ctx):
-    path = resolve(args.get("path", ""), ctx["fs_roots"])
+    path = resolve(args.get("path", ""), ctx["fs_roots"], base=_base(ctx))
     content = args.get("content")
     if content is None:
         return {"error": "缺少 content"}
@@ -120,8 +127,8 @@ def fs_write(args, ctx):
 
 
 def fs_move(args, ctx):
-    source = resolve(args.get("source", ""), ctx["fs_roots"], must_exist=True)
-    destination = resolve(args.get("destination", ""), ctx["fs_roots"])
+    source = resolve(args.get("source", ""), ctx["fs_roots"], must_exist=True, base=_base(ctx))
+    destination = resolve(args.get("destination", ""), ctx["fs_roots"], base=_base(ctx))
 
     if os.path.isdir(destination):
         destination = os.path.join(destination, os.path.basename(source))
@@ -143,7 +150,7 @@ def fs_search(args, ctx):
     scope = args.get("scope")
     cmd = ["mdfind"]
     if scope:
-        cmd += ["-onlyin", resolve(scope, ctx["fs_roots"], must_exist=True)]
+        cmd += ["-onlyin", resolve(scope, ctx["fs_roots"], must_exist=True, base=_base(ctx))]
     cmd.append(query if args.get("raw_query") else "kMDItemDisplayName == '*%s*'cd" % query)
 
     try:
