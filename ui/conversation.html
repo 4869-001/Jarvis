@@ -89,7 +89,10 @@ header {
 
 /* 状态文字。后端可以用 detail 覆盖成"正在打开 Safari"这种具体动作 */
 #status {
-  flex: 1; min-width: 0;
+  /* min-width 不是 0：状态文字被挤成 0 宽时，顶栏在几何上"没有溢出"，
+     重排算法就不会去收按钮，结果是按钮都在、状态没了。给它一个下限，
+     挤不下就算溢出，让重排去收低频按钮。 */
+  flex: 1; min-width: 84px;
   font: 10px/1 var(--mono); letter-spacing: 0.1em; color: var(--text-dim);
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
 }
@@ -103,6 +106,11 @@ header {
   transition: height 0.08s linear, opacity 0.08s linear;
 }
 
+/* 工具条：右对齐，永远不换行。放不下的按钮由 reflowToolbar() 挪进「⋯」菜单，
+   而不是让它们被窗口右沿切掉——按钮被切掉时没有任何视觉提示，用户只会觉得
+   「收起按钮不见了」。 */
+#tools { flex: none; display: flex; align-items: center; gap: 8px; }
+
 header button {
   flex: none;
   background: none; border: 1px solid var(--line); border-radius: 5px;
@@ -112,6 +120,29 @@ header button {
 header button:hover { color: var(--gold); border-color: var(--line-lit); }
 header button.on { color: var(--amber); border-color: var(--line-lit); }
 header button svg { display: block; width: 13px; height: 13px; }
+header button .glyph { display: block; line-height: 13px; }
+/* 图标在顶栏里够用，名字只在溢出菜单里出现 */
+#tools .lbl { display: none; }
+
+/* ── 溢出菜单 ─────────────────────────────────────── */
+#moreMenu {
+  display: none; position: absolute; top: 52px; right: 10px; z-index: 40;
+  flex-direction: column; gap: 2px; padding: 4px; min-width: 148px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: rgba(20, 14, 8, 0.94);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+}
+#moreMenu.on { display: flex; }
+#moreMenu button {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  border: none; border-radius: 7px; padding: 7px 9px;
+  font-size: 12px; color: rgba(255, 230, 196, 0.8); background: none; cursor: pointer;
+}
+#moreMenu button:hover { background: rgba(255, 140, 26, 0.12); color: var(--text); }
+#moreMenu button.on { color: var(--amber); }
+#moreMenu button svg { width: 14px; height: 14px; flex: none; }
+#moreMenu button .glyph { flex: none; width: 14px; text-align: center; }
+#moreMenu .lbl { display: inline; }
 #btn-collapse { transition: color 0.15s, border-color 0.15s, transform 0.2s ease; }
 #btn-collapse.collapsed { transform: rotate(180deg); }
 
@@ -658,11 +689,17 @@ body.collapsed #modelForm { display: none !important; }
    而 #body 仍然占着 flex 空间，footer 因此始终贴在窗口底边。 */
 body.resizing #body { visibility: hidden; }
 
-/* 手动把窗口缩窄时，先让出状态与输入空间，功能按钮仍全部保留。 */
+/* 顶栏放不下时的让位顺序（由 reflowToolbar 逐级施加，不再用固定断点）：
+   低频按钮进「⋯」→ 再不够就摘掉品牌字样和电平条。
+   状态文字始终保留：它是唯一实时反馈"现在在干什么"的地方。 */
+header.no-bars #bars { display: none; }
+/* 品牌字样 113px 里有一半是字距。空间紧张时先把字距收掉——识别度还在，
+   比整块摘掉温和得多。顶栏左边那 78px 是给窗口红绿灯留的，动不得。 */
+header.condensed #brand { letter-spacing: 0.1em; font-size: 10.5px; }
+header.tight { gap: 6px; padding-right: 6px; }
+header.tight #brand { display: none; }
+header.tight #status { letter-spacing: 0.04em; }
 @media (max-width: 410px) {
-  header { gap: 6px; padding-right: 6px; }
-  #brand, #bars { display: none; }
-  #status { letter-spacing: 0.04em; }
   footer { padding-left: 9px; padding-right: 9px; }
 }
 
@@ -681,32 +718,48 @@ body.resizing #body { visibility: hidden; }
     <span id="brand">J.A.R.V.I.S.</span>
     <span id="status">连接中</span>
     <span id="bars"><i></i><i></i><i></i><i></i><i></i></span>
-    <button id="btn-wide" title="工作台（⌥W）：加宽面板，左栏常驻待办与步骤"
-            aria-label="工作台" aria-pressed="false">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="5" width="18" height="14" rx="2"/><path d="M9 5v14"/>
-      </svg>
-    </button>
-    <button id="btn-agent" title="Agent 模式（⌥A）：长程任务、编辑与检索工具"
-            aria-label="Agent 模式" aria-pressed="false">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z"/>
-      </svg>
-    </button>
-    <button id="btn-opacity" title="面板透明度">◐</button>
-    <button id="btn-wake" title="唤醒方式" aria-label="唤醒方式" aria-expanded="false">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="8" y="3" width="8" height="12" rx="4"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M9 21h6"/>
-      </svg>
-    </button>
-    <button id="btn-sleep" title="睡眠：停止聆听与后台任务">☾</button>
-    <button id="btn-new" title="新建对话（⌘⇧N）" aria-label="新建对话">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/>
-      </svg>
-    </button>
-    <button id="btn-collapse" title="收起面板">⌃</button>
+    <!-- 工具条。按钮塞不下时按 OVERFLOW_ORDER 逐个收进「⋯」，见 reflowToolbar()。
+         每个按钮里的 .lbl 只在溢出菜单里显示——图标在顶栏够用，进了菜单就要有名字。 -->
+    <div id="tools">
+      <button id="btn-agent" title="Agent 模式（⌥A）：长程任务、编辑与检索工具"
+              aria-label="Agent 模式" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z"/>
+        </svg><span class="lbl">Agent 模式</span>
+      </button>
+      <button id="btn-wide" title="工作台（⌥W）：加宽面板，左栏常驻待办与步骤"
+              aria-label="工作台" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="5" width="18" height="14" rx="2"/><path d="M9 5v14"/>
+        </svg><span class="lbl">工作台</span>
+      </button>
+      <button id="btn-opacity" title="面板透明度" aria-label="面板透明度">
+        <span class="glyph">◐</span><span class="lbl">透明度</span>
+      </button>
+      <button id="btn-wake" title="唤醒方式" aria-label="唤醒方式" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="8" y="3" width="8" height="12" rx="4"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M9 21h6"/>
+        </svg><span class="lbl">唤醒方式</span>
+      </button>
+      <button id="btn-sleep" title="睡眠：停止聆听与后台任务" aria-label="睡眠">
+        <span class="glyph">☾</span><span class="lbl">睡眠</span>
+      </button>
+      <button id="btn-new" title="新建对话（⌘⇧N）" aria-label="新建对话">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/>
+        </svg><span class="lbl">新建对话</span>
+      </button>
+      <button id="btn-collapse" title="收起面板" aria-label="收起面板" aria-expanded="true">
+        <span class="glyph">⌃</span><span class="lbl">收起面板</span>
+      </button>
+      <!-- 「⋯」永远在最右，且永远不参与溢出——它是溢出的出口，自己被收掉就没救了 -->
+      <button id="btn-more" title="更多" aria-label="更多" aria-expanded="false">
+        <span class="glyph">⋯</span>
+      </button>
+    </div>
   </header>
+
+  <div id="moreMenu" role="menu"></div>
 
   <div id="agentBar">
     <div class="ag-row">
@@ -1731,6 +1784,10 @@ document.addEventListener('click', (event) => {
       !event.target.closest('#modelMenu') && !event.target.closest('#model-btn')) {
     closeModelMenu();
   }
+  if ($('moreMenu').classList.contains('on') &&
+      !event.target.closest('#moreMenu') && !event.target.closest('#btn-more')) {
+    closeMoreMenu();
+  }
 });
 
 /* ── 发送 ───────────────────────────────────────────── */
@@ -1894,6 +1951,80 @@ const chromeObserver = new ResizeObserver(() => {
 [document.querySelector('header'), document.querySelector('footer'), $('agentBar')]
   .forEach((node) => chromeObserver.observe(node));
 
+/* ── 顶栏工具条：放不下就收进「⋯」 ─────────────────── */
+/* 面板宽度从 360（最小）到 860（工作台）都要能用，而按钮只会越加越多。
+   写死一套 @media 断点意味着每加一个按钮就要重算一遍断点；这里改成量出来：
+   溢出了就按优先级往菜单里收一个，再量，直到不溢出。
+
+   收起顺序 = 使用频率的倒序。Agent / 工作台 / 新建 / 收起是每天要点的，
+   透明度、唤醒方式、睡眠是设一次就不动的，所以先收后者。
+   「⋯」自己永远留在外面——它是溢出的出口，被收掉就没救了。 */
+const TOOL_ORDER = ['btn-agent', 'btn-wide', 'btn-opacity', 'btn-wake',
+                    'btn-sleep', 'btn-new', 'btn-collapse'];
+const OVERFLOW_ORDER = ['btn-sleep', 'btn-wake', 'btn-opacity'];
+
+function placeTools(count) {
+  const tools = $('tools'), menu = $('moreMenu'), more = $('btn-more');
+  const hidden = new Set(OVERFLOW_ORDER.slice(0, count));
+  TOOL_ORDER.forEach((id) => {
+    const node = $(id);
+    if (!hidden.has(id) && node.parentElement !== tools) tools.insertBefore(node, more);
+  });
+  // 顺序要按 TOOL_ORDER 重排，否则从菜单挪回来的按钮会排到队尾
+  TOOL_ORDER.filter((id) => !hidden.has(id)).forEach((id) => tools.insertBefore($(id), more));
+  OVERFLOW_ORDER.filter((id) => hidden.has(id)).forEach((id) => menu.appendChild($(id)));
+  more.style.display = count ? '' : 'none';
+  if (!count) closeMoreMenu();
+}
+
+/* 让位是有先后的，按"丢了最不心疼"排：
+   先把低频按钮收进「⋯」，最后才摘掉品牌字样和电平条。
+   状态文字永远不牺牲，所以它有 min-width，挤不下就算溢出。 */
+const TOOLBAR_LEVELS = [
+  { bars: true,  condensed: false, tight: false, overflow: 0 },  // 全都在
+  { bars: false, condensed: false, tight: false, overflow: 0 },  // 摘电平条：球体和麦克风按钮已经在报同一件事
+  { bars: false, condensed: true,  tight: false, overflow: 0 },  // 收紧品牌字距
+  { bars: false, condensed: true,  tight: false, overflow: 1 },  // 低频按钮往「⋯」里收
+  { bars: false, condensed: true,  tight: false, overflow: 2 },
+  { bars: false, condensed: true,  tight: false, overflow: 3 },
+  { bars: false, condensed: true,  tight: true,  overflow: 3 },  // 最后才整块舍掉品牌
+];
+let toolbarLevel = -1;
+
+function reflowToolbar() {
+  const header = document.querySelector('header');
+  for (let i = 0; i < TOOLBAR_LEVELS.length; i++) {
+    const level = TOOLBAR_LEVELS[i];
+    header.classList.toggle('no-bars', !level.bars);
+    header.classList.toggle('condensed', level.condensed);
+    header.classList.toggle('tight', level.tight);
+    placeTools(level.overflow);
+    // flex 项目都是 flex:none（状态文字有 min-width），压不扁只会溢出，
+    // 所以 scrollWidth 超过 clientWidth 就是真的放不下了
+    if (header.scrollWidth <= header.clientWidth + 1 || i === TOOLBAR_LEVELS.length - 1) {
+      if (toolbarLevel !== i) {
+        toolbarLevel = i;
+        reportDragZones();     // 按钮位置变了，宿主的拖拽挖洞矩形要跟着更新
+      }
+      return;
+    }
+  }
+}
+
+function closeMoreMenu() {
+  $('moreMenu').classList.remove('on');
+  $('btn-more').setAttribute('aria-expanded', 'false');
+}
+
+$('btn-more').addEventListener('click', (event) => {
+  event.stopPropagation();
+  const open = $('moreMenu').classList.toggle('on');
+  $('btn-more').setAttribute('aria-expanded', String(open));
+});
+// 菜单里点了任何一项就收起菜单：这些动作要么弹出另一块面板（透明度、唤醒方式），
+// 要么立刻生效（睡眠），菜单继续挂着只会挡住结果。
+$('moreMenu').addEventListener('click', () => closeMoreMenu());
+
 /* ── 顶栏拖拽 ───────────────────────────────────────── */
 /* WKWebView 不认 -webkit-app-region（那是 Chromium 的私货），窗口拖拽只能靠
    宿主原生做。这里把顶栏矩形和顶栏里"不可拖"的按钮矩形量出来交给宿主，
@@ -1910,7 +2041,8 @@ function reportDragZones() {
     buttons: [...headerEl.querySelectorAll('button')].map(rectOf),
   });
 }
-new ResizeObserver(reportDragZones).observe(headerEl);
+new ResizeObserver(() => { reflowToolbar(); reportDragZones(); }).observe(headerEl);
+reflowToolbar();
 reportDragZones();
 
 /* ── 透明度 ─────────────────────────────────────────── */
@@ -2035,6 +2167,7 @@ document.addEventListener('keydown', (event) => {
   event.preventDefault();
   if ($('modelForm').classList.contains('on')) { closeModelForm(); return; }
   if ($('modelMenu').classList.contains('on')) { closeModelMenu(); return; }
+  if ($('moreMenu').classList.contains('on')) { closeMoreMenu(); return; }
   if (S.pendingConfirm) { S.pendingConfirm.answer(false); return; }
   if (S.listening) { post('voice_toggle'); return; }
   if (BUSY.has(S.state)) { stopTask(); return; }

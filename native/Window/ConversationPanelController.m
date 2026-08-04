@@ -200,7 +200,8 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
             CGFloat saved = [[NSUserDefaults standardUserDefaults] doubleForKey:kHeightDefaultsKey];
             CGFloat height = saved >= kMinExpandedHeight ? saved : kPanelHeight;
             NSRect frame = self.panel.frame;
-            // 和收起/展开同一个规矩：底边不动，往上长。
+            // 和收起/展开同一个规矩：顶边不动，往下长。
+            frame.origin.y -= (height - frame.size.height);
             frame.size.height = height;
             [self.panel setFrame:frame display:NO];
         }
@@ -283,17 +284,19 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
     NSRect visible = screen.visibleFrame;
     target = MIN(target, visible.size.height - 2.0 * kScreenMargin);
 
-    // **锚点在底边**：origin.y 不动，只改高度，面板朝上长、朝下收。
+    // **锚点在顶边**（用户 2026-08-04 定的）：面板看起来待在原地，对话区向下展开。
     //
-    // 以前锚在顶边，展开时窗口底边会往下掉五百多像素——而输入框就贴在底边上，
-    // 于是"展开"看起来像输入框整个从上面砸到下面。锚底边之后，输入框在整个
-    // 动画里屏幕坐标一动不动，长出来的空间全部给上方的对话区。
+    // macOS 的窗口原点在左下角，所以"顶边不动"要把 origin.y 跟着高度一起挪。
+    //
+    // 注意这只保证窗口的顶边不动，**不代表输入框会跳**——输入框是否平滑跟随，
+    // 取决于动画期间页面里 footer 是不是一直贴在窗口底边上。那件事在页面侧解决
+    // （动画全程使用展开态布局，见 conversation.html 的 setCollapsed），
+    // 两者缺一不可：只锚顶边而布局在最后一帧才切，输入框就会"啪"地掉下去。
+    frame.origin.y += frame.size.height - target;
     frame.size.height = target;
-    // 只有一种情况必须动底边：朝上长会顶出屏幕上沿，那就整体下移。
-    if (NSMaxY(frame) > NSMaxY(visible) - kScreenMargin) {
-        frame.origin.y = NSMaxY(visible) - kScreenMargin - frame.size.height;
-    }
-    frame.origin.y = MAX(NSMinY(visible) + kScreenMargin, frame.origin.y);
+    // 向下长超出屏幕下沿时上提，保证整个面板可见。
+    frame.origin.y = MAX(NSMinY(visible) + kScreenMargin,
+                         MIN(frame.origin.y, NSMaxY(visible) - frame.size.height));
 
     // 动画期间必须先解除高度上限，否则 AppKit 会在动画开始前瞬间把窗口钳到目标值。
     self.panel.minSize = NSMakeSize(360, 32);
@@ -502,16 +505,17 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
         CGFloat width  = MIN(kWorkbenchWidth,  visible.size.width  - 2.0 * kScreenMargin);
         CGFloat height = MIN(MAX(frame.size.height, kWorkbenchHeight),
                              visible.size.height - 2.0 * kScreenMargin);
-        // 向左长、向上长：底边和右边是面板的两条锚边（它默认贴右下角，
-        // 输入框也贴着底边），加宽加高时这两条不能动。
+        // 向左长、向下长：顶边和右边是锚边，和收起/展开保持同一个规矩
+        // （顶边不动），面板看起来是"从右下角摊开"，而不是整块跳了个位置。
         frame.origin.x = NSMaxX(frame) - width;
+        frame.origin.y = NSMaxY(frame) - height;
         frame.size = NSMakeSize(width, height);
-        // 长出屏幕就拉回来。左边和上边超界比另外两边更常见。
+        // 长出屏幕就拉回来。左边和下边超界比另外两边更常见。
         frame.origin.x = MAX(frame.origin.x, NSMinX(visible) + kScreenMargin);
+        frame.origin.y = MAX(frame.origin.y, NSMinY(visible) + kScreenMargin);
         if (NSMaxY(frame) > NSMaxY(visible) - kScreenMargin) {
             frame.origin.y = NSMaxY(visible) - kScreenMargin - frame.size.height;
         }
-        frame.origin.y = MAX(frame.origin.y, NSMinY(visible) + kScreenMargin);
     } else {
         frame = NSIsEmptyRect(self.narrowFrame)
             ? NSMakeRect(NSMaxX(frame) - kPanelWidth, frame.origin.y, kPanelWidth, kPanelHeight)
