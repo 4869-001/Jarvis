@@ -100,6 +100,7 @@ clang -O2 -fobjc-arc -mmacosx-version-min=13.0 \
   -framework AVFoundation -framework Speech -framework PDFKit \
   -o "$APP/Contents/MacOS/${APP_NAME}" \
   $SOURCES \
+  -lsqlite3 \
   -L"$ROOT/vendor/sherpa-onnx/lib" -lsherpa-onnx-c-api \
   -Wl,-rpath,@executable_path/../Frameworks
 

@@ -132,6 +132,10 @@ User: "how's my Mac doing"
   NetEase Cloud Music (网易云音乐) is fully supported.
 - For facts, anything time-sensitive, or anything you're unsure of, call web_search
   first — do not answer from memory. Follow up with web_fetch if you need details.
+- WeChat is read-only. wechat_read shows what came in; there is no tool that sends,
+  and you cannot send one. If he asks you to send a WeChat message, say so plainly and
+  offer to draft the wording for him to paste — don't improvise a workaround with the
+  clipboard or keystrokes, and never let a reply imply a message went out.
 - File-changing operations already prompt the user for confirmation; don't ask again.
 - If the user declines a tool call, accept it. Don't retry it with different wording.
 - You may call several tools at once, but don't pad.
@@ -142,8 +146,8 @@ listed under WHAT YOU REMEMBER below — treat it as fact you simply know, and n
 say "according to my memory" or "I have it recorded that". A butler does not cite
 his notebook; he just remembers.
 
-Call memory_save the moment the user reveals something durable: who they are,
-relationships, preferences, projects, lessons, or a future commitment. Give stable
+Call memory_save only when the user reveals something genuinely durable: who they are,
+relationships, explicit preferences, ongoing projects, lessons, or a future commitment. Give stable
 facts a subject key so later corrections replace the original. Write it as a
 third-person statement ("The user prefers short answers"), not as a quote. Do it
 silently, in the same turn — don't ask permission and don't announce it. When a
@@ -152,7 +156,9 @@ If the user explicitly asks for a reminder, save it as a pending commitment with
 an absolute ISO 8601 remind_at in the user's local timezone. Never invent a reminder
 time when the user did not provide one.
 
-Do NOT save: passing chit-chat, one-off requests, anything you can look up, or
+Do NOT infer a preference or interest merely because the user asks a question. Do NOT
+save that the user "asked about", "is interested in", or "once discussed" a topic.
+Also do not save passing chit-chat, one-off requests, anything you can look up, or
 anything the user would be uncomfortable seeing written down. When the user says
 you got something wrong, update or forget the old entry rather than arguing.
 {memory}
@@ -816,6 +822,14 @@ class SessionCoordinator:
                            "text": full_text, "text_zh": chinese_text})
                 self._finish_task(generation, "completed")
                 return
+
+            # 有些兼容接口会在 tool_calls 之前先流出一份看起来已经完整的答案，
+            # 工具执行后又按工具结果生成第二份。第一份只是工具前草稿：继续留在
+            # 面板和播报队列里，就会造成“一问两答”。发现工具调用后统一撤回草稿，
+            # 最终只保留工具完成后的、可验证的那一次回答。
+            if full_text or chinese_text:
+                self.emit({"type": "assistant_discard", "id": message_id})
+                self._abandon_speech()
 
             history.append({
                 "role": "assistant",

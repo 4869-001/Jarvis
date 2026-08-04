@@ -1,6 +1,7 @@
 #import "NativeToolExecutor.h"
 
 #import "MediaController.h"
+#import "WeChatController.h"
 
 #import <AppKit/AppKit.h>
 #import <UserNotifications/UserNotifications.h>
@@ -20,6 +21,7 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
 
 @interface NativeToolExecutor ()
 @property (nonatomic, strong) MediaController *media;
+@property (nonatomic, strong) WeChatController *wechat;
 @property (nonatomic, strong) EKEventStore *eventStore;
 @property (nonatomic) dispatch_queue_t mailQueue;
 @end
@@ -36,6 +38,7 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
                                       @"system_notify", @"system_info",
                                       @"calendar_events",
                                       @"mail_unread",
+                                      @"wechat_read",
                                       @"media_control"]];
     });
     return [names containsObject:name];
@@ -44,6 +47,11 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
 - (MediaController *)media {
     if (!_media) _media = [[MediaController alloc] init];
     return _media;
+}
+
+- (WeChatController *)wechat {
+    if (!_wechat) _wechat = [[WeChatController alloc] init];
+    return _wechat;
 }
 
 - (void)execute:(NSString *)name
@@ -61,6 +69,7 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     else if ([name isEqualToString:@"system_info"])     { completion([self systemInfo], nil); }
     else if ([name isEqualToString:@"calendar_events"]) { [self calendarEvents:arguments completion:completion]; }
     else if ([name isEqualToString:@"mail_unread"])      { [self unreadMail:arguments completion:completion]; }
+    else if ([name isEqualToString:@"wechat_read"])      { [self.wechat read:arguments completion:completion]; }
     else if ([name isEqualToString:@"media_control"])   { [self controlMedia:arguments completion:completion]; }
     else { completion(nil, [NSString stringWithFormat:@"宿主不认识工具 %@", name]); }
 }

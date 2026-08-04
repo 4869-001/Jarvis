@@ -58,7 +58,8 @@ def route(text, identity):
         (("暂停音乐", "暂停播放", "pause the music", "pause playback"), "pause"),
         (("下一首", "切下一首", "next track", "next song"), "next"),
         (("上一首", "切上一首", "previous track", "previous song"), "previous"),
-        (("继续播放", "恢复播放", "resume playback", "play the music"), "play"),
+        (("继续播放", "恢复播放", "播放啊", "播放吧", "播放音乐",
+          "resume playback", "play the music"), "play"),
         (("喜欢这首", "收藏这首", "like this song", "like this track"), "like"),
         (("现在放的什么", "这是什么歌", "what is playing", "what song is this"), "status"),
     )

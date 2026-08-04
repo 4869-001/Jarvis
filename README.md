@@ -102,11 +102,11 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 
 ## 工具
 
-26 个，固定工具集，没有「让模型自己拼命令行」这条路（`shell_run` 除外，见下）。
+27 个，固定工具集，没有「让模型自己拼命令行」这条路（`shell_run` 除外，见下）。
 
 | 由谁执行 | 工具 |
 |---|---|
-| ObjC 宿主 | `app_open` `app_quit` `app_list_running` `url_open` `finder_reveal` `clipboard_read` `clipboard_write` `system_notify` `system_info` `calendar_events` `mail_unread` `media_control` |
+| ObjC 宿主 | `app_open` `app_quit` `app_list_running` `url_open` `finder_reveal` `clipboard_read` `clipboard_write` `system_notify` `system_info` `calendar_events` `mail_unread` `wechat_read` `media_control` |
 | Python Brain | `fs_list` `fs_read` `fs_search` `fs_write` `fs_move` `web_search` `web_fetch` `memory_save` `memory_recall` `memory_list` `memory_update` `memory_forget` `task_history` `shell_run` |
 
 原生那半留在 ObjC，因为 **TCC 权限按 app bundle 授予**：Python 子进程去发 Apple Events
@@ -114,7 +114,34 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 
 风险分级 L0–L4，**L2 起弹确认框**（`fs_write` / `fs_move` / `app_quit` / `shell_run`）。
 写进 `tools.auto_approve` 的工具跳过确认。
-日历和邮件虽是只读，但结果会进入当前模型上下文，也按 L2 处理并在读取前确认。
+日历、邮件和微信虽是只读，但结果会进入当前模型上下文，也按 L2 处理并在读取前确认。
+
+### 微信读取（只读，没有发送能力）
+
+原则：**读可以不完整，但必须真实。**
+完整推导见 [`refs/Jarvis微信读写能力技术方案.md`](refs/Jarvis微信读写能力技术方案.md)。
+
+`wechat_read` 不截屏、不使用 OCR，也不注入微信进程。Jarvis 宿主在获得“完全磁盘访问”
+后，只读 macOS 通知中心数据库里 `com.tencent.xinwechat` 的结构化 plist：会话名、群内
+发言人、正文、时间和 UUID 来自同一条通知原子记录，因此不会把联系人和另一条消息错配。
+
+通知按 UUID 去重归档到 `~/.jarvis/wechat/notifications.json`（目录权限 `0700`、文件
+权限 `0600`），最多保留 2000 条。支持 `unread`、`recent_sessions`、`chat_history`、
+`contacts` 和 `status`；`chat_history` 必须指定 `contact`，不认识的 mode 直接报错而不是
+悄悄按默认值查。覆盖边界必须如实显示：只能读取产生过 macOS 通知的收到消息，不能读取
+自己发出的消息、静音会话或启用归档前已从通知中心清除的旧消息；`unread` 是按徽标数从
+最新通知里截取的近似值，不是微信标记的未读。
+
+**没有微信发送工具，也不要再加。** 三条自动化路径都实测封死：聊天区是自绘界面，
+Accessibility 树只有关闭/最小化按钮；窗口内容捕获被微信屏蔽；本地库是 SQLCipher 加密、
+密钥在进程内存里，读它要关 SIP。剩下键鼠模拟那条路能把事件投出去，但拿不到联系人 ID、
+消息 ID 和发送回执——**程序按了回车，不等于微信发给了对的人**，"已发送"只能靠猜。
+
+实测还撞上一个更基本的障碍：微信关掉窗口不退进程，此时 `CGWindowList` 照样报出一个
+尺寸像模像样的窗口、AX 也报得出坐标，但它从未被合成绘制，那块屏幕上画的是壁纸。
+激活、`open -a`、点「窗口 → 聊天」菜单都恢复不了。按坐标盲点的后果是点到别的应用上。
+
+要自动发送，只能走企业微信 / 微信客服等提供稳定联系人 ID 和发送回执的官方 API。
 `shell_run` 默认禁用，开启后仍有命令黑名单（rm -rf / sudo / 磁盘操作 / 下载即执行 …），
 `tools.shell_unrestricted = true` 可以摘掉黑名单、并把超时上限从 120s 放宽到 600s。
 文件工具全部经过路径闸门：越出 `fs_roots` 或命中 `.ssh` / Keychains 一律拒绝。

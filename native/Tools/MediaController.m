@@ -41,6 +41,7 @@ static void LoadMediaRemote(void) {
 #pragma mark - 播放器名录
 
 static NSString *const kNetEaseBundleID = @"com.netease.163music";
+static NSString *const kJarvisBundleID = @"com.jarvis.desktop";
 
 /// 口语名 → bundle id。auto 不在表里，单独处理。
 static NSDictionary<NSString *, NSString *> *PlayerAliases(void) {
@@ -86,12 +87,13 @@ static BOOL MainWindowBoundsForPID(pid_t pid, CGRect *outBounds) {
 }
 
 static void PostClick(CGPoint point) {
-    CGEventRef down = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, point,
-                                              kCGMouseButtonLeft);
-    CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp, point,
-                                            kCGMouseButtonLeft);
+    CGEventRef move = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, point, kCGMouseButtonLeft);
+    CGEventRef down = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, point, kCGMouseButtonLeft);
+    CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp, point, kCGMouseButtonLeft);
+    CGEventPost(kCGHIDEventTap, move);
     CGEventPost(kCGHIDEventTap, down);
     CGEventPost(kCGHIDEventTap, up);
+    CFRelease(move);
     CFRelease(down);
     CFRelease(up);
 }
@@ -199,7 +201,32 @@ static void PostClick(CGPoint point) {
         return;
     }
 
+    BOOL wasAlreadyRunning = RunningAppWithBundleID(kNetEaseBundleID) != nil;
+    BOOL wasHidden = RunningAppWithBundleID(kNetEaseBundleID).hidden;
+    NSString *previousFrontmostBundleID = NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier;
+    NSRunningApplication *jarvisApp = RunningAppWithBundleID(kJarvisBundleID);
+    BOOL shouldTemporarilyHideJarvis = jarvisApp && !jarvisApp.hidden;
+
+    void (^restorePreviousApp)(void) = ^{
+        // 搜索必须短暂让网易云接收键盘输入；若它原本已经运行，完成后立即把用户之前
+        // 使用的应用切回来。这样网易云只在后台播放，不会一直盖在 Jarvis 或其他窗口上。
+        if (shouldTemporarilyHideJarvis) [RunningAppWithBundleID(kJarvisBundleID) unhide];
+        if (wasAlreadyRunning && previousFrontmostBundleID.length > 0 &&
+            ![previousFrontmostBundleID isEqualToString:kNetEaseBundleID]) {
+            NSRunningApplication *previous = RunningAppWithBundleID(previousFrontmostBundleID);
+            [previous activateWithOptions:NSApplicationActivateAllWindows];
+        }
+        if (wasHidden) [RunningAppWithBundleID(kNetEaseBundleID) hide];
+    };
+
     void (^runSearch)(void) = ^{
+        // 后台隐藏或最小化时，网易云的 WebView 不会接收搜索键盘事件，也没有可取的
+        // on-screen 窗口坐标。临时恢复窗口，播放完成后再还原原来的前台/隐藏状态。
+        // Jarvis 对话面板是浮动层级，会遮住网易云左侧的“单曲”标签；来自面板的命令
+        // 必须在点击期间临时隐藏 Jarvis，结束后再完整恢复面板。
+        if (shouldTemporarilyHideJarvis) [RunningAppWithBundleID(kJarvisBundleID) hide];
+        NSRunningApplication *runningNetEase = RunningAppWithBundleID(kNetEaseBundleID);
+        [runningNetEase activateWithOptions:NSApplicationActivateAllWindows];
         NSString *safe = [query stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
         safe = [safe stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
         safe = [[safe stringByReplacingOccurrencesOfString:@"\r" withString:@" "]
@@ -208,6 +235,9 @@ static void PostClick(CGPoint point) {
             @"tell application \"System Events\"\n"
              "tell process \"NeteaseMusic\"\n"
              "set frontmost to true\n"
+             "if (count of windows) is 0 then error \"网易云音乐没有可用窗口\"\n"
+             "if value of attribute \"AXMinimized\" of window 1 is true then "
+             "set value of attribute \"AXMinimized\" of window 1 to false\n"
              "set origin to position of window 1\n"
              "set dimensions to size of window 1\n"
              "set ox to item 1 of origin\n"
@@ -215,9 +245,11 @@ static void PostClick(CGPoint point) {
              "set ww to item 1 of dimensions\n"
              "set wh to item 2 of dimensions\n"
              "keystroke \"f\" using command down\n"
-             "delay 0.3\n"
-             "keystroke \"a\" using command down\n"
+             "delay 0.6\n"
+             "key code 0 using command down\n"
+             "delay 0.2\n"
              "key code 51\n"
+             "delay 0.2\n"
              "keystroke \"%@\"\n"
              "key code 36\n"
              "delay 3\n"
@@ -225,21 +257,20 @@ static void PostClick(CGPoint point) {
              "end tell", safe];
         NSString *error = nil;
         [self runAppleScript:source error:&error];
-        if (error) { completion(nil, error); return; }
+        if (error) { restorePreviousApp(); completion(nil, error); return; }
 
-        CGRect bounds = CGRectZero;
         NSRunningApplication *netEase = RunningAppWithBundleID(kNetEaseBundleID);
+        CGRect bounds = CGRectZero;
         if (!netEase || !MainWindowBoundsForPID(netEase.processIdentifier, &bounds)) {
+            restorePreviousApp();
             completion(nil, @"找不到网易云音乐主窗口");
             return;
         }
-        // 点“单曲”标题右侧的“播放”按钮，它会稳定播放第一条搜索结果。
-        // 旧实现双击窗口高度 46.4% 的位置；网易云 3.x 当前布局下那里已经是第三条
-        // 结果或空白区，所以搜索成功后仍会继续播放旧歌。主内容区是自绘 WebView，
-        // 只能用 CGEvent；使用相对窗口坐标可继续适配窗口移动和等比例缩放。
-        CGPoint playFirstResult = CGPointMake(CGRectGetMinX(bounds) + CGRectGetWidth(bounds) * 0.23,
-                                               CGRectGetMinY(bounds) + CGRectGetHeight(bounds) * 0.232);
-        PostClick(playFirstResult);
+        // 精确查询后，“综合”页单曲区的播放按钮会从第一条歌曲开始播放。
+        // 现版窗口中按钮位于宽 23%、高 41% 处；此前 23.2% 高度点到的是歌手区。
+        CGPoint playSongs = CGPointMake(CGRectGetMinX(bounds) + CGRectGetWidth(bounds) * 0.23,
+                                        CGRectGetMinY(bounds) + CGRectGetHeight(bounds) * 0.41);
+        PostClick(playSongs);
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -270,6 +301,7 @@ static void PostClick(CGPoint point) {
                            status[@"title"]]
                         : @"已打开搜索结果，但没有确认歌曲开始播放";
                 }
+                restorePreviousApp();
                 completion(result, nil);
             }];
         });

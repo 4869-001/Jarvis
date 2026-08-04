@@ -99,6 +99,21 @@ TOOLS = [
           {"limit": _p("最多返回多少封，默认 10，最多 20", _INT)},
           "L2", "native"),
 
+    _tool("wechat_read", "从 macOS 通知中心数据库结构化读取微信收到的消息。发送人、正文、"
+          "时间和 UUID 来自同一条通知记录，不使用屏幕截图或 OCR，不会发生联系人与正文错配。"
+          "可查询整体未读数、近期来信、指定联系人的来信记录和联系人。只覆盖产生过通知的收到"
+          "消息，不包含自己发出的消息、静音会话或归档前已清除的旧通知。私人聊天内容会进入"
+          "当前 Jarvis 推理模型上下文，每次读取前必须让用户确认；全程只读。",
+          {"mode": {"type": "string", "enum": ["unread", "recent_sessions", "chat_history", "contacts", "status"],
+                    "description": "查询类型，默认 unread"},
+           "contact": _p("chat_history 时必填；联系人备注、昵称或 wxid。contacts 时作为搜索词"),
+           "limit": _p("最多返回多少条，默认 20，最多 100", _INT)},
+          "L2", "native"),
+
+    # 微信只有读取能力，没有发送工具，也不要再加：个人微信不返回联系人 ID、消息 ID
+    # 和发送回执，键鼠模拟证明不了消息进了哪个会话，"已发送"只能是猜的。
+    # 完整实测过程见 refs/Jarvis微信读写能力技术方案.md。
+
     _tool("media_control",
           "控制或检索音乐/视频：播放、暂停、切歌、按歌名搜索并播放、调音量、查看当前曲目。"
           "网易云音乐、Apple Music、Spotify、QQ 音乐和浏览器里的播放都能控。"
@@ -158,7 +173,8 @@ TOOLS = [
     # ------------------------------------------------ 长期记忆（Brain 执行）
     _tool("memory_save",
           "把一件应当长期记住的事写进记忆，跨会话、跨重启都还在。"
-          "用户介绍自己、说出偏好、交代正在做的事、纠正你之前的认知时，主动调用。"
+          "仅在用户明确介绍自己、明确说出偏好、交代持续项目或纠正旧认知时调用。"
+          "用户只是询问、讨论或表现出对某个话题的兴趣，不构成可保存的长期记忆。"
           "同一件事再次被提到会就地更新，不会记成两条。",
           {"text": _p("要记住的一句话，用第三人称陈述，如「用户偏好简短的回答」"),
            "kind": {"type": "string",
@@ -252,6 +268,7 @@ def describe(name, arguments):
         "media_control": "播放控制：{action}",
         "calendar_events": "查看近期日历",
         "mail_unread": "查看未读邮件摘要",
+        "wechat_read": "读取微信结构化消息并分析",
         "fs_list": "列出 {path} 的内容",
         "fs_read": "读取 {path}",
         "fs_search": "搜索文件「{query}」",
@@ -288,6 +305,7 @@ _ACTIONS = {
     "system_notify": "发送通知", "system_info": "查看本机状态", "media_control": "播放控制",
     "calendar_events": "查看近期日历",
     "mail_unread": "查看未读邮件摘要",
+    "wechat_read": "读取微信消息",
     "fs_list": "列出目录", "fs_read": "读取文件", "fs_search": "搜索文件",
     "fs_write": "写入文件", "fs_move": "移动文件",
     "web_search": "联网搜索", "web_fetch": "抓取网页",
@@ -296,7 +314,7 @@ _ACTIONS = {
     "task_history": "检查任务记录",
     "shell_run": "执行命令",
 }
-_TARGET_KEYS = ("path", "source", "command", "name", "url", "text", "query", "id")
+_TARGET_KEYS = ("path", "source", "command", "name", "url", "text", "query", "id", "contact")
 
 
 def action_of(name):

@@ -246,7 +246,9 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
 
 /// 收起只留顶栏。高度由页面量出来后传上来——写死一个数字迟早会和 CSS 对不上，
 /// 差一点就会把顶栏切掉或者露出半行内容。
-- (void)setCollapsed:(BOOL)collapsed headerHeight:(CGFloat)headerHeight {
+- (void)setCollapsed:(BOOL)collapsed
+         headerHeight:(CGFloat)headerHeight
+             animated:(BOOL)animated {
     if (!self.panel) return;
 
     NSRect frame = self.panel.frame;
@@ -266,18 +268,38 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
         target = self.expandedHeight >= kMinExpandedHeight ? self.expandedHeight : kPanelHeight;
     }
 
-    // minSize 拦在这儿：不放开的话 setFrame 会被静默钳回 360，收起看着「没反应」。
-    // 收起态也不该让用户手动拖高度，所以顺手把 max 一起钉死。
-    self.panel.minSize = NSMakeSize(360, collapsed ? target : 360);
-    self.panel.maxSize = collapsed ? NSMakeSize(CGFLOAT_MAX, target)
-                                   : NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
+    NSScreen *screen = self.panel.screen ?: [NSScreen mainScreen];
+    NSRect visible = screen.visibleFrame;
+    target = MIN(target, visible.size.height - 2.0 * kScreenMargin);
 
     // 窗口原点在左下角：改高度时要把 origin 一起挪，否则收起会变成「顶栏往下掉」
+    // ——展开/收起时视觉锚点始终固定在窗口顶边。
     frame.origin.y += frame.size.height - target;
     frame.size.height = target;
-    [self.panel setFrame:frame display:YES animate:NO];
+    frame.origin.y = MAX(NSMinY(visible) + kScreenMargin,
+                         MIN(frame.origin.y, NSMaxY(visible) - frame.size.height));
 
-    if (!collapsed) self.panel.frameAutosaveName = kFrameAutosaveName;   // 重新开始记尺寸
+    // 动画期间必须先解除高度上限，否则 AppKit 会在动画开始前瞬间把窗口钳到目标值。
+    self.panel.minSize = NSMakeSize(360, 32);
+    self.panel.maxSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
+    void (^finishConstraints)(void) = ^{
+        self.panel.minSize = NSMakeSize(360, collapsed ? target : 360);
+        self.panel.maxSize = collapsed ? NSMakeSize(CGFLOAT_MAX, target)
+                                       : NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
+        if (!collapsed) self.panel.frameAutosaveName = kFrameAutosaveName;
+        [self pushEvent:@{ @"type": @"collapse_complete", @"collapsed": @(collapsed) }];
+    };
+
+    if (animated && fabs(self.panel.frame.size.height - target) > 1.0) {
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+            context.duration = 0.16;
+            [[self.panel animator] setFrame:frame display:YES];
+        } completionHandler:finishConstraints];
+    } else {
+        [self.panel setFrame:frame display:YES animate:NO];
+        finishConstraints();
+    }
+
 }
 
 #pragma mark - 显示
@@ -360,7 +382,8 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
     } else if ([action isEqualToString:@"collapse"]) {
         NSNumber *header = body[@"header"];
         [self setCollapsed:[body[@"collapsed"] boolValue]
-              headerHeight:[header isKindOfClass:[NSNumber class]] ? header.doubleValue : 56.0];
+              headerHeight:[header isKindOfClass:[NSNumber class]] ? header.doubleValue : 56.0
+                  animated:[body[@"animated"] boolValue]];
     } else if ([action isEqualToString:@"drag_zones"]) {
         [self applyDragZonesFromMessage:body];
     } else if ([action isEqualToString:@"extract_file"]) {

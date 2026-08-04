@@ -108,7 +108,8 @@ static const NSTimeInterval kWakeRestartInterval = 120.0;
     [self registerHotKeys];
 }
 
-/// App 是 accessory 策略，没有可见菜单栏——但 ⌘C/⌘V/⌘X/⌘A 这些标准编辑快捷键
+/// App 是 accessory 策略，但对话面板成为前台窗口时仍会显示应用菜单栏。
+/// 同时保留标准编辑快捷键和明确的退出入口，避免只能去状态栏图标里退出。
 /// 在 AppKit 里靠 `[NSApp mainMenu]` 做 key equivalent 匹配、再转发成
 /// copy:/paste:/cut:/selectAll: 发给第一响应者（这里就是 WKWebView）。
 /// 没有 mainMenu 的话，哪怕菜单本身不显示，这几个快捷键在对话面板的
@@ -116,6 +117,16 @@ static const NSTimeInterval kWakeRestartInterval = 120.0;
 /// 只为了让这条路由链路存在。
 - (void)installEditingMenuForKeyboardShortcuts {
     NSMenu *mainMenu = [[NSMenu alloc] init];
+
+    NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
+    [mainMenu addItem:appMenuItem];
+    NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"Jarvis"];
+    NSMenuItem *quit = [appMenu addItemWithTitle:@"退出 J.A.R.V.I.S."
+                                          action:@selector(terminate:)
+                                   keyEquivalent:@"q"];
+    quit.target = NSApp;
+    appMenuItem.submenu = appMenu;
+
     NSMenuItem *editMenuItem = [[NSMenuItem alloc] init];
     [mainMenu addItem:editMenuItem];
 
