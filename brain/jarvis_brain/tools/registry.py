@@ -372,6 +372,21 @@ TOOLS = [
     _tool("shell_list", "列出还在跑的后台进程。",
           {}, "L0", "python", shell_impl.shell_list, agent_only=True),
 
+    _tool("subagent_run",
+          "派一个子代理去查一件事，它用自己的上下文翻找，只把结论带回来。"
+          "**当一件事需要翻很多文件、很多目录或很多网页才能确定时用它**——"
+          "那些原始材料留在子代理那边，你这边只多一段结论，上下文不会被撑爆。"
+          "prompt 要写成一个完整、独立的任务：子代理看不到你们之前的对话，"
+          "也不能反过来问你，交代不清它就只能猜。"
+          "只是读一两个已知路径的文件不要用它——直接 fs_read 更快。",
+          {"description": _p("一句话说明它在查什么，显示在面板上，如「找配置读取的位置」"),
+           "prompt": _p("给子代理的完整任务说明：要查什么、在哪查、要它回答哪几个问题"),
+           "scope": {"type": "string", "enum": ["explore", "full"],
+                     "description": "explore 只给只读工具（默认，绝大多数情况用这个）；"
+                                    "full 给完整工具集，会改东西，只在确实要它动手时用"},
+           "max_steps": _p("最多几步工具调用，默认 12，上限 25", _INT)},
+          "L1", "session", None, required=["description", "prompt"], agent_only=True),
+
     _tool("todo_write",
           "写入或更新本次任务的待办清单，用户会在面板上实时看到。"
           "任务超过三步就先列出来，之后每完成一项立刻更新状态；"
@@ -465,6 +480,7 @@ def describe(name, arguments):
         "shell_kill": "结束后台进程 {shell_id}",
         "shell_list": "查看后台进程",
         "todo_write": "更新待办清单",
+        "subagent_run": "派子代理：{description}",
     }
     template = templates.get(name)
     if not template:
@@ -501,9 +517,10 @@ _ACTIONS = {
     "agent_enter": "进入 Agent 模式", "file_edit": "编辑文件", "file_restore": "还原文件",
     "grep": "检索内容", "glob": "查找文件", "shell_output": "读取后台输出",
     "shell_kill": "结束后台进程", "shell_list": "查看后台进程", "todo_write": "更新待办",
+    "subagent_run": "派出子代理",
 }
 _TARGET_KEYS = ("path", "source", "command", "script", "name", "url", "text", "query", "id",
-                "contact", "pattern", "shell_id", "goal", "app")
+                "contact", "pattern", "shell_id", "goal", "app", "description")
 
 
 def action_of(name):

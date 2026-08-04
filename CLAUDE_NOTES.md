@@ -60,7 +60,36 @@ agent 的改动混在同一份 diff 里。
 - 脚本跑在串行队列不是主线程：被脚本化的 App 卡住时，主线程执行会把整个 Jarvis 冻住。
   `mail_unread` 早就是这么做的，沿用同一套。
 
-没做的（第三~四期，等用户排期）：子代理（独立上下文的探索代理）、面板宽屏工作台视图。
+## 2026-08-04 第三、四期：子代理 + 工作台（同分支，四期全部完成）
+
+`brain/jarvis_brain/subagent.py` + `subagent_run` 工具；面板加 ⌥W 宽屏两栏。
+
+**子代理不是另一套工具执行**：工具仍走 `SessionCoordinator._execute`（多了个
+`subagent=` 参数只为给事件打标记），所以权限档位、确认弹窗、原生转发、任务日志
+全都白拿。它只是换了一份历史和一份更小的工具表。三条约束是刻意的：不许递归、
+explore 档只给只读工具、报告必须是结论不是过程（见 `REPORT_RULES`）。
+
+### UI 上踩到的三个坑（其中一个是既有 bug）
+
+- **`#log` 的 flex 子项会被压扁。** flex column 的子项默认 `flex-shrink:1`，
+  内容一超过可视高度，最高的那几项就被按比例压矮，配上它们自己的
+  `overflow:hidden`，表现是「卡片凭空少了半截」。实测 4 张卡片实际占 440px、
+  容器被压到 133px，后两张整个看不见。**这是既有 bug**，不是这次引入的——
+  只是子代理和 diff 卡片让它变得必现。修法是 `#log > * { flex: 0 0 auto; }`，
+  比给单个卡片加 `flex:none` 可靠，新卡片类型不会再踩。
+- **`direction: rtl` 那个"保住路径尾部"的老技巧会把非路径文本显示反**：
+  glob 模式两个星号加斜杠会倒过来，工作目录 `~/Projects/Jarvis` 显示成
+  `Projects/Jarvis/~`。改成 JS 侧 `tailClip()` 截断，`.tool-head .target`、
+  `.file .p` 和新加的时间线都换掉了。
+- **JS 块注释里不能出现斜杠加星号的组合**：注释里写 glob 例子会提前闭合注释，
+  整个脚本从那里开始语法错误。改用 `//` 行注释。`node --check` 能一眼查出来，
+  改完 `ui/conversation.html` 建议顺手跑一下。
+
+### 一个可复现的 UI 验证手段
+
+`/tmp/uishot.m`（临时文件，没进仓库）：把真实的 `conversation.html` 装进
+WKWebView，喂一串真实事件，`takeSnapshotWithConfiguration` 截图。比在真机上
+手动点一遍可复现，也不用抢前台窗口。要长期用的话可以挪进 `native/tools/`。
 
 ## 2026-08-03 已合并进 main
 

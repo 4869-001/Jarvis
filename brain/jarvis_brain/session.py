@@ -14,6 +14,7 @@ import uuid
 
 from . import models, tasking, tts
 from .agent import AgentRuntime, COMPACT_PROMPT, compaction_marker
+from . import subagent as subagent_mod
 from .memory import STORE as MEMORY
 from .identity import STORE as IDENTITY
 from . import local_router
@@ -960,7 +961,9 @@ class SessionCoordinator:
 
     # ------------------------------------------------------------ 工具执行
 
-    def _execute(self, name, raw_arguments, call_id, generation):
+    def _execute(self, name, raw_arguments, call_id, generation, subagent=None):
+        """subagent 非空表示这次调用属于某个子代理，事件带上它，面板好把
+        这些卡片收进那个子代理的折叠区，而不是和主线的步骤混在一起。"""
         tool = registry.BY_NAME.get(name)
         if not tool:
             return {"error": "没有名为 %s 的工具" % name}
@@ -975,10 +978,13 @@ class SessionCoordinator:
         summary = registry.describe(name, arguments)
         # 顶栏显示的是"正在打开 Safari"这种具体动作，不是笼统的"正在执行"
         self.set_state("executing", summary)
-        self.emit({"type": "tool_started", "id": call_id, "name": name,
-                   "arguments": arguments, "risk": tool["risk"], "summary": summary,
-                   "action": registry.action_of(name),
-                   "target": registry.target_of(name, arguments)})
+        started_event = {"type": "tool_started", "id": call_id, "name": name,
+                         "arguments": arguments, "risk": tool["risk"], "summary": summary,
+                         "action": registry.action_of(name),
+                         "target": registry.target_of(name, arguments)}
+        if subagent:
+            started_event["subagent"] = subagent
+        self.emit(started_event)
 
         task = self._task_runs.get(generation)
         if task is None:
@@ -1038,6 +1044,8 @@ class SessionCoordinator:
         event = {"type": "tool_result", "id": call_id, "name": name, "success": ok,
                  "summary": result.get("error") or summary,
                  "ms": int((time.time() - started) * 1000)}
+        if subagent:
+            event["subagent"] = subagent
         # 认得出形状的结果额外给 UI 一份结构化数据，好画成可点的卡片。
         # 认不出就没有这个字段，UI 自动退回纯文字摘要——不强求每个工具都有卡片。
         payload = registry.ui_payload(name, arguments, result)
@@ -1067,6 +1075,13 @@ class SessionCoordinator:
 
     def _call_session_tool(self, name, arguments):
         """由会话自己执行的工具——它们改的是会话状态，不是外部世界。"""
+        if name == "subagent_run":
+            # 子代理跑在当前这个 worker 线程里，同步返回——它的报告就是这次
+            # 工具调用的结果，主循环本来就在等这个返回值。
+            runner = subagent_mod.SubAgent(
+                self, arguments.get("description"), arguments.get("prompt"),
+                arguments.get("scope") or "explore", arguments.get("max_steps") or 12)
+            return runner.run(self._turn_generation)
         if name == "agent_enter":
             already = self.agent.enabled
             self.agent.set_enabled(True)

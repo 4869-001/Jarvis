@@ -14,6 +14,10 @@ static const CGFloat kScreenMargin = 24.0;
 static const CGFloat kDefaultOpacity = 0.82;
 /// 低于这个高度就认为是收起态，而不是用户手动拖出来的尺寸
 static const CGFloat kMinExpandedHeight = 200.0;
+/// 工作台（宽屏两栏）的目标尺寸。左栏固定 268pt，右侧要留得下正常宽度的对话，
+/// 所以宽度不是"随便加宽"，而是窄态宽度 + 左栏 + 一点余量。
+static const CGFloat kWorkbenchWidth  = 860.0;
+static const CGFloat kWorkbenchHeight = 700.0;
 
 #pragma mark - 面板窗口
 
@@ -68,6 +72,8 @@ static const CGFloat kMinExpandedHeight = 200.0;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *pendingEvents;
 @property (nonatomic, assign) CGFloat expandedHeight;    ///< 收起前的高度，展开时还原
 @property (nonatomic, assign) NSTimeInterval lastLevelAt;
+@property (nonatomic, assign) BOOL workbench;            ///< 宽屏两栏
+@property (nonatomic, assign) NSRect narrowFrame;        ///< 进工作台前的窗口位置
 @end
 
 @implementation ConversationPanelController
@@ -380,6 +386,8 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
                                     approved:[body[@"approved"] boolValue]
                                        scope:body[@"scope"]];
         }
+    } else if ([action isEqualToString:@"workbench"]) {
+        [self setWorkbench:[body[@"on"] boolValue]];
     } else if ([action isEqualToString:@"agent"]) {
         [self forwardAgentMessage:body[@"message"]];
     } else if ([action isEqualToString:@"collapse"]) {
@@ -460,6 +468,53 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
 
 /// 页面上报顶栏可拖区域，及区域内不可拖的按钮矩形（都是 getBoundingClientRect()
 /// 的原始值，坐标系跟 WKWebView 自身的 flipped bounds 完全一致，不用转换）。
+/// 宽屏工作台。窄态的 frame 要记下来——退出时得原样还回去，
+/// 而不是"再算一个差不多的位置"：用户把面板摆在哪是他自己调过的。
+///
+/// 宽着的时候关掉 frameAutosaveName，理由和收起面板那条一样：存下宽态，
+/// 下次启动就以宽态开，而面板的约定是永远以常规状态启动。
+- (void)setWorkbench:(BOOL)wide {
+    if (_workbench == wide) return;
+    _workbench = wide;
+    if (!self.panel) return;
+
+    NSScreen *screen = self.panel.screen ?: [NSScreen mainScreen] ?: [NSScreen screens].firstObject;
+    NSRect visible = screen.visibleFrame;
+    NSRect frame = self.panel.frame;
+
+    if (wide) {
+        self.narrowFrame = frame;
+        self.panel.frameAutosaveName = @"";
+        CGFloat width  = MIN(kWorkbenchWidth,  visible.size.width  - 2.0 * kScreenMargin);
+        CGFloat height = MIN(MAX(frame.size.height, kWorkbenchHeight),
+                             visible.size.height - 2.0 * kScreenMargin);
+        // 向左长、向上长：面板默认贴右下角，保住那两条边不动，看着才像"展开"
+        // 而不是"整个窗口跳了个位置"。
+        frame.origin.x = NSMaxX(frame) - width;
+        frame.origin.y = NSMaxY(frame) - height;
+        frame.size = NSMakeSize(width, height);
+        // 长出屏幕就拉回来。左上角超界比右下角更常见（面板本来就贴右下）。
+        frame.origin.x = MAX(frame.origin.x, NSMinX(visible) + kScreenMargin);
+        frame.origin.y = MAX(frame.origin.y, NSMinY(visible) + kScreenMargin);
+        if (NSMaxY(frame) > NSMaxY(visible) - kScreenMargin) {
+            frame.origin.y = NSMaxY(visible) - kScreenMargin - frame.size.height;
+        }
+    } else {
+        frame = NSIsEmptyRect(self.narrowFrame)
+            ? NSMakeRect(NSMaxX(frame) - kPanelWidth, frame.origin.y, kPanelWidth, kPanelHeight)
+            : self.narrowFrame;
+        self.narrowFrame = NSZeroRect;
+    }
+
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+        context.duration = 0.18;
+        [[self.panel animator] setFrame:frame display:YES];
+    } completionHandler:^{
+        // 还原自动保存只能等动画结束：动画中途 AppKit 会把中间帧存进去。
+        if (!self->_workbench) self.panel.frameAutosaveName = kFrameAutosaveName;
+    }];
+}
+
 - (void)applyDragZonesFromMessage:(NSDictionary *)body {
     NSRect (^rectFrom)(id) = ^NSRect(id raw) {
         if (![raw isKindOfClass:[NSDictionary class]]) return NSZeroRect;

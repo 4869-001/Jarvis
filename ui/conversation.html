@@ -176,6 +176,13 @@ header button svg { display: block; width: 13px; height: 13px; }
   overscroll-behavior: contain; scrollbar-gutter: stable;
   contain: layout paint style;
 }
+/* 消息流里的每一项都不许被压扁。#log 是 flex column，而 flex 子项默认
+   flex-shrink:1——内容一超过可视高度，最高的那几项（工具卡片栈、长回复）
+   就会被按比例压矮，配上它们自己的 overflow:hidden，表现是「卡片凭空少了半截」。
+   实测：4 张卡片实际占 440px，容器被压到 133px，后两张整个看不见。
+   这条比"给某个卡片单独加 flex:none"可靠——新加的卡片类型不会再踩一次。 */
+#log > * { flex: 0 0 auto; }
+
 #log::-webkit-scrollbar { width: 6px; }
 #log::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
 
@@ -248,7 +255,7 @@ header button svg { display: block; width: 13px; height: 13px; }
 .tool-head .what { color: var(--text); flex: none; }
 .tool-head .target {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  direction: rtl; text-align: left;              /* 路径太长时保住尾部的文件名 */
+  text-align: left;      /* 保尾截断在 JS 里做（tailClip），CSS 的 rtl 会把路径显示反 */
 }
 .tool-head .ms { flex: none; opacity: 0.6; }
 
@@ -271,7 +278,7 @@ header button svg { display: block; width: 13px; height: 13px; }
 .file .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file .p {
   flex: none; max-width: 45%; font: 10px var(--mono); color: rgba(255,196,130,0.35);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;
 }
 .file-acts { display: flex; gap: 8px; padding: 8px 10px; }
 .file-acts button {
@@ -328,9 +335,8 @@ body.collapsed #agentBar { display: none; }
 }
 #agentBar .ag-ws {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  direction: rtl; text-align: left;
   font: 11px/1.5 var(--mono); color: var(--gold); background: none; border: none;
-  cursor: pointer; padding: 0;
+  cursor: pointer; padding: 0; text-align: left;
 }
 #agentBar .ag-ws:hover { text-decoration: underline; }
 #agentBar .ag-step { flex: none; font: 10px var(--mono); color: var(--text-dim); }
@@ -367,12 +373,17 @@ body.collapsed #agentBar { display: none; }
 /* 待办。同一时刻只有一条 in_progress，所以"正在做的那件事"必须一眼可辨。 */
 #agentBar .ag-todos { display: none; flex-direction: column; gap: 2px; max-height: 132px; overflow-y: auto; }
 #agentBar .ag-todos.on { display: flex; }
-#agentBar .ag-todo { display: flex; gap: 6px; font-size: 11.5px; color: var(--text-dim); line-height: 1.5; }
-#agentBar .ag-todo .box { flex: none; width: 1em; color: var(--text-dim); }
-#agentBar .ag-todo.doing { color: var(--text); }
-#agentBar .ag-todo.doing .box { color: var(--amber); }
-#agentBar .ag-todo.done { opacity: 0.5; text-decoration: line-through; }
-#agentBar .ag-todo.done .box { color: var(--ok); text-decoration: none; }
+/* 工作台的左栏已经常驻待办，顶栏不必再显示一份——两份不同步的清单
+   比没有清单更糟。 */
+body.workbench #agentBar .ag-todos { display: none; }
+/* 待办条目在顶栏和工作台左栏各出现一次，样式不能绑在 #agentBar 上——
+   绑上去的话左栏那份会掉成没有间距、字号也不对的裸文本。 */
+.ag-todo { display: flex; gap: 6px; font-size: 11.5px; color: var(--text-dim); line-height: 1.5; }
+.ag-todo .box { flex: none; width: 1em; color: var(--text-dim); }
+.ag-todo.doing { color: var(--text); }
+.ag-todo.doing .box { color: var(--amber); }
+.ag-todo.done { opacity: 0.5; text-decoration: line-through; }
+.ag-todo.done .box { color: var(--ok); text-decoration: none; }
 #agentBar .ag-count { font: 10px var(--mono); color: var(--text-dim); }
 
 /* 步骤旁白：模型说"接下来我要…"。它不是回答，所以不给气泡，只给一行灰字。 */
@@ -398,6 +409,50 @@ body.collapsed #agentBar { display: none; }
 }
 .diff .diff-acts button:hover:not(:disabled) { border-color: var(--line-lit); background: rgba(255, 200, 130, 0.14); }
 .diff .diff-acts button:disabled { opacity: 0.4; cursor: default; }
+
+/* ── 子代理 ─────────────────────────────────────────── */
+/* 子代理的工具卡片收进自己的折叠区，不和主线步骤混在一起——
+   混在一起的话，用户分不清哪几步是"主线在做"、哪几步是"派出去查的"。 */
+.subagent { border-top: 1px solid rgba(255, 140, 26, 0.09); }
+.subagent > .sub-head {
+  display: flex; align-items: baseline; gap: 7px; padding: 7px 10px; cursor: pointer;
+  font: 11.5px/1.5 var(--mono); color: var(--gold);
+}
+.subagent > .sub-head .mark { flex: none; width: 1em; }
+.subagent > .sub-head .what { flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.subagent > .sub-head .meta { flex: none; opacity: 0.6; font-size: 10px; }
+.subagent.done > .sub-head .mark { color: var(--ok); }
+.subagent > .sub-body { padding-left: 14px; border-left: 2px solid rgba(255, 140, 26, 0.25);
+  margin-left: 14px; }
+.subagent.folded > .sub-body { display: none; }
+
+/* ── 工作台（宽屏两栏）─────────────────────────────── */
+#rail {
+  display: none; flex-direction: column; flex: none; width: 268px;
+  border-right: 1px solid var(--line); overflow: hidden;
+}
+body.workbench #rail { display: flex; }
+body.workbench #body { flex-direction: row; }
+#rail .rail-sec { display: flex; flex-direction: column; min-height: 0;
+  border-bottom: 1px solid var(--line); padding: 8px 10px; gap: 5px; }
+#rail .rail-grow { flex: 1; border-bottom: none; }
+#rail .rail-head { font: 600 9.5px/1 var(--mono); letter-spacing: 0.18em;
+  color: var(--text-dim); text-transform: uppercase; }
+#rail #rail-todos, #rail #timeline { overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+#rail #rail-todos { max-height: 190px; }
+#rail .empty { font-size: 11px; color: var(--text-dim); opacity: 0.6; padding: 3px 0; }
+.tl {
+  display: flex; gap: 6px; font: 11px/1.5 var(--mono); color: var(--text-dim);
+  padding: 2px 0; align-items: baseline;
+}
+.tl .m { flex: none; width: 1em; color: var(--warn); }
+.tl.ok .m { color: var(--ok); }
+.tl.fail .m { color: var(--bad); }
+.tl.sub { padding-left: 12px; }
+.tl .n { flex: none; color: var(--text); }
+.tl .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; opacity: 0.75; }
 
 /* 命令输出。实时那份和最终那份用同一块地方，不然同一条命令会显示两遍。 */
 .term { border-top: 1px solid var(--line); }
@@ -625,6 +680,12 @@ body.resizing #body { visibility: hidden; }
     <span id="brand">J.A.R.V.I.S.</span>
     <span id="status">连接中</span>
     <span id="bars"><i></i><i></i><i></i><i></i><i></i></span>
+    <button id="btn-wide" title="工作台（⌥W）：加宽面板，左栏常驻待办与步骤"
+            aria-label="工作台" aria-pressed="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="5" width="18" height="14" rx="2"/><path d="M9 5v14"/>
+      </svg>
+    </button>
     <button id="btn-agent" title="Agent 模式（⌥A）：长程任务、编辑与检索工具"
             aria-label="Agent 模式" aria-pressed="false">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -689,6 +750,18 @@ body.resizing #body { visibility: hidden; }
   </div>
 
   <div id="body">
+    <!-- 工作台左栏。只在 body.workbench 时出现：窄面板里挤不下第二列，
+         而 Agent 跑长任务时又非常需要「待办 + 干了什么」始终可见。 -->
+    <aside id="rail">
+      <div class="rail-sec" id="rail-todos-wrap">
+        <div class="rail-head">待办</div>
+        <div id="rail-todos"></div>
+      </div>
+      <div class="rail-sec rail-grow">
+        <div class="rail-head">步骤 <span id="rail-count"></span></div>
+        <div id="timeline"></div>
+      </div>
+    </aside>
     <div id="log"></div>
     <div id="sleepmask">
       <div class="z">☾</div>
@@ -764,6 +837,7 @@ const S = {
   hasMessages: false,
   textBeforeVoice: '',   // 开麦前输入框里已有的内容，转写要接在它后面
   pendingConfirm: null,  // 未回答的确认卡片，Esc 优先关它
+  workbench: false,      // 宽屏两栏工作台
   agent: { enabled: false, workspace: '~', permission_mode: 'accept_edits',
            max_steps: 60, step: 0, todos: [] },
 };
@@ -781,6 +855,16 @@ function post(action, extra) {
   if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.jarvis) {
     window.webkit.messageHandlers.jarvis.postMessage(payload);
   }
+}
+
+// 路径和命令要保住尾部（文件名、参数），但 CSS 的 direction:rtl 会把非路径
+// 文本的标点顺序显示错乱：glob 模式两个星号加斜杠会被倒过来显示，工作目录
+// "~/Projects/Jarvis" 会显示成 "Projects/Jarvis/~"。所以在 JS 里截，不在 CSS 里绕。
+// （这段注释刻意用 // 而不是块注释：里面一旦出现斜杠星号的组合，块注释会提前闭合，
+//   整个脚本从那里开始语法错误——已经踩过一次。）
+function tailClip(text, max) {
+  text = String(text || '');
+  return text.length <= max ? text : '…' + text.slice(-(max - 1));
 }
 
 function el(tag, className, text) {
@@ -849,7 +933,7 @@ function renderAgent() {
   $('btn-agent').setAttribute('aria-pressed', String(a.enabled));
   if (!a.enabled) return;
 
-  $('agent-ws').textContent = a.workspace || '~';
+  $('agent-ws').textContent = tailClip(a.workspace || '~', 46);
   $('agent-ws').title = '工作目录：' + (a.workspace || '~') + '（点击切换）';
   // 步数只在跑起来之后才有意义，闲着时显示上限反而像在倒计时
   $('agent-step').textContent = a.step ? a.step + ' / ' + a.max_steps + ' 步' : '';
@@ -874,6 +958,112 @@ function renderAgent() {
       todo.status === 'in_progress' ? (todo.active_form || todo.content) : todo.content));
     box.appendChild(row);
   });
+  renderRail();      // 待办有两个显示位置，改了要一起刷
+}
+
+/* ── 工作台 ─────────────────────────────────────────── */
+/* 左栏是「任务跑起来之后始终要看得见」的两样东西：待办和步骤。
+   窄面板里它们只能挤在顶栏或混在对话流里，长任务一滚就看不见了。 */
+
+const MAX_TIMELINE = 200;
+
+function setWorkbench(on) {
+  S.workbench = !!on;
+  document.body.classList.toggle('workbench', S.workbench);
+  $('btn-wide').classList.toggle('on', S.workbench);
+  $('btn-wide').setAttribute('aria-pressed', String(S.workbench));
+  post('workbench', { on: S.workbench });
+  renderRail();
+  scroll(true);
+}
+
+function renderRail() {
+  if (!S.workbench) return;
+  const box = $('rail-todos');
+  box.textContent = '';
+  if (!S.agent.todos.length) {
+    box.appendChild(el('div', 'empty', S.agent.enabled ? '还没有待办' : 'Agent 模式未开启'));
+  }
+  S.agent.todos.forEach((todo) => {
+    const cls = todo.status === 'in_progress' ? 'doing' : (todo.status === 'completed' ? 'done' : '');
+    const row = el('div', 'ag-todo ' + cls);
+    row.appendChild(el('span', 'box',
+      todo.status === 'completed' ? '✓' : (todo.status === 'in_progress' ? '▶' : '○')));
+    row.appendChild(el('span', 'txt',
+      todo.status === 'in_progress' ? (todo.active_form || todo.content) : todo.content));
+    box.appendChild(row);
+  });
+}
+
+const timelineNodes = new Map();
+
+function timelineAdd(event) {
+  const line = $('timeline');
+  const row = el('div', 'tl' + (event.subagent ? ' sub' : ''));
+  row.appendChild(el('span', 'm', '●'));
+  row.appendChild(el('span', 'n', event.action || event.name));
+  row.appendChild(el('span', 't', tailClip(event.target || '', 34)));
+  line.appendChild(row);
+  timelineNodes.set(event.id, row);
+  // 步骤只增不减，长任务会堆很多。留最近的，早期的可以在对话流里翻到。
+  while (line.childElementCount > MAX_TIMELINE) line.removeChild(line.firstElementChild);
+  $('rail-count').textContent = line.childElementCount;
+  line.scrollTop = line.scrollHeight;
+}
+
+function timelineFinish(event) {
+  const row = timelineNodes.get(event.id);
+  if (!row) return;
+  row.classList.add(event.declined ? 'fail' : (event.success ? 'ok' : 'fail'));
+  row.querySelector('.m').textContent = event.declined ? '—' : (event.success ? '✓' : '✗');
+  timelineNodes.delete(event.id);
+}
+
+function timelineNote(text, cls) {
+  const line = $('timeline');
+  const row = el('div', 'tl ' + (cls || ''));
+  row.appendChild(el('span', 'm', '◆'));
+  row.appendChild(el('span', 'n', text));
+  line.appendChild(row);
+  line.scrollTop = line.scrollHeight;
+}
+
+/* ── 子代理 ─────────────────────────────────────────── */
+
+const subagentNodes = new Map();
+
+function addSubagentCard(event) {
+  hideEmpty();
+  if (!activeToolStack || !activeToolStack.isConnected) {
+    activeToolStack = el('div', 'tool-stack');
+    log.appendChild(activeToolStack);
+  }
+  const card = el('div', 'subagent');
+  const head = el('div', 'sub-head');
+  head.appendChild(el('span', 'mark', '◇'));
+  head.appendChild(el('span', 'what', '子代理 · ' + (event.description || '')));
+  head.appendChild(el('span', 'meta', event.scope === 'full' ? '完整权限' : '只读'));
+  const body = el('div', 'sub-body');
+  head.addEventListener('click', () => card.classList.toggle('folded'));
+  card.append(head, body);
+  activeToolStack.appendChild(card);
+  subagentNodes.set(event.id, { card, head, body });
+  endStreaming();
+  scroll();
+}
+
+function finishSubagentCard(event) {
+  const node = subagentNodes.get(event.id);
+  if (!node) return;
+  node.card.classList.add('done');
+  node.head.querySelector('.mark').textContent = event.cancelled ? '—' : '✓';
+  const meta = node.head.querySelector('.meta');
+  meta.textContent = event.cancelled ? '已中断'
+    : (event.steps || 0) + ' 步 · ' + Math.round((event.ms || 0) / 100) / 10 + 's';
+  // 跑完就折起来：它的价值是那份结论，过程留着占地方
+  node.card.classList.add('folded');
+  subagentNodes.delete(event.id);
+  scroll();
 }
 
 function applyAgent(payload) {
@@ -1014,7 +1204,10 @@ let activeToolStack = null;
 
 function addToolCard(event) {
   hideEmpty();
-  if (!activeToolStack || !activeToolStack.isConnected) {
+  // 属于某个子代理的工具，收进那个子代理的折叠区；找不到宿主子代理
+  // （比如面板是中途连上的）就退回主线，别把卡片丢掉。
+  const owner = event.subagent ? subagentNodes.get(event.subagent) : null;
+  if (!owner && (!activeToolStack || !activeToolStack.isConnected)) {
     activeToolStack = el('div', 'tool-stack');
     log.appendChild(activeToolStack);
   }
@@ -1022,14 +1215,14 @@ function addToolCard(event) {
   const head = el('div', 'tool-head');
   head.appendChild(el('span', 'mark', '●'));
   head.appendChild(el('span', 'what', event.action || event.name));
-  head.appendChild(el('span', 'target', event.target || ''));
+  head.appendChild(el('span', 'target', tailClip(event.target || '', 56)));
   head.appendChild(el('span', 'ms', ''));
   card.appendChild(head);
   const steps = el('div', 'steps');
   card.appendChild(steps);
-  activeToolStack.appendChild(card);
+  (owner ? owner.body : activeToolStack).appendChild(card);
   toolNodes.set(event.id, { card, head, steps });
-  endStreaming();          // 工具之后模型会另起一段
+  if (!owner) endStreaming();   // 工具之后模型会另起一段；子代理内部不打断主线气泡
   scroll();
   return toolNodes.get(event.id);
 }
@@ -1153,7 +1346,7 @@ function renderFiles(card, payload) {
     const row = el('div', 'file');
     row.appendChild(el('span', 'tick', '✓'));
     row.appendChild(el('span', 'n', item.name || item.path));
-    row.appendChild(el('span', 'p', item.path));
+    row.appendChild(el('span', 'p', tailClip(item.path, 40)));
     row.addEventListener('click', () => {
       if (selected.has(item.path)) { selected.delete(item.path); row.classList.remove('sel'); }
       else { selected.add(item.path); row.classList.add('sel'); }
@@ -1734,6 +1927,7 @@ $('wake-manual').addEventListener('click', () => post('set_wake_word', { enabled
 
 /* ── Agent 模式的控件 ───────────────────────────────── */
 
+$('btn-wide').addEventListener('click', () => setWorkbench(!S.workbench));
 $('btn-agent').addEventListener('click', () => setAgentMode(!S.agent.enabled));
 $('agent-off').addEventListener('click', () => setAgentMode(false));
 
@@ -1801,6 +1995,11 @@ document.addEventListener('keydown', (event) => {
   if (event.altKey && !event.metaKey && !event.ctrlKey && event.code === 'KeyA') {
     event.preventDefault();
     setAgentMode(!S.agent.enabled);
+    return;
+  }
+  if (event.altKey && !event.metaKey && !event.ctrlKey && event.code === 'KeyW') {
+    event.preventDefault();
+    setWorkbench(!S.workbench);
     return;
   }
   if (event.key !== 'Escape') return;
@@ -1986,7 +2185,20 @@ function handle(event) {
 
     case 'tool_started':
       addToolCard(event);
+      timelineAdd(event);
       break;
+
+    case 'subagent_started':
+      addSubagentCard(event);
+      timelineNote('子代理 · ' + (event.description || ''));
+      break;
+
+    case 'subagent_done':
+      finishSubagentCard(event);
+      break;
+
+    case 'subagent_step':
+      break;      // 面板不逐步刷子代理，跑完给一行结论就够
 
     case 'tool_confirm_request':
       addStep(event.id, '等待你确认');
@@ -1995,6 +2207,7 @@ function handle(event) {
 
     case 'tool_result':
       finishTool(event);
+      timelineFinish(event);
       break;
 
     case 'tool_retry':
@@ -2029,6 +2242,10 @@ function handle(event) {
       // 别让上一个任务的进度条留在新会话的顶栏里。
       S.agent.todos = [];
       S.agent.step = 0;
+      subagentNodes.clear();
+      timelineNodes.clear();
+      $('timeline').textContent = '';
+      $('rail-count').textContent = '';
       endStreaming();
       S.hasMessages = false;
       showEmpty();
@@ -2101,6 +2318,7 @@ function handle(event) {
 
     case 'agent_compacted':
       addNotice('上下文已压缩（' + (event.before || 0) + ' → ' + (event.after || 0) + ' 条），任务继续');
+      timelineNote('上下文已压缩');
       break;
 
     case 'agent_undone':

@@ -103,7 +103,7 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 ## 工具
 
 固定工具集，没有「让模型自己拼命令行」这条路（`shell_run` 除外，见下）。
-平时 35 个；**Agent 模式 42 个**（见下一节），因为 grep/后台进程这类东西
+平时 35 个；**Agent 模式 43 个**（见下一节），因为 grep/后台进程这类东西
 不该出现在「现在几点」的候选项里，每一轮都带着它们的 Schema 也是白烧 token。
 
 | 由谁执行 | 工具 |
@@ -111,7 +111,7 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 | ObjC 宿主 | `app_open` `app_quit` `app_list_running` `url_open` `finder_reveal` `clipboard_read` `clipboard_write` `system_notify` `system_info` `calendar_events` `mail_unread` `wechat_read` `media_control` |
 | ObjC 宿主（自动化） | `app_scriptable` `app_dictionary` `app_script` `menu_list` `menu_invoke` `ui_inspect` `ui_action` |
 | Python Brain | `fs_list` `fs_read` `fs_search` `fs_write` `fs_move` `web_search` `web_fetch` `memory_save` `memory_recall` `memory_list` `memory_update` `memory_forget` `task_history` `shell_run` |
-| 仅 Agent 模式 | `file_edit` `file_restore` `grep` `glob` `shell_output` `shell_kill` `shell_list` `todo_write` |
+| 仅 Agent 模式 | `file_edit` `file_restore` `grep` `glob` `shell_output` `shell_kill` `shell_list` `todo_write` `subagent_run` |
 | 会话自身 | `agent_enter`（普通对话里发现「这活得连续动手做」时，模型自己切进 Agent 模式） |
 
 原生那半留在 ObjC，因为 **TCC 权限按 app bundle 授予**：Python 子进程去发 Apple Events
@@ -164,7 +164,7 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 | | 普通对话 | Agent 模式 |
 |---|---|---|
 | 步数上限 | 8 轮工具 | `agent.max_steps`（默认 60） |
-| 工具集 | 35 个 | 42 个（多编辑、检索、后台进程、待办） |
+| 工具集 | 35 个 | 43 个（多编辑、检索、后台进程、待办、子代理） |
 | 确认 | L2 起一律弹框 | 按权限档位放宽，见下 |
 | 播报 | 每段回复都念 | **只念最终结论**，中间步骤静音 |
 
@@ -219,6 +219,35 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 子进程一律 `start_new_session=True` 单独成组——不这样的话超时后 kill 掉的只有
 `/bin/zsh` 本身，它 fork 出去的编译进程会变成孤儿继续吃 CPU。
 **新会话会把所有后台进程收掉**：没人再管它们了，留着只会变成谁也不知道还在跑的东西。
+
+### 子代理
+
+`subagent_run` 开一个**独立上下文**去查东西，只把结论带回来。存在的唯一理由是保护主上下文：
+一次 grep 可能吐回 200 行、读三个文件又是几千 token，这些原始材料对主会话没有价值——
+它要的是「配置在哪读的、有没有第二处写入」这种结论。
+
+| | |
+|---|---|
+| `scope: explore`（默认） | 只给 18 个只读工具，绝大多数子任务用这个 |
+| `scope: full` | 完整工具集，确实要它动手时才用 |
+| 递归 | **禁止**。子代理拿不到 `subagent_run` |
+| 权限 | 工具仍走主会话的 `_execute`，档位、确认弹窗、原生转发一律照旧 |
+
+子代理的 prompt 必须是**自包含**的：它看不到主会话的对话，也不能反过来提问，
+交代不清它只能猜。报告要求写结论不写过程——不这么要求的话模型会把刚读到的文件
+原样抄回来，那就等于没隔离。
+
+实测：「统计 mean/median 的定义与使用」这个任务，子代理用 6 步（glob + 3 次 grep +
+2 次 fs_read）10 秒查完，主上下文只多了一段结论，文件内容一行都没进去。
+
+### 工作台（⌥W）
+
+面板加宽成两栏：左栏常驻**待办 + 步骤时间线**，右栏还是对话。
+Agent 跑长任务时这两样东西必须一直看得见——窄面板里它们只能挤在顶栏或混在对话流里，
+一滚就没了。退出工作台会把窗口**原样**还回进入前的位置（记下了 frame，不是重新算一个）。
+
+宽着的时候关掉 `frameAutosaveName`，理由和收起面板那条一样：存下宽态，
+下次启动就以宽态开，而面板的约定是永远以常规状态启动。
 
 ### 配置
 
@@ -406,7 +435,7 @@ Brain 可以用 `detail` 把通用文案覆盖成具体动作（`{"state":"execu
 
 ### 键盘
 
-`Enter` 发送 · `⌥Enter` 换行 · `⌘⇧N` 新会话 · `⌥A` Agent 模式 · `⌥Space` 面板 · `⌥V` 说话。
+`Enter` 发送 · `⌥Enter` 换行 · `⌘⇧N` 新会话 · `⌥A` Agent 模式 · `⌥W` 工作台 · `⌥Space` 面板 · `⌥V` 说话。
 
 `Esc` 有优先级，顺序不能反：**确认框 > 停止收音 > 停止任务 > 收起面板**。
 任务跑着的时候按 Esc 却把面板收了，是最容易吓到人的一种。
