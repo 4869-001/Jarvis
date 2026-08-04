@@ -685,9 +685,12 @@ body.collapsed #attachments,
 body.collapsed #skillMenu,
 body.collapsed #modelMenu,
 body.collapsed #modelForm { display: none !important; }
-/* 动画期间把对话内容藏起来但**保留占位**：WKWebView 不必在每一帧重排整段历史，
-   而 #body 仍然占着 flex 空间，footer 因此始终贴在窗口底边。 */
-body.resizing #body { visibility: hidden; }
+/* 动画期间把对话内容整段"冻住"。#body 的高度来自 flex、不依赖内容，所以
+   content-visibility:hidden 之后它仍然占着位置（footer 照旧贴住窗口底边），
+   但 WebKit 不再每帧去排那几百个消息节点。
+   用它而不是 visibility:hidden：后者只是不画，布局照排——一段长对话在 0.22s 里要
+   重排十几次，那正是卡顿的来源。它还会保留 #log 的滚动位置，display:none 不会。 */
+body.resizing #body { content-visibility: hidden; }
 
 /* 顶栏放不下时的让位顺序（由 reflowToolbar 逐级施加，不再用固定断点）：
    低频按钮进「⋯」→ 再不够就摘掉品牌字样和电平条。
@@ -703,12 +706,14 @@ header.tight #status { letter-spacing: 0.04em; }
   footer { padding-left: 9px; padding-right: 9px; }
 }
 
-/* 低矮窗口把装饰性留白收紧，消息区仍优先获得可滚动空间。 */
-@media (max-height: 460px) {
-  header { height: 48px; }
-  #log { padding: 10px 11px; gap: 9px; }
-  footer { padding-top: 7px; padding-bottom: 8px; }
-}
+/* 矮窗口的紧凑排版。**不能用 @media (max-height)**：收起动画里窗口高度是连续变化
+   的，穿过断点时顶栏和输入区会当场改高——既是动画中途的一次跳变，又会让"收起后
+   该多高"这个目标在飞行途中变掉（实测 164 → 151），观察者再把新目标报上去，宿主
+   于是在动画中途重新起一段动画。改成由 applyCompactHeight() 打 class，
+   且收起态与动画期间一律不打。 */
+body.short header { height: 48px; }
+body.short #log { padding: 10px 11px; gap: 9px; }
+body.short footer { padding-top: 7px; padding-bottom: 8px; }
 </style>
 </head>
 <body>
@@ -1644,6 +1649,11 @@ function renderSkillMenu() {
     menu.appendChild(row);
   });
   menu.classList.add('on');
+  // 菜单最高 220px，条目多了就会滚动。方向键改的只是 .sel 这个类，不把选中项
+  // 滚进可视区的话，往下按几下选中项就划出去了——看着像"选择跑丢了"。
+  // block:'nearest' = 只在真的看不见时才滚，已经可见就不动，不会每按一下就跳。
+  const selected = menu.children[skillMenuIndex];
+  if (selected) selected.scrollIntoView({ block: 'nearest' });
 }
 
 function closeSkillMenu() {
@@ -1905,6 +1915,7 @@ function setCollapsed(collapsed) {
   // 无论哪个方向，动画期间只有对话区在变尺寸，输入框和顶栏都不动。
   document.body.classList.add('resizing');
   if (!collapsed) document.body.classList.remove('collapsed');
+  applyCompactHeight();       // 必须在量高度之前：紧凑排版会改变顶栏和输入区的高度
   $('btn-collapse').textContent = '⌃';
   $('btn-collapse').classList.toggle('collapsed', collapsed);
   $('btn-collapse').setAttribute('aria-expanded', String(!collapsed));
@@ -1916,6 +1927,17 @@ function setCollapsed(collapsed) {
 
 /* 迷你态只保留固定的顶栏和单行输入框。语音停止条、附件等不会再改变窗口高度，
    避免语音交互时 ResizeObserver 与原生动画互相追逐。 */
+/* 矮窗口的紧凑排版由这里决定，不交给媒体查询——原因见 body.short 那段注释。
+   收起态和动画期间一律不启用：那两种情况下窗口本来就矮，再套一层紧凑排版，
+   收起高度的计算和实际布局就对不上了。 */
+function applyCompactHeight() {
+  const compact = !S.collapsed
+                  && !document.body.classList.contains('resizing')
+                  && window.innerHeight < 460;
+  document.body.classList.toggle('short', compact);
+}
+window.addEventListener('resize', applyCompactHeight);
+
 let collapsedResizeFrame = 0;
 function reportCollapsedHeight(animated = false) {
   if (collapsedResizeFrame) cancelAnimationFrame(collapsedResizeFrame);
@@ -1946,7 +1968,12 @@ function reportCollapsedHeight(animated = false) {
    不会来回震荡：这三块的高度只取决于内容，不取决于窗口高度，所以宿主改完
    窗口尺寸之后它们不再变化，观察者也就不会再触发。 */
 const chromeObserver = new ResizeObserver(() => {
-  if (S.collapsed) reportCollapsedHeight(false);   // 打字时不要动画，跟手就行
+  // 动画期间一律不报。窗口高度在动画里是连续变化的，任何跟高度相关的样式变化都会
+  // 触发这里；报上去等于在动画中途换目标，宿主会重新起一段动画——那就是肉眼可见的
+  // 卡顿。等 collapse_complete 落地之后再说。
+  if (S.collapsed && !document.body.classList.contains('resizing')) {
+    reportCollapsedHeight(false);                  // 打字时不要动画，跟手就行
+  }
 });
 [document.querySelector('header'), document.querySelector('footer'), $('agentBar')]
   .forEach((node) => chromeObserver.observe(node));
@@ -1991,8 +2018,17 @@ const TOOLBAR_LEVELS = [
 ];
 let toolbarLevel = -1;
 
+let lastToolbarWidth = -1;
+
 function reflowToolbar() {
   const header = document.querySelector('header');
+  // 只有宽度变了才需要重排。收起/展开只改高度，观察者却照样会触发；工作台的
+  // 加宽动画则是每帧都触发——不挡一下的话，每帧要跑最多 7 轮"挪按钮 + 强制布局"，
+  // 那本身就够卡了。
+  const width = Math.round(header.clientWidth);
+  if (width === lastToolbarWidth) return;
+  lastToolbarWidth = width;
+
   for (let i = 0; i < TOOLBAR_LEVELS.length; i++) {
     const level = TOOLBAR_LEVELS[i];
     header.classList.toggle('no-bars', !level.bars);
@@ -2332,6 +2368,7 @@ function handle(event) {
     case 'collapse_complete': {
       document.body.classList.toggle('collapsed', !!event.collapsed);
       document.body.classList.remove('resizing');
+      applyCompactHeight();
       if (!event.collapsed) {
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 160) + 'px';

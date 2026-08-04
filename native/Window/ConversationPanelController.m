@@ -73,6 +73,7 @@ static const CGFloat kWorkbenchHeight = 700.0;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *pendingEvents;
 @property (nonatomic, assign) CGFloat expandedHeight;    ///< 收起前的高度，展开时还原
 @property (nonatomic, assign) NSTimeInterval lastLevelAt;
+@property (nonatomic, assign) BOOL collapsed;             ///< 当前是否收起
 @property (nonatomic, assign) BOOL workbench;            ///< 宽屏两栏
 @property (nonatomic, assign) NSRect narrowFrame;        ///< 进工作台前的窗口位置
 @end
@@ -269,8 +270,15 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
 
     CGFloat target;
     if (collapsed) {
-        if (frame.size.height >= kMinExpandedHeight) self.expandedHeight = frame.size.height;
-        [[NSUserDefaults standardUserDefaults] setDouble:self.expandedHeight forKey:kHeightDefaultsKey];
+        // **只在"从展开变收起"这一次记录展开高度。**
+        // 收起态下页面还会重报高度（输入框换行、Agent 状态带出现都会变），
+        // 那些重复调用如果也来记一次，记下的就是当时窗口的高度——万一还赶上动画
+        // 正在飞行途中，记下的是个中间值（实测记成过 400），下次展开就只展到那么高。
+        if (!self.collapsed && frame.size.height >= kMinExpandedHeight) {
+            self.expandedHeight = frame.size.height;
+            [[NSUserDefaults standardUserDefaults] setDouble:self.expandedHeight
+                                                      forKey:kHeightDefaultsKey];
+        }
         target = MAX(32.0, collapsedContentHeight) + chrome;
         // 收起期间关掉窗口尺寸自动保存。开着的话保存下来的就是这条 56px 的顶栏，
         // 下次启动 setFrameUsingName 把它读回来、又被 minSize 钳到 360，
@@ -308,6 +316,8 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
         if (!collapsed) self.panel.frameAutosaveName = kFrameAutosaveName;
         [self pushEvent:@{ @"type": @"collapse_complete", @"collapsed": @(collapsed) }];
     };
+
+    self.collapsed = collapsed;
 
     if (animated && fabs(self.panel.frame.size.height - target) > 1.0) {
         [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
