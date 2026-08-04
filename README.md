@@ -103,12 +103,13 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 ## 工具
 
 固定工具集，没有「让模型自己拼命令行」这条路（`shell_run` 除外，见下）。
-平时 28 个；**Agent 模式 35 个**（见下一节），因为 grep/后台进程这类东西
+平时 35 个；**Agent 模式 42 个**（见下一节），因为 grep/后台进程这类东西
 不该出现在「现在几点」的候选项里，每一轮都带着它们的 Schema 也是白烧 token。
 
 | 由谁执行 | 工具 |
 |---|---|
 | ObjC 宿主 | `app_open` `app_quit` `app_list_running` `url_open` `finder_reveal` `clipboard_read` `clipboard_write` `system_notify` `system_info` `calendar_events` `mail_unread` `wechat_read` `media_control` |
+| ObjC 宿主（自动化） | `app_scriptable` `app_dictionary` `app_script` `menu_list` `menu_invoke` `ui_inspect` `ui_action` |
 | Python Brain | `fs_list` `fs_read` `fs_search` `fs_write` `fs_move` `web_search` `web_fetch` `memory_save` `memory_recall` `memory_list` `memory_update` `memory_forget` `task_history` `shell_run` |
 | 仅 Agent 模式 | `file_edit` `file_restore` `grep` `glob` `shell_output` `shell_kill` `shell_list` `todo_write` |
 | 会话自身 | `agent_enter`（普通对话里发现「这活得连续动手做」时，模型自己切进 Agent 模式） |
@@ -119,6 +120,38 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 风险分级 L0–L4，**L2 起弹确认框**（`fs_write` / `fs_move` / `app_quit` / `shell_run`）。
 写进 `tools.auto_approve` 的工具跳过确认。
 日历、邮件和微信虽是只读，但结果会进入当前模型上下文，也按 L2 处理并在读取前确认。
+
+## 指挥任意应用
+
+**不为每个 App 写一个工具**——写死的工具只能覆盖当初想到的那几个。macOS 上通用的
+控制面只有三个，按可靠性从高到低全开出来，让模型自己挑：
+
+| 通道 | 工具 | 适用 | 可靠性 |
+|---|---|---|---|
+| 脚本字典 | `app_dictionary` → `app_script` | 有 AppleScript 接口的应用 | 语义稳定，首选 |
+| 菜单 | `menu_list` → `menu_invoke` | 没字典但有标准菜单栏 | 菜单项名字就是能力清单 |
+| 辅助功能 | `ui_inspect` → `ui_action` | 前两条都没有 | 界面一变路径就失效 |
+
+再往下（自绘界面、Electron 里的 canvas）**没有可靠通道**，这种情况要如实说做不到，
+不要用键鼠模拟假装做到了——推导见 `refs/Jarvis微信读写能力技术方案.md`。
+
+先查字典再写脚本是硬要求：凭印象写 AppleScript 十有八九撞上「这个应用不认识这条命令」。
+`app_dictionary` 走 Carbon 的 `OSACopyScriptingDefinitionFromURL`（`sdef(1)` 要 Xcode，
+这台机器上没有），既能读现代 `.sdef` 也能把老应用的 `aete` 资源合成出来。
+
+### 首次使用要授权一次
+
+第一次驱动某个应用时 macOS 会弹一次自动化授权。**没授权的表现不是报错，是卡满整个超时**
+——Apple Event 会一直等 TCC 裁决。所以每段脚本都先用
+`AEDeterminePermissionToAutomateTarget` 预检，缺授权立刻返回一句能照做的话，
+而不是让人盯着一个没反应的界面。`app_script` 的 `app` 参数就是给预检用的，尽量填。
+
+### 中文应用名
+
+系统语言是中文，但苹果自带应用的中文名不在 bundle 里能便宜读到的地方
+（`displayNameAtPath:` 和 `localizedInfoDictionary` 在这台机器上都只返回英文）。
+所以有一张中文名 → bundle 名的别名表（备忘录→Notes、访达→Finder…）。
+**菜单项名字则是真正本地化的**，`menu_invoke` 要传中文（"文件" 而不是 "File"）。
 
 ## Agent 模式
 
@@ -131,7 +164,7 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 | | 普通对话 | Agent 模式 |
 |---|---|---|
 | 步数上限 | 8 轮工具 | `agent.max_steps`（默认 60） |
-| 工具集 | 28 个 | 35 个（多编辑、检索、后台进程、待办） |
+| 工具集 | 35 个 | 42 个（多编辑、检索、后台进程、待办） |
 | 确认 | L2 起一律弹框 | 按权限档位放宽，见下 |
 | 播报 | 每段回复都念 | **只念最终结论**，中间步骤静音 |
 

@@ -30,8 +30,37 @@ agent 的改动混在同一份 diff 里。
 真机验证过的：小 bug 修复任务 8s/7 次工具调用；三件事的多步任务 17s/9 次调用，
 自己列了待办、用了 grep、跑了测试验证、如实报告了"第 3 件事没有可做的"。
 
-没做的（第二~四期，等用户排期）：通用 AppleScript/JXA 通道（让 Jarvis 指挥任意有脚本
-字典的 App）、辅助功能 UI 操作兜底、子代理、面板宽屏工作台视图。
+## 2026-08-04 第二期：指挥任意应用（同分支）
+
+新增 `native/Tools/AutomationController.m`，7 个工具：`app_scriptable` /
+`app_dictionary` / `app_script` / `menu_list` / `menu_invoke` / `ui_inspect` /
+`ui_action`。三条通道按可靠性排序（脚本字典 → 菜单 → 辅助功能），
+**不再一个 App 写一个工具**。
+
+真机验证过：Notes 建/读/删备忘录（AppleScript + JXA 都跑通）、菜单点击靠计数变化
+证实真的生效、TextEdit 用 AX 填字并用 osascript 独立读回、微信正确落到"没有字典 →
+走菜单"这条兜底路。整链路（模型选通道 → 原生执行 → 回报）12s 跑完。
+
+几条实测坑，改之前先看：
+
+- **`URLForApplicationWithBundleIdentifier:@"Safari"` 会返回 `/usr/sbin/universalaccessd`。**
+  拿普通名字去问 LaunchServices 得到的结果毫无意义。现在只在名字长得像 bundle id
+  时才问它，且要求返回的是 `.app`。
+- **`[nil caseInsensitiveCompare:x]` 返回 0，而 0 就是 `NSOrderedSame`。**
+  后台守护进程的 `bundleIdentifier` 是 nil，于是"每个名字都能匹配上第一个守护进程"。
+  这就是上面那个 universalaccessd 的真正来源。所有名字比对都必须先判空。
+- **缺自动化授权的表现不是报错，是卡满整个超时**——Apple Event 一直等 TCC 裁决。
+  所以 `runScript:` 先用 `AEDeterminePermissionToAutomateTarget` 预检。
+  `app_script` 的 `app` 参数就是喂给预检的。
+- **`sdef(1)` 要 Xcode**（本机只有 CommandLineTools 且已损坏），改用 Carbon 的
+  `OSACopyScriptingDefinitionFromURL`，是 sdef 内部用的同一个 API。
+- **`--tool` 入口验不了自动化权限**，因为责任进程是终端。第一次真正授权要在真 App 里发生。
+- **苹果自带应用的中文名读不到**（`displayNameAtPath:` 只给英文），但**菜单项名字是中文的**。
+  所以有一张应用名别名表，而 `menu_invoke` 必须传中文菜单名。
+- 脚本跑在串行队列不是主线程：被脚本化的 App 卡住时，主线程执行会把整个 Jarvis 冻住。
+  `mail_unread` 早就是这么做的，沿用同一套。
+
+没做的（第三~四期，等用户排期）：子代理（独立上下文的探索代理）、面板宽屏工作台视图。
 
 ## 2026-08-03 已合并进 main
 

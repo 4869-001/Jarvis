@@ -98,6 +98,7 @@ clang -O2 -fobjc-arc -mmacosx-version-min=13.0 \
   -framework Cocoa -framework WebKit -framework IOKit \
   -framework Carbon -framework UserNotifications -framework EventKit \
   -framework AVFoundation -framework Speech -framework PDFKit \
+  -framework OSAKit \
   -o "$APP/Contents/MacOS/${APP_NAME}" \
   $SOURCES \
   -lsqlite3 \

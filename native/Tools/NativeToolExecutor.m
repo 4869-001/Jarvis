@@ -1,5 +1,6 @@
 #import "NativeToolExecutor.h"
 
+#import "AutomationController.h"
 #import "MediaController.h"
 #import "WeChatController.h"
 
@@ -20,6 +21,7 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
 }
 
 @interface NativeToolExecutor ()
+@property (nonatomic, strong) AutomationController *automation;
 @property (nonatomic, strong) MediaController *media;
 @property (nonatomic, strong) WeChatController *wechat;
 @property (nonatomic, strong) EKEventStore *eventStore;
@@ -41,7 +43,13 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
                                       @"wechat_read",
                                       @"media_control"]];
     });
-    return [names containsObject:name];
+    // 自动化那一组（脚本 / 字典 / 菜单 / 辅助功能）单独一个控制器，名字它自己认
+    return [names containsObject:name] || [AutomationController handlesToolNamed:name];
+}
+
+- (AutomationController *)automation {
+    if (!_automation) _automation = [[AutomationController alloc] init];
+    return _automation;
 }
 
 - (MediaController *)media {
@@ -71,6 +79,9 @@ static NSArray<NSString *> *ApplicationSearchPaths(void) {
     else if ([name isEqualToString:@"mail_unread"])      { [self unreadMail:arguments completion:completion]; }
     else if ([name isEqualToString:@"wechat_read"])      { [self.wechat read:arguments completion:completion]; }
     else if ([name isEqualToString:@"media_control"])   { [self controlMedia:arguments completion:completion]; }
+    else if ([AutomationController handlesToolNamed:name]) {
+        [self.automation execute:name arguments:arguments completion:completion];
+    }
     else { completion(nil, [NSString stringWithFormat:@"宿主不认识工具 %@", name]); }
 }
 

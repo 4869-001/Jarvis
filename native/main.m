@@ -29,7 +29,17 @@ static int RunToolFromCommandLine(int argc, const char *argv[]) {
         NSString *item = [NSString stringWithUTF8String:argv[i]];
         NSRange split = [item rangeOfString:@"="];
         if (split.location == NSNotFound) { name = item; continue; }
-        arguments[[item substringToIndex:split.location]] = [item substringFromIndex:split.location + 1];
+        NSString *key = [item substringToIndex:split.location];
+        NSString *value = [item substringFromIndex:split.location + 1];
+        // 数组/对象参数（menu_invoke 的 path）在命令行上只能写成 JSON。
+        // 以 [ 或 { 开头就按 JSON 解析，解析不了就当普通字符串——
+        // 这样 `text=[草稿]` 这种真的以方括号开头的文本不会被吃掉。
+        id parsed = nil;
+        if ([value hasPrefix:@"["] || [value hasPrefix:@"{"]) {
+            parsed = [NSJSONSerialization JSONObjectWithData:[value dataUsingEncoding:NSUTF8StringEncoding]
+                                                     options:0 error:nil];
+        }
+        arguments[key] = parsed ?: value;
     }
     if (name.length == 0) {
         fprintf(stderr, "用法：Jarvis --tool <工具名> [键=值 ...]\n");

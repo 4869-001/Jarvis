@@ -135,6 +135,72 @@ TOOLS = [
            "query": _p("search_play 必填；歌曲名，可同时带歌手名提高准确率")},
           "L1", "native", required=["action"]),
 
+    # ------------------------------------------------ 指挥任意应用（ObjC 执行）
+    # 不为每个 App 写一个工具：写死的工具只覆盖当初想到的那几个。macOS 上通用的
+    # 控制面只有三个，这里按可靠性从高到低全开出来，让模型自己挑。
+    _tool("app_scriptable",
+          "列出本机哪些应用能用 AppleScript 驱动。不确定某个应用能不能自动化时先问这个。",
+          {"filter": _p("只看名字里含这个词的应用，可选")},
+          "L0", "native"),
+
+    _tool("app_dictionary",
+          "读取某个应用的脚本字典：它支持哪些命令、有哪些对象和属性。"
+          "**要用 app_script 操作一个应用之前，先调它**——凭印象写 AppleScript "
+          "十有八九会撞上「这个应用不认识这条命令」。字典很大时用 search 缩小范围。"
+          "返回 scriptable=false 表示这个应用没有脚本接口，改走 menu_invoke 或 ui_action。",
+          {"app": _p("应用名，如 Safari、备忘录、Mail"),
+           "search": _p("只看名字或说明里含这个词的命令与类，如 tab、message")},
+          "L0", "native", required=["app"]),
+
+    _tool("app_script",
+          "对本机应用执行一段 AppleScript 或 JavaScript(JXA)。这是驱动有脚本字典的"
+          "应用的正规接口——新建备忘录、读日历、控制浏览器标签页、导出 Keynote 都走它。"
+          "写之前先用 app_dictionary 确认命令名。脚本里要自己写 tell application \"X\"。"
+          "不要用它做本可以用专用工具做的事（开应用用 app_open，控制播放用 media_control）。",
+          {"script": _p("完整脚本源码"),
+           "app": _p("脚本主要操作哪个应用（如 Notes、Safari）。**尽量填**——"
+                     "填了才能在缺少自动化授权时立刻报错，不填就只能一直等到超时"),
+           "language": {"type": "string", "enum": ["applescript", "javascript"],
+                        "description": "默认 applescript；javascript 即 JXA"},
+           "timeout": _p("超时秒数，默认 45，上限 45", _INT)},
+          "L4", "native", required=["script"]),   # 等价于任意代码，撤法未知
+
+    _tool("menu_list",
+          "列出某个正在运行的应用的菜单。不传 menu 时返回顶层菜单名，"
+          "传了则返回那个菜单里的所有菜单项——菜单项的名字就是这个应用的能力清单。"
+          "没有脚本字典的应用优先走这条路。",
+          {"app": _p("应用名"), "menu": _p("看某个菜单里的项，如 文件、编辑；不传则看顶层")},
+          "L0", "native", required=["app"]),
+
+    _tool("menu_invoke",
+          "点击某个应用的菜单项，如 [\"文件\", \"新建标签页\"]。"
+          "先用 menu_list 确认菜单项的准确名字（名字是本地化的，中文系统上就是中文）。",
+          {"app": _p("应用名"),
+           "path": {"type": "array", "items": _STR,
+                    "description": "菜单路径，从顶层菜单名开始，如 [\"文件\", \"导出\", \"PDF\"]"},
+           "activate": _p("先把应用切到前台（默认真）。后台应用的菜单常常点不动", _BOOL)},
+          "L2", "native", required=["app", "path"],
+          recover="多数菜单命令可以在目标应用里按 ⌘Z 撤销，但不保证"),
+
+    _tool("ui_inspect",
+          "读取某个应用当前窗口的界面元素树：按钮、输入框、文本和它们的位置路径。"
+          "脚本字典和菜单都走不通时用它。返回的 path 只在界面没变时有效。",
+          {"app": _p("应用名"),
+           "depth": _p("往下看几层，默认 6，最多 12", _INT)},
+          "L0", "native", required=["app"]),
+
+    _tool("ui_action",
+          "操作 ui_inspect 找到的某个界面元素：点击、聚焦或填值。"
+          "path 必须来自刚刚那次 ui_inspect——界面变过就要重新 inspect，"
+          "拿旧路径去点会点到别的东西上。",
+          {"app": _p("应用名"),
+           "path": _p("元素路径，来自 ui_inspect，如 0/3/1"),
+           "action": {"type": "string", "enum": ["press", "focus", "set_value"],
+                      "description": "press 点击，focus 聚焦，set_value 填入文本"},
+           "value": _p("set_value 时要填的文本")},
+          "L2", "native", required=["app", "path"],
+          recover="界面操作没有通用撤法，多数应用里可以按 ⌘Z"),
+
     # ------------------------------------------------ 文件（Brain 执行）
     _tool("fs_list", "列出目录内容。",
           {"path": _p("目录路径，默认 ~"),
@@ -369,6 +435,13 @@ def describe(name, arguments):
         "calendar_events": "查看近期日历",
         "mail_unread": "查看未读邮件摘要",
         "wechat_read": "读取微信结构化消息并分析",
+        "app_scriptable": "查看哪些应用可脚本化",
+        "app_dictionary": "查看「{app}」的脚本字典",
+        "app_script": "对本机应用执行脚本",
+        "menu_list": "查看「{app}」的菜单",
+        "menu_invoke": "点击「{app}」的菜单项",
+        "ui_inspect": "读取「{app}」的界面元素",
+        "ui_action": "操作「{app}」的界面元素",
         "fs_list": "列出 {path} 的内容",
         "fs_read": "读取 {path}",
         "fs_search": "搜索文件「{query}」",
@@ -415,6 +488,9 @@ _ACTIONS = {
     "calendar_events": "查看近期日历",
     "mail_unread": "查看未读邮件摘要",
     "wechat_read": "读取微信消息",
+    "app_scriptable": "查看可脚本化的应用", "app_dictionary": "查看脚本字典",
+    "app_script": "执行应用脚本", "menu_list": "查看菜单", "menu_invoke": "点击菜单项",
+    "ui_inspect": "读取界面元素", "ui_action": "操作界面元素",
     "fs_list": "列出目录", "fs_read": "读取文件", "fs_search": "搜索文件",
     "fs_write": "写入文件", "fs_move": "移动文件",
     "web_search": "联网搜索", "web_fetch": "抓取网页",
@@ -426,8 +502,8 @@ _ACTIONS = {
     "grep": "检索内容", "glob": "查找文件", "shell_output": "读取后台输出",
     "shell_kill": "结束后台进程", "shell_list": "查看后台进程", "todo_write": "更新待办",
 }
-_TARGET_KEYS = ("path", "source", "command", "name", "url", "text", "query", "id", "contact",
-                "pattern", "shell_id", "goal")
+_TARGET_KEYS = ("path", "source", "command", "script", "name", "url", "text", "query", "id",
+                "contact", "pattern", "shell_id", "goal", "app")
 
 
 def action_of(name):
