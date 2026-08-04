@@ -3,6 +3,7 @@
 
 #import <WebKit/WebKit.h>
 #import <PDFKit/PDFKit.h>
+#import <QuartzCore/QuartzCore.h>   // NSAnimationContext 的 timingFunction
 
 static NSString *const kBridgeName = @"jarvis";
 static NSString *const kOpacityDefaultsKey = @"JarvisPanelOpacity";
@@ -199,7 +200,7 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
             CGFloat saved = [[NSUserDefaults standardUserDefaults] doubleForKey:kHeightDefaultsKey];
             CGFloat height = saved >= kMinExpandedHeight ? saved : kPanelHeight;
             NSRect frame = self.panel.frame;
-            frame.origin.y -= (height - frame.size.height);
+            // 和收起/展开同一个规矩：底边不动，往上长。
             frame.size.height = height;
             [self.panel setFrame:frame display:NO];
         }
@@ -250,10 +251,14 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
 
 #pragma mark - 收起 / 展开
 
-/// 收起只留顶栏。高度由页面量出来后传上来——写死一个数字迟早会和 CSS 对不上，
-/// 差一点就会把顶栏切掉或者露出半行内容。
+/// 收起 = 只把对话区收掉，顶栏、Agent 状态带、输入框都留着。
+///
+/// 目标高度由页面量出来后传上来（`#shell` 减去 `#body`），写死一个数字迟早会和
+/// CSS 对不上，差一点就会切掉半行内容。让页面报数还有一个好处：**收起态的高度
+/// 恰好等于展开态里那些不参与动画的块的高度之和**，于是整段动画里只有对话区在
+/// 变，输入框和顶栏一像素都不动。
 - (void)setCollapsed:(BOOL)collapsed
-         headerHeight:(CGFloat)headerHeight
+    collapsedContentHeight:(CGFloat)collapsedContentHeight
              animated:(BOOL)animated {
     if (!self.panel) return;
 
@@ -265,7 +270,7 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
     if (collapsed) {
         if (frame.size.height >= kMinExpandedHeight) self.expandedHeight = frame.size.height;
         [[NSUserDefaults standardUserDefaults] setDouble:self.expandedHeight forKey:kHeightDefaultsKey];
-        target = MAX(32.0, headerHeight) + chrome;
+        target = MAX(32.0, collapsedContentHeight) + chrome;
         // 收起期间关掉窗口尺寸自动保存。开着的话保存下来的就是这条 56px 的顶栏，
         // 下次启动 setFrameUsingName 把它读回来、又被 minSize 钳到 360，
         // 面板于是以一个不高不矮的空壳启动——这条排查起来很费劲，因为看着"只是变矮了"。
@@ -278,12 +283,17 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
     NSRect visible = screen.visibleFrame;
     target = MIN(target, visible.size.height - 2.0 * kScreenMargin);
 
-    // 窗口原点在左下角：改高度时要把 origin 一起挪，否则收起会变成「顶栏往下掉」
-    // ——展开/收起时视觉锚点始终固定在窗口顶边。
-    frame.origin.y += frame.size.height - target;
+    // **锚点在底边**：origin.y 不动，只改高度，面板朝上长、朝下收。
+    //
+    // 以前锚在顶边，展开时窗口底边会往下掉五百多像素——而输入框就贴在底边上，
+    // 于是"展开"看起来像输入框整个从上面砸到下面。锚底边之后，输入框在整个
+    // 动画里屏幕坐标一动不动，长出来的空间全部给上方的对话区。
     frame.size.height = target;
-    frame.origin.y = MAX(NSMinY(visible) + kScreenMargin,
-                         MIN(frame.origin.y, NSMaxY(visible) - frame.size.height));
+    // 只有一种情况必须动底边：朝上长会顶出屏幕上沿，那就整体下移。
+    if (NSMaxY(frame) > NSMaxY(visible) - kScreenMargin) {
+        frame.origin.y = NSMaxY(visible) - kScreenMargin - frame.size.height;
+    }
+    frame.origin.y = MAX(NSMinY(visible) + kScreenMargin, frame.origin.y);
 
     // 动画期间必须先解除高度上限，否则 AppKit 会在动画开始前瞬间把窗口钳到目标值。
     self.panel.minSize = NSMakeSize(360, 32);
@@ -298,7 +308,11 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
 
     if (animated && fabs(self.panel.frame.size.height - target) > 1.0) {
         [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-            context.duration = 0.16;
+            // 0.16s 线性收放看着像"啪"地跳一下。改成缓出：起步快、收尾慢，
+            // 眼睛跟得上高度在变，而不是只看到前后两个状态。
+            context.duration = 0.22;
+            context.timingFunction = [CAMediaTimingFunction
+                                      functionWithName:kCAMediaTimingFunctionEaseOut];
             [[self.panel animator] setFrame:frame display:YES];
         } completionHandler:finishConstraints];
     } else {
@@ -391,9 +405,9 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
     } else if ([action isEqualToString:@"agent"]) {
         [self forwardAgentMessage:body[@"message"]];
     } else if ([action isEqualToString:@"collapse"]) {
-        NSNumber *header = body[@"header"];
+        NSNumber *chrome = body[@"chrome"];
         [self setCollapsed:[body[@"collapsed"] boolValue]
-              headerHeight:[header isKindOfClass:[NSNumber class]] ? header.doubleValue : 56.0
+       collapsedContentHeight:[chrome isKindOfClass:[NSNumber class]] ? chrome.doubleValue : 164.0
                   animated:[body[@"animated"] boolValue]];
     } else if ([action isEqualToString:@"drag_zones"]) {
         [self applyDragZonesFromMessage:body];
@@ -488,17 +502,16 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
         CGFloat width  = MIN(kWorkbenchWidth,  visible.size.width  - 2.0 * kScreenMargin);
         CGFloat height = MIN(MAX(frame.size.height, kWorkbenchHeight),
                              visible.size.height - 2.0 * kScreenMargin);
-        // 向左长、向上长：面板默认贴右下角，保住那两条边不动，看着才像"展开"
-        // 而不是"整个窗口跳了个位置"。
+        // 向左长、向上长：底边和右边是面板的两条锚边（它默认贴右下角，
+        // 输入框也贴着底边），加宽加高时这两条不能动。
         frame.origin.x = NSMaxX(frame) - width;
-        frame.origin.y = NSMaxY(frame) - height;
         frame.size = NSMakeSize(width, height);
-        // 长出屏幕就拉回来。左上角超界比右下角更常见（面板本来就贴右下）。
+        // 长出屏幕就拉回来。左边和上边超界比另外两边更常见。
         frame.origin.x = MAX(frame.origin.x, NSMinX(visible) + kScreenMargin);
-        frame.origin.y = MAX(frame.origin.y, NSMinY(visible) + kScreenMargin);
         if (NSMaxY(frame) > NSMaxY(visible) - kScreenMargin) {
             frame.origin.y = NSMaxY(visible) - kScreenMargin - frame.size.height;
         }
+        frame.origin.y = MAX(frame.origin.y, NSMinY(visible) + kScreenMargin);
     } else {
         frame = NSIsEmptyRect(self.narrowFrame)
             ? NSMakeRect(NSMaxX(frame) - kPanelWidth, frame.origin.y, kPanelWidth, kPanelHeight)

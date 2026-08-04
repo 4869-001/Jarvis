@@ -327,7 +327,6 @@ header button svg { display: block; width: 13px; height: 13px; }
   background: rgba(255, 140, 26, 0.05);
 }
 body.agent #agentBar { display: flex; }
-body.collapsed #agentBar { display: none; }
 #agentBar .ag-row { display: flex; align-items: center; gap: 8px; }
 #agentBar .ag-badge {
   flex: none; font: 600 9px/1 var(--mono); letter-spacing: 0.18em;
@@ -643,18 +642,20 @@ body.dragging #shell { outline: 1px dashed var(--line-lit); outline-offset: -6px
 /* 收起态：只藏消息记录和透明度滑块，顶栏 + 输入区留着——
    缩小之后还是个能打字、能拖文件进来的迷你对话框，不是纯摆设的一条条。
    窗口高度由宿主按顶栏 + 输入区的实际高度缩，见 setCollapsed()。 */
-body.collapsed #opacity,
-body.collapsed #wakeMode,
+/* 收起 = 只把对话区收掉。顶栏、Agent 状态带、输入框的尺寸一概不变——
+   这不是审美选择，是让动画不跳的前提：收起态的窗口高度恰好等于这些块的高度
+   之和，所以整段动画里只有 #body 在从 N 变到 0，输入框在屏幕上一像素不动。
+   以前这里还会改 footer 的内边距和输入框的高度，动画结束那一帧就会"抖"一下。 */
 body.collapsed #body { display: none; }
+body.collapsed #opacity,
+body.collapsed #wakeMode { display: none; }
 body.collapsed #stopbar,
 body.collapsed #attachments,
 body.collapsed #skillMenu,
 body.collapsed #modelMenu,
 body.collapsed #modelForm { display: none !important; }
-body.collapsed header { height: 56px; }
-body.collapsed footer { border-top: none; padding: 4px 10px 9px; }
-body.collapsed #input { min-height: 42px; max-height: 88px; }
-body.collapsed #composer { padding-top: 7px; }
+/* 动画期间把对话内容藏起来但**保留占位**：WKWebView 不必在每一帧重排整段历史，
+   而 #body 仍然占着 flex 空间，footer 因此始终贴在窗口底边。 */
 body.resizing #body { visibility: hidden; }
 
 /* 手动把窗口缩窄时，先让出状态与输入空间，功能按钮仍全部保留。 */
@@ -1835,10 +1836,18 @@ $('btn-collapse').addEventListener('click', () => setCollapsed(!S.collapsed));
    顺序很关键：class 先切，offsetHeight 才是收起态之后的真实高度。 */
 function setCollapsed(collapsed) {
   S.collapsed = collapsed;
-  // 收起先隐藏长对话再缩窗；展开则先把空壳窗口放大，完成后才恢复消息。
-  // 这样 WKWebView 不会在动画每一帧重排整段历史记录。
-  if (collapsed) document.body.classList.add('collapsed');
-  else document.body.classList.add('resizing');
+  // 两个方向都用「展开态的布局」跑动画，收起态那一套只在动画结束时才落地：
+  //
+  //   展开：先摘掉 .collapsed，#body 立刻回到 flex:1（此刻高度是 0），
+  //         footer 因此立刻回到窗口底边；然后窗口往上长，对话区从 0 长出来。
+  //         以前是动画跑完才摘 .collapsed，于是动画全程 footer 都吊在顶栏下面，
+  //         最后一帧才"掉"到底部——用户看到的就是输入框从上面砸下来。
+  //   收起：保持展开布局，让 #body 随窗口缩到 0，结束后再加 .collapsed
+  //         （那时它已经是 0 高，加不加视觉上没有区别）。
+  //
+  // 无论哪个方向，动画期间只有对话区在变尺寸，输入框和顶栏都不动。
+  document.body.classList.add('resizing');
+  if (!collapsed) document.body.classList.remove('collapsed');
   $('btn-collapse').textContent = '⌃';
   $('btn-collapse').classList.toggle('collapsed', collapsed);
   $('btn-collapse').setAttribute('aria-expanded', String(!collapsed));
@@ -1855,15 +1864,35 @@ function reportCollapsedHeight(animated = false) {
   if (collapsedResizeFrame) cancelAnimationFrame(collapsedResizeFrame);
   collapsedResizeFrame = requestAnimationFrame(() => {
     collapsedResizeFrame = 0;
-    const header = document.querySelector('header').offsetHeight;
-    const footer = document.querySelector('footer').offsetHeight;
-    post('collapse', {
-      collapsed: S.collapsed,
-      header: header + (S.collapsed ? footer : 0),
-      animated
-    });
+    // 收起后要留下的高度 = #shell 里除对话区之外、所有在文档流里的块加起来。
+    //
+    // 不能写成"整个面板减去对话区"：收起之后 #body 是 display:none、高度为 0，
+    // 那个算式会退化成"当前窗口高度"，于是永远报回自己现在的高度——Agent 状态带
+    // 出现或者输入框换行都撑不开窗口，多出来的部分被窗口下沿切掉。
+    // 逐块相加则两种状态下都成立，也自动涵盖透明度滑块、唤醒方式这些临时展开的块。
+    let chrome = 0;
+    for (const child of document.getElementById('shell').children) {
+      if (child.id === 'body') continue;
+      const style = getComputedStyle(child);
+      if (style.display === 'none' || style.position === 'absolute') continue;
+      chrome += child.getBoundingClientRect().height;
+    }
+    post('collapse', { collapsed: S.collapsed, chrome: Math.round(chrome), animated });
   });
 }
+
+/* 收起态的窗口高度 = 顶栏 + Agent 状态带 + 输入区。这三样都会自己变高：
+   输入框随着换行长，Agent 状态带在开关 Agent 模式时整块出现或消失。
+   不跟着重报高度的话，长出来的部分会被窗口下沿直接切掉——收起态恰恰是最常
+   打字的状态，这个必须跟。展开态不用管，多出来的高度由对话区自己吸收。
+
+   不会来回震荡：这三块的高度只取决于内容，不取决于窗口高度，所以宿主改完
+   窗口尺寸之后它们不再变化，观察者也就不会再触发。 */
+const chromeObserver = new ResizeObserver(() => {
+  if (S.collapsed) reportCollapsedHeight(false);   // 打字时不要动画，跟手就行
+});
+[document.querySelector('header'), document.querySelector('footer'), $('agentBar')]
+  .forEach((node) => chromeObserver.observe(node));
 
 /* ── 顶栏拖拽 ───────────────────────────────────────── */
 /* WKWebView 不认 -webkit-app-region（那是 Chromium 的私货），窗口拖拽只能靠
