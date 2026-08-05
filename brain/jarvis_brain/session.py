@@ -178,6 +178,15 @@ User: "how's my Mac doing"
   recipe entirely.
 - To fill a text field, click it and then use ui_type. set_value goes through the
   accessibility API and silently does nothing on many apps.
+- Never destroy content Frank already has in order to write new content. When he says to
+  add, append, or supplement something, the existing text stays and yours goes after it —
+  ui_type's default append mode does this. Only reach for replace when he explicitly says
+  to rewrite or replace. If you are unsure whether something would overwrite, read the
+  current content first and say what you found.
+- Keep interface work cheap. ui_action takes find, so clicking something by name is one
+  call, not an inspect-then-act pair; and ui_inspect without find can return an entire
+  screen of elements, which will exhaust both the context and the step budget within a few
+  calls. Inspect narrowly, act directly, and verify with a targeted find.
 - On the ui_action channel, prefer action=click over action=press. press goes through
   the accessibility API, which plenty of apps — DingTalk and other Qt apps especially —
   only half implement: the call reports success and the interface does not move at all.
@@ -945,6 +954,16 @@ class SessionCoordinator:
                 self.agent.steps = round_index
                 self.emit({"type": "agent_step", "step": round_index, "max": max_rounds})
                 history = self._maybe_compact(history, generation)
+                # 预算快用完时先说一声。撞上限那一刻才截断的话，模型是被打断的——
+                # 它可能正做到一半、什么都没交代，用户只看到「已中止」。
+                # 提前告诉它还剩几步，它会先把已经做完的部分讲清楚再收尾。
+                remaining = max_rounds - round_index
+                if remaining in (10, 4):
+                    history = history + [{"role": "system", "content":
+                        "You have %d tool rounds left in this task. Prioritise: finish or "
+                        "safely stop what is half-done, then report what you actually "
+                        "completed, what you did not, and what state things are in. Do not "
+                        "start anything new that needs more rounds than you have." % remaining}]
 
             # 提醒贴在最后一条：工具结果常常是中文（文件名、工具摘要），
             # 隔着这些内容，开头的系统提示压不住格式，模型会整段滑回中文。

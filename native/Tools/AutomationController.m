@@ -773,6 +773,40 @@ static const NSInteger kMaxUINodes = 600;
 /// 键盘布局直接投递字符的。
 ///
 /// 分块送：一次投递的字符数太多会被丢，实测按 20 个字符一批稳定。
+
+/// 键盘事件专用的事件源。
+///
+/// ⚠️ **不能用 NULL 源 + kCGHIDEventTap 投递键盘事件**——那是唯一失效的组合。
+/// keycode 传 0 时，HID 层会拿当前键盘布局把这个键位重新翻译一遍，
+/// **把 CGEventKeyboardSetUnicodeString 设的字符串覆盖掉**，结果是什么都不出现、
+/// 也不报错。鼠标事件不走布局翻译，所以 click 一直是好的，只有打字受影响。
+///
+/// 五种组合实测（/tmp/keytest.m，往 TextEdit 敲）：
+///     source=NULL    tap=HID      ✗
+///     source=HID     tap=HID      ✗
+///     source=Private tap=HID      ✓
+///     source=NULL    tap=Session  ✓
+///     source=Private tap=Session  ✓
+/// 选 Private + Session：两个维度都避开了重翻译。
+static CGEventSourceRef JarvisKeyboardSource(void) {
+    static CGEventSourceRef source = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        source = CGEventSourceCreate(kCGEventSourceStatePrivate);
+    });
+    return source;
+}
+
+/// 发一次带修饰键的按键。用于把光标移到文末（⌘↓）或全选（⌘A）。
+- (void)postKey:(CGKeyCode)code flags:(CGEventFlags)flags {
+    CGEventSourceRef source = JarvisKeyboardSource();
+    CGEventRef down = CGEventCreateKeyboardEvent(source, code, true);
+    CGEventRef up = CGEventCreateKeyboardEvent(source, code, false);
+    if (down) { CGEventSetFlags(down, flags); CGEventPost(kCGSessionEventTap, down); CFRelease(down); }
+    [NSThread sleepForTimeInterval:0.02];
+    if (up) { CGEventSetFlags(up, flags); CGEventPost(kCGSessionEventTap, up); CFRelease(up); }
+}
+
 - (void)typeText:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
     if (!AXIsProcessTrusted()) {
         completion(nil, @"没有辅助功能权限：系统设置 → 隐私与安全性 → 辅助功能，把 JARVIS 打开");
@@ -803,38 +837,80 @@ static const NSInteger kMaxUINodes = 600;
         }
     }
 
+    // ⚠️ 追加 vs 覆盖。用户反馈过一次真实的数据丢失：让 Jarvis「往日志里加一条新内容」，
+    // 它把已有内容全删了只留新的。原因是敲字前光标位置不确定，而模型为了"确保写对"
+    // 会先全选——全选之后敲字就是覆盖。
+    // 所以把意图变成显式参数，默认 append（在末尾接着写），**不是** replace。
+    // 默认值选 append 而不是 insert：insert 依赖光标恰好在对的位置，
+    // 那是不可控的；而"在末尾追加"对"补充内容"这个最常见的诉求永远是对的。
+    NSString *mode = [arguments[@"mode"] isKindOfClass:[NSString class]] ? arguments[@"mode"] : @"append";
+    if ([mode isEqualToString:@"replace"]) {
+        [self postKey:0 flags:kCGEventFlagMaskCommand];          // ⌘A 全选，下一次输入即覆盖
+        [NSThread sleepForTimeInterval:0.08];
+    } else if ([mode isEqualToString:@"append"]) {
+        [self postKey:125 flags:kCGEventFlagMaskCommand];        // ⌘↓ 移到文末，光标在哪都不怕
+        [NSThread sleepForTimeInterval:0.08];
+    }
+    // insert：什么都不做，在当前光标处插入
+
+    // ⚠️ 换行必须作为独立的回车键发，不能夹在 Unicode 字符串里。
+    // 实测：一个字符串里带 \n 时，换行会送达，**后面的字符全部丢掉**——
+    // 症状是"多行文本只出现了空行"。所以按行拆开，行与行之间补一次 keycode 36。
+    NSArray<NSString *> *lines = [text componentsSeparatedByString:@"\n"];
     NSUInteger chunk = 20;
-    for (NSUInteger offset = 0; offset < text.length; offset += chunk) {
-        NSRange range = NSMakeRange(offset, MIN(chunk, text.length - offset));
-        // 别在代理对（emoji）中间切开，否则送出去的是半个字符。
-        range = [text rangeOfComposedCharacterSequencesForRange:range];
-        NSString *piece = [text substringWithRange:range];
-
-        NSUInteger length = piece.length;
-        unichar *buffer = malloc(sizeof(unichar) * length);
-        if (!buffer) { completion(nil, @"内存不足"); return; }
-        [piece getCharacters:buffer range:NSMakeRange(0, length)];
-
-        CGEventRef down = CGEventCreateKeyboardEvent(NULL, 0, true);
-        CGEventRef up = CGEventCreateKeyboardEvent(NULL, 0, false);
-        if (down) {
-            CGEventKeyboardSetUnicodeString(down, length, buffer);
-            CGEventPost(kCGHIDEventTap, down);
-            CFRelease(down);
+    for (NSUInteger lineIndex = 0; lineIndex < lines.count; lineIndex++) {
+        if (lineIndex > 0) {
+            [self postKey:36 flags:0];               // Return
+            [NSThread sleepForTimeInterval:0.04];
         }
-        if (up) {
-            CGEventKeyboardSetUnicodeString(up, length, buffer);
-            CGEventPost(kCGHIDEventTap, up);
-            CFRelease(up);
+        NSString *line = lines[lineIndex];
+        for (NSUInteger offset = 0; offset < line.length; ) {
+            NSRange range = NSMakeRange(offset, MIN(chunk, line.length - offset));
+            // 别在代理对（emoji）中间切开，否则送出去的是半个字符。
+            range = [line rangeOfComposedCharacterSequencesForRange:range];
+            NSString *piece = [line substringWithRange:range];
+
+            NSUInteger length = piece.length;
+            unichar *buffer = malloc(sizeof(unichar) * length);
+            if (!buffer) { completion(nil, @"内存不足"); return; }
+            [piece getCharacters:buffer range:NSMakeRange(0, length)];
+
+            CGEventSourceRef source = JarvisKeyboardSource();
+            CGEventRef down = CGEventCreateKeyboardEvent(source, 0, true);
+            CGEventRef up = CGEventCreateKeyboardEvent(source, 0, false);
+            // ⚠️ 必须显式清空修饰键。私有事件源会保留自己的修饰键状态，
+            // append/replace 先发过 ⌘↓ / ⌘A，紧接着的字符事件会**继承那个 Command**，
+            // 于是每个字都变成 ⌘+字母 快捷键——不出字，还可能触发菜单命令。
+            // 症状是"insert 模式好使、append 模式什么都不出现"。
+            if (down) {
+                CGEventSetFlags(down, 0);
+                CGEventKeyboardSetUnicodeString(down, length, buffer);
+                CGEventPost(kCGSessionEventTap, down);
+                CFRelease(down);
+            }
+            if (up) {
+                CGEventSetFlags(up, 0);
+                CGEventKeyboardSetUnicodeString(up, length, buffer);
+                CGEventPost(kCGSessionEventTap, up);
+                CFRelease(up);
+            }
+            free(buffer);
+            [NSThread sleepForTimeInterval:0.03];
+            offset = NSMaxRange(range);
         }
-        free(buffer);
-        [NSThread sleepForTimeInterval:0.03];
-        offset = NSMaxRange(range) - chunk;      // 对齐到实际切出去的位置
     }
 
-    completion(@{@"ok": @YES, @"typed": @(text.length),
-                 @"note": @"文字已敲给当前焦点。**一定要再 ui_inspect 确认它进了正确的输入框**——"
-                          @"焦点不在预期的地方时，这些字会落到别处。"}, nil);
+    // ⚠️ 收尾必须等一下。CGEventPost 是异步投递的，敲完立刻返回的话，
+    // `--tool` 这种一次性进程会在事件送达目标应用之前就退出，字就丢了——
+    // 症状是"报告 typed=N 但界面上什么都没有"。独立测试程序里因为末尾有 sleep
+    // 才看不出来，接进 Jarvis 才暴露。
+    [NSThread sleepForTimeInterval:0.25];
+
+    completion(@{@"ok": @YES, @"typed": @(text.length), @"mode": mode,
+                 @"note": [NSString stringWithFormat:
+                     @"以 %@ 方式敲了 %lu 个字。**一定要再 ui_inspect 确认原有内容还在、"
+                     @"新内容也进去了**——焦点不对时这些字会落到别处，而 replace 会把原内容清掉。",
+                     mode, (unsigned long)text.length]}, nil);
 }
 
 - (void)inferLabelsFor:(NSMutableArray *)nodes {
@@ -914,13 +990,70 @@ static const NSInteger kMaxUINodes = 600;
     CFRelease(root);
     [self inferLabelsFor:nodes];
 
-    completion(@{@"app": app.localizedName ?: (name ?: @""),
-                 @"window": windowTitle ?: @"",
-                 @"count": @(nodes.count),
-                 @"truncated": @(nodes.count >= kMaxUINodes),
-                 @"elements": nodes,
-                 @"note": @"path 是子元素下标路径，只在界面没变的情况下有效。"
-                          @"要操作某一项就把它的 path 传给 ui_action；界面变过就重新 inspect。"}, nil);
+    NSInteger total = nodes.count;
+    BOOL truncated = nodes.count >= kMaxUINodes;
+
+    // ⚠️ 全量返回是这条通道最大的成本。实测钉钉一次 33KB（约一万 token）——
+    // 一个多步任务扫十几次就把上下文撑爆了：历史被压缩顶掉（用户看到的现象是
+    // 「他把之前的内容删了重写」）、步数预算烧光、然后撞上限判失败。
+    // 三个过滤器都是为了让常见情况只返回几百字节。
+    NSString *wanted = [arguments[@"find"] isKindOfClass:[NSString class]] ? arguments[@"find"] : nil;
+    if (wanted.length) {
+        NSMutableArray *matched = [NSMutableArray array];
+        for (NSDictionary *node in nodes) {
+            for (NSString *key in @[@"inferred_label", @"title", @"label", @"value"]) {
+                NSString *text = node[key];
+                if ([text isKindOfClass:[NSString class]] &&
+                    [text rangeOfString:wanted options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                    [matched addObject:node];
+                    break;
+                }
+            }
+        }
+        nodes = matched;
+    }
+
+    if ([arguments[@"interactive"] boolValue]) {
+        NSMutableArray *kept = [NSMutableArray array];
+        for (NSDictionary *node in nodes) {
+            NSString *role = node[@"role"];
+            // 静态文字也留着：Qt 应用里侧边栏入口就是不可 press 的静态文字，
+            // 但它有坐标、能用 click 点。把它们滤掉等于把最需要的东西滤掉。
+            if ([node[@"pressable"] boolValue] || [role isEqualToString:@"AXButton"] ||
+                [role isEqualToString:@"AXTextField"] || [role isEqualToString:@"AXTextArea"] ||
+                [role isEqualToString:@"AXCheckBox"] || [role isEqualToString:@"AXStaticText"]) {
+                [kept addObject:node];
+            }
+        }
+        nodes = kept;
+    }
+
+    NSInteger limit = [arguments[@"limit"] respondsToSelector:@selector(integerValue)]
+        ? MAX(1, [arguments[@"limit"] integerValue]) : 60;
+    BOOL clipped = NO;
+    if ((NSInteger)nodes.count > limit) {
+        nodes = [[nodes subarrayWithRange:NSMakeRange(0, limit)] mutableCopy];
+        clipped = YES;
+    }
+
+    NSMutableDictionary *result = [@{@"app": app.localizedName ?: (name ?: @""),
+                                     @"window": windowTitle ?: @"",
+                                     @"count": @(nodes.count),
+                                     @"total_on_screen": @(total),
+                                     @"truncated": @(truncated),
+                                     @"elements": nodes} mutableCopy];
+    if (clipped) {
+        result[@"clipped"] = @YES;
+        result[@"note_clipped"] = [NSString stringWithFormat:
+            @"只返回了前 %ld 个（屏幕上共 %ld 个）。用 find 按文字缩小范围，别调大 limit——"
+            @"整屏元素表很大，塞进上下文会挤掉别的东西。", (long)limit, (long)total];
+    }
+    result[@"note"] = wanted.length
+        ? @"要操作某一项，直接把同样的文字传给 ui_action 的 find，不用再传 path。"
+        : @"**下次带 find 参数**（按文字过滤）或 interactive=true，只取需要的那几个——"
+          @"整屏返回很大，多扫几次就会把上下文挤爆。要操作某一项，"
+          @"直接把它的文字传给 ui_action 的 find。";
+    completion(result, nil);
 }
 
 - (AXUIElementRef)elementAtPath:(NSString *)path
@@ -1046,6 +1179,43 @@ static const NSInteger kMaxUINodes = 600;
     return nil;
 }
 
+
+/// 按文字挑一个元素。规则和剧本里的 find 一致：先完全相等再退到包含，
+/// 多个候选取文字最短的（最短那个通常是标签本身，长的是把它当子串包含的正文），
+/// 并支持用屏幕区域排除同名元素——侧边栏和内容区常常有一模一样的文字。
+- (NSDictionary *)bestMatchIn:(NSArray *)nodes for:(NSString *)wanted
+                    arguments:(NSDictionary *)arguments {
+    NSString *role = [arguments[@"role"] isKindOfClass:[NSString class]] ? arguments[@"role"] : nil;
+    NSNumber *xMin = arguments[@"x_min"], *xMax = arguments[@"x_max"];
+
+    NSMutableArray *pool = [NSMutableArray array];
+    for (NSDictionary *node in nodes) {
+        if (role.length && ![node[@"role"] isEqualToString:role]) continue;
+        NSDictionary *frame = node[@"frame"];
+        if (xMin && [frame[@"x"] integerValue] < xMin.integerValue) continue;
+        if (xMax && [frame[@"x"] integerValue] > xMax.integerValue) continue;
+        [pool addObject:node];
+    }
+
+    NSArray *keys = @[@"inferred_label", @"title", @"label", @"value"];
+    NSDictionary *bestPartial = nil;
+    NSInteger bestLength = NSIntegerMax;
+    for (NSDictionary *node in pool) {
+        for (NSString *key in keys) {
+            NSString *text = node[key];
+            if (![text isKindOfClass:[NSString class]] || !text.length) continue;
+            if ([text isEqualToString:wanted]) return node;          // 完全相等，立刻用
+            if ([text rangeOfString:wanted].location != NSNotFound &&
+                (NSInteger)text.length < bestLength) {
+                bestPartial = node;
+                bestLength = text.length;
+            }
+            break;
+        }
+    }
+    return bestPartial;
+}
+
 - (void)actUI:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
     if (!AXIsProcessTrusted()) {
         completion(nil, @"没有辅助功能权限：系统设置 → 隐私与安全性 → 辅助功能，把 JARVIS 打开");
@@ -1058,13 +1228,46 @@ static const NSInteger kMaxUINodes = 600;
         return;
     }
     NSString *path = [arguments[@"path"] isKindOfClass:[NSString class]] ? arguments[@"path"] : @"";
-    NSString *action = [arguments[@"action"] isKindOfClass:[NSString class]] ? arguments[@"action"] : @"press";
+    NSString *action = [arguments[@"action"] isKindOfClass:[NSString class]] ? arguments[@"action"] : @"click";
+    NSString *wanted = [arguments[@"find"] isKindOfClass:[NSString class]] ? arguments[@"find"] : nil;
 
     AXUIElementRef root = [self rootElementForApp:app];
     if (!root) {
         completion(nil, @"拿不到这个应用的界面元素");
         return;
     }
+
+    // find 直接按文字定位，省掉「先 ui_inspect 拿 path 再 ui_action」这一来一回。
+    // 那一来一回是工具调用数翻倍的主因，而 inspect 的返回又特别大——
+    // 一个多步任务因此很容易撞上步数上限。
+    if (wanted.length && !path.length) {
+        NSMutableArray *nodes = [NSMutableArray array];
+        [self walkElement:root path:@"" depth:0 maxDepth:12 into:nodes];
+        [self inferLabelsFor:nodes];
+        NSDictionary *hit = [self bestMatchIn:nodes for:wanted arguments:arguments];
+        if (!hit) {
+            NSMutableArray *nearby = [NSMutableArray array];
+            for (NSDictionary *node in nodes) {
+                NSString *text = node[@"inferred_label"] ?: node[@"title"] ?: node[@"value"];
+                if (text.length && nearby.count < 25 && ![nearby containsObject:text]) {
+                    [nearby addObject:text];
+                }
+            }
+            CFRelease(root);
+            completion(nil, [NSString stringWithFormat:
+                @"界面上找不到「%@」。当前能看到的有：%@", wanted,
+                [nearby componentsJoinedByString:@"、"]]);
+            return;
+        }
+        path = hit[@"path"];
+    }
+
+    if (!path.length) {
+        CFRelease(root);
+        completion(nil, @"要么给 find（按文字找，推荐），要么给 path");
+        return;
+    }
+
     NSString *failure = nil;
     AXUIElementRef target = [self elementAtPath:path from:root error:&failure];
     CFRelease(root);
