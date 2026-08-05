@@ -183,20 +183,31 @@ TOOLS = [
           recover="多数菜单命令可以在目标应用里按 ⌘Z 撤销，但不保证"),
 
     _tool("ui_inspect",
-          "读取某个应用当前窗口的界面元素树：按钮、输入框、文本和它们的位置路径。"
-          "脚本字典和菜单都走不通时用它。返回的 path 只在界面没变时有效。",
+          "读取某个应用当前窗口的界面元素树：按钮、输入框、文本，以及它们的路径和屏幕坐标。"
+          "脚本字典和菜单都走不通时用它。返回的 path 只在界面没变时有效。"
+          "两个要点：(1) 图标按钮的 title 是图标字体的乱码，真正的名字在 inferred_label "
+          "里——**按名字找元素要看 inferred_label**；(2) frame 是屏幕坐标，"
+          "有 frame 的元素就能用 ui_action 的 click 点，哪怕它 pressable 是 false。",
           {"app": _p("应用名"),
            "depth": _p("往下看几层，默认 6，最多 12", _INT)},
           "L0", "native", required=["app"]),
 
     _tool("ui_action",
-          "操作 ui_inspect 找到的某个界面元素：点击、聚焦或填值。"
+          "操作 ui_inspect 找到的某个界面元素。"
           "path 必须来自刚刚那次 ui_inspect——界面变过就要重新 inspect，"
-          "拿旧路径去点会点到别的东西上。",
+          "拿旧路径去点会点到别的东西上。\n"
+          "**点东西优先用 click，不要用 press。** press 走辅助功能接口，很多应用"
+          "（钉钉这类 Qt 应用是典型）只实现了读取、没实现 press，调用会返回成功但"
+          "界面纹丝不动——那是最难查的一种失败。click 发的是真实鼠标事件，"
+          "对静态文字、自绘控件一样有效，代价是会把目标应用切到前台、光标闪一下。\n"
+          "点完**一定要再 ui_inspect 一次确认界面真的变了**：点在正确的坐标上"
+          "不等于那里就有响应。",
           {"app": _p("应用名"),
            "path": _p("元素路径，来自 ui_inspect，如 0/3/1"),
-           "action": {"type": "string", "enum": ["press", "focus", "set_value"],
-                      "description": "press 点击，focus 聚焦，set_value 填入文本"},
+           "action": {"type": "string", "enum": ["click", "press", "focus", "set_value"],
+                      "description": "click 真实鼠标点击（默认首选，什么都能点）；"
+                                     "press 辅助功能点击（更快更安静，但很多应用是空操作）；"
+                                     "focus 聚焦；set_value 填入文本"},
            "value": _p("set_value 时要填的文本")},
           "L2", "native", required=["app", "path"],
           recover="界面操作没有通用撤法，多数应用里可以按 ⌘Z"),

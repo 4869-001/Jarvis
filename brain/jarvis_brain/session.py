@@ -164,6 +164,15 @@ User: "how's my Mac doing"
   use it whenever the app has a dictionary; (2) no dictionary → menu_list then
   menu_invoke, since a menu item is a real command; (3) neither → ui_inspect then
   ui_action. Never guess AppleScript command names — read the dictionary first.
+- On the ui_action channel, prefer action=click over action=press. press goes through
+  the accessibility API, which plenty of apps — DingTalk and other Qt apps especially —
+  only half implement: the call reports success and the interface does not move at all.
+  click posts a real mouse event and works on static text and custom-drawn controls too.
+  When looking for something by name, read inferred_label, not title: icon buttons carry
+  an icon-font glyph as their title, and the readable name sits in a sibling. After any
+  click, run ui_inspect again and compare — landing on the right coordinates is not the
+  same as the app having responded, and reporting an action you did not verify is worse
+  than reporting that it failed.
   The first time you drive a given app, macOS asks Frank to approve it once; if a tool
   says permission is missing, tell him plainly which switch to turn on rather than
   trying a different channel to sneak around it. If all three channels fail, say the

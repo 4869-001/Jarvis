@@ -9,7 +9,9 @@
 /// 否则超时的是 Brain、宿主这边还在跑，用户会看到"报了超时但事情又做了"。
 static const NSTimeInterval kScriptCeiling = 45.0;
 static const NSInteger kMaxDictionaryChars = 9000;
-static const NSInteger kMaxUINodes = 220;
+// 220 太小：钉钉侧边栏扫到一半就被截断，恰好把「日志」那一行的按钮吃掉了，
+// 表现是"这一项根本没有可点的东西"——而它其实存在。宁可多返回一些让模型自己筛。
+static const NSInteger kMaxUINodes = 600;
 
 @interface AutomationController ()
 /// AppleScript 不是线程安全的，且绝不能放主线程——被脚本化的 App 卡住时会把
@@ -711,6 +713,28 @@ static const NSInteger kMaxUINodes = 220;
             NSArray *names = (__bridge_transfer NSArray *)actions;
             if ([names containsObject:(__bridge NSString *)kAXPressAction]) node[@"pressable"] = @YES;
         }
+
+        // 屏幕坐标。Qt 之类的应用 AXPress 是空操作，只能靠真实鼠标事件点，
+        // 而那需要知道元素在屏幕上的位置——所以坐标是必须采的，不是锦上添花。
+        CGPoint origin = CGPointZero;
+        CGSize size = CGSizeZero;
+        CFTypeRef posValue = NULL, sizeValue = NULL;
+        BOOL hasFrame = NO;
+        if (AXUIElementCopyAttributeValue(element, kAXPositionAttribute, &posValue) == kAXErrorSuccess
+            && posValue) {
+            hasFrame = AXValueGetValue((AXValueRef)posValue, kAXValueCGPointType, &origin);
+            CFRelease(posValue);
+        }
+        if (hasFrame &&
+            AXUIElementCopyAttributeValue(element, kAXSizeAttribute, &sizeValue) == kAXErrorSuccess
+            && sizeValue) {
+            AXValueGetValue((AXValueRef)sizeValue, kAXValueCGSizeType, &size);
+            CFRelease(sizeValue);
+        }
+        if (hasFrame && size.width > 0 && size.height > 0) {
+            node[@"frame"] = @{@"x": @((NSInteger)origin.x), @"y": @((NSInteger)origin.y),
+                               @"w": @((NSInteger)size.width), @"h": @((NSInteger)size.height)};
+        }
         [nodes addObject:node];
     }
 
@@ -725,6 +749,66 @@ static const NSInteger kMaxUINodes = 220;
         [self walkElement:(__bridge AXUIElementRef)list[i]
                      path:childPath depth:depth + 1 maxDepth:maxDepth into:nodes];
     }
+}
+
+
+/// 图标字体按钮的标题是私用区码位（钉钉侧边栏的按钮标题就是 U+F281 这种），
+/// 对模型完全没有意义——它只能看见一个方框，于是转头去点旁边那行看得懂的文字，
+/// 而那行文字是 AXStaticText，点了没反应。日志里模型反复"点日志点不动"就是这么来的。
+///
+/// 真实结构是**图标按钮和文字标签是兄弟**：
+///     11/5/0/7/0/0  AXButton      title=U+F281
+///     11/5/0/7/0/1  AXStaticText  value=待办
+/// 所以给没有可读标题的按钮补一个 inferred_label：在同一个父节点下找最近的静态文字。
+- (void)inferLabelsFor:(NSMutableArray *)nodes {
+    NSMutableDictionary<NSString *, NSMutableArray *> *byParent = [NSMutableDictionary dictionary];
+    for (NSDictionary *node in nodes) {
+        NSString *path = node[@"path"];
+        NSRange slash = [path rangeOfString:@"/" options:NSBackwardsSearch];
+        NSString *parent = slash.location == NSNotFound ? @"" : [path substringToIndex:slash.location];
+        NSMutableArray *bucket = byParent[parent];
+        if (!bucket) { bucket = [NSMutableArray array]; byParent[parent] = bucket; }
+        [bucket addObject:node];
+    }
+
+    for (NSMutableDictionary *node in nodes) {
+        if (![node isKindOfClass:[NSMutableDictionary class]]) continue;
+        NSString *role = node[@"role"];
+        BOOL actionable = [node[@"pressable"] boolValue] || [role isEqualToString:@"AXButton"];
+        if (!actionable) continue;
+        NSString *readable = [self readableText:node[@"title"]] ?: [self readableText:node[@"label"]]
+                          ?: [self readableText:node[@"value"]];
+        if (readable.length) continue;              // 本来就有人话标题
+
+        NSString *path = node[@"path"];
+        NSRange slash = [path rangeOfString:@"/" options:NSBackwardsSearch];
+        NSString *parent = slash.location == NSNotFound ? @"" : [path substringToIndex:slash.location];
+        for (NSDictionary *sibling in byParent[parent]) {
+            if (sibling == node) continue;
+            if (![sibling[@"role"] isEqualToString:@"AXStaticText"]) continue;
+            NSString *text = [self readableText:sibling[@"value"]] ?: [self readableText:sibling[@"title"]];
+            // 按钮的标签一定是短的。不卡长度的话，标题栏那几个无标题按钮会把窗口
+            // 里那一大段静态文字认成自己的名字（实测钉钉窗口右上角三个按钮都被标成了
+            // 用户的个性签名），比没有标签更容易误导——模型会拿它当按钮的功能。
+            if (text.length && text.length <= 20) { node[@"inferred_label"] = text; break; }
+        }
+    }
+}
+
+/// 去掉私用区码位（U+E000–U+F8FF，图标字体都落在这里）后还剩下东西吗。
+- (NSString *)readableText:(NSString *)text {
+    if (![text isKindOfClass:[NSString class]] || !text.length) return nil;
+    NSMutableString *out = [NSMutableString string];
+    [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
+                             options:NSStringEnumerationByComposedCharacterSequences
+                          usingBlock:^(NSString *piece, NSRange r, NSRange e, BOOL *stop) {
+        unichar c = [piece characterAtIndex:0];
+        if (c >= 0xE000 && c <= 0xF8FF) return;     // 私用区：图标，不是文字
+        [out appendString:piece];
+    }];
+    NSString *trimmed = [out stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return trimmed.length ? trimmed : nil;
 }
 
 - (void)inspectUI:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
@@ -751,6 +835,7 @@ static const NSInteger kMaxUINodes = 220;
     [self walkElement:root path:@"" depth:0 maxDepth:depth into:nodes];
     NSString *windowTitle = [self stringAttribute:kAXTitleAttribute of:root];
     CFRelease(root);
+    [self inferLabelsFor:nodes];
 
     completion(@{@"app": app.localizedName ?: (name ?: @""),
                  @"window": windowTitle ?: @"",
@@ -793,6 +878,97 @@ static const NSInteger kMaxUINodes = 220;
     return current;
 }
 
+
+/// 在元素中心合成一次真实鼠标点击。
+///
+/// ⚠️ 存在的理由：**Qt 应用的 AXPress 是空操作**。钉钉（Qt 5，Frameworks 里是
+/// QtConcurrent/QtNetwork/QtOpenGL）的按钮报告自己 pressable，AXUIElementPerformAction
+/// 也返回 success，**但界面什么都不会发生**——实测点侧边栏的图标按钮，前后两次
+/// ui_inspect 的文本快照一个字都没变。原始日志里"添加按钮点了但没弹出菜单"是同一回事。
+/// 这类应用只认真实的鼠标事件。
+///
+/// 三条必须遵守的：
+///   1. **先把目标应用切到前台**。坐标点击打的是屏幕上那个点，目标窗口在别的窗口
+///      底下时，这一下会点进别人的窗口里——那是能造成真实损害的误操作。
+///   2. 激活之后**重新读一次坐标**。激活会改变窗口层叠甚至位置，用激活前的坐标点
+///      是在赌。
+///   3. 点完把鼠标**放回原处**。用户的光标毫无预兆地跳走非常吓人，而且他可能正
+///      悬停在别的东西上。
+- (NSString *)clickElement:(AXUIElementRef)element app:(NSRunningApplication *)app {
+    if (!app.active) {
+        [app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+        // 等窗口真的到前台。没有回调可等，只能轮询——比固定 sleep 快，也更可靠。
+        for (int i = 0; i < 40 && !app.active; i++) {
+            [NSThread sleepForTimeInterval:0.025];
+        }
+        [NSThread sleepForTimeInterval:0.15];      // 让窗口画完
+    }
+
+    CGPoint origin = CGPointZero;
+    CGSize size = CGSizeZero;
+    CFTypeRef posValue = NULL, sizeValue = NULL;
+    if (AXUIElementCopyAttributeValue(element, kAXPositionAttribute, &posValue) != kAXErrorSuccess
+        || !posValue) {
+        return @"这个元素没有屏幕坐标，没法用鼠标点它";
+    }
+    BOOL ok = AXValueGetValue((AXValueRef)posValue, kAXValueCGPointType, &origin);
+    CFRelease(posValue);
+    if (!ok) return @"读不到这个元素的位置";
+
+    if (AXUIElementCopyAttributeValue(element, kAXSizeAttribute, &sizeValue) != kAXErrorSuccess
+        || !sizeValue) {
+        return @"读不到这个元素的大小";
+    }
+    AXValueGetValue((AXValueRef)sizeValue, kAXValueCGSizeType, &size);
+    CFRelease(sizeValue);
+
+    if (size.width < 1 || size.height < 1) {
+        return @"这个元素的尺寸是 0，它可能是隐藏的或者还没布局好";
+    }
+
+    CGPoint center = CGPointMake(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
+
+    // 落在任何一块屏幕里吗。坐标是全局的，多显示器下可能是负数，所以要逐屏检查，
+    // 不能拿主屏的 frame 去卡。点到屏幕外面是静默无效的，必须提前拦下来。
+    BOOL onScreen = NO;
+    for (NSScreen *screen in [NSScreen screens]) {
+        NSRect f = screen.frame;
+        // AX 坐标是左上原点，NSScreen 是左下原点，换算一下再比。
+        CGFloat maxY = NSMaxY([NSScreen screens].firstObject.frame);
+        NSRect flipped = NSMakeRect(f.origin.x, maxY - NSMaxY(f), f.size.width, f.size.height);
+        if (NSPointInRect(NSMakePoint(center.x, center.y), flipped)) { onScreen = YES; break; }
+    }
+    if (!onScreen) {
+        return [NSString stringWithFormat:@"元素中心 (%.0f, %.0f) 不在任何一块屏幕上，"
+                @"窗口可能被移到屏幕外或最小化了", center.x, center.y];
+    }
+
+    CGEventRef probe = CGEventCreate(NULL);
+    CGPoint restore = probe ? CGEventGetLocation(probe) : CGPointZero;
+    if (probe) CFRelease(probe);
+
+    CGEventRef move = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, center, kCGMouseButtonLeft);
+    CGEventRef down = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, center, kCGMouseButtonLeft);
+    CGEventRef up   = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp, center, kCGMouseButtonLeft);
+    if (!move || !down || !up) {
+        if (move) CFRelease(move);
+        if (down) CFRelease(down);
+        if (up) CFRelease(up);
+        return @"创建鼠标事件失败";
+    }
+    CGEventPost(kCGHIDEventTap, move);
+    [NSThread sleepForTimeInterval:0.04];          // 让目标先收到 hover，很多控件靠它进入可点状态
+    CGEventPost(kCGHIDEventTap, down);
+    [NSThread sleepForTimeInterval:0.05];          // 太快的 down/up 会被当成误触丢掉
+    CGEventPost(kCGHIDEventTap, up);
+    CFRelease(move); CFRelease(down); CFRelease(up);
+
+    [NSThread sleepForTimeInterval:0.08];
+    CGEventRef back = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, restore, kCGMouseButtonLeft);
+    if (back) { CGEventPost(kCGHIDEventTap, back); CFRelease(back); }
+    return nil;
+}
+
 - (void)actUI:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
     if (!AXIsProcessTrusted()) {
         completion(nil, @"没有辅助功能权限：系统设置 → 隐私与安全性 → 辅助功能，把 JARVIS 打开");
@@ -824,7 +1000,16 @@ static const NSInteger kMaxUINodes = 220;
     NSString *title = [self stringAttribute:kAXTitleAttribute of:target] ?: @"";
     AXError status = kAXErrorSuccess;
 
-    if ([action isEqualToString:@"press"]) {
+    if ([action isEqualToString:@"click"]) {
+        NSString *clickError = [self clickElement:target app:app];
+        CFRelease(target);
+        if (clickError) { completion(nil, clickError); return; }
+        completion(@{@"ok": @YES, @"action": @"click", @"path": path,
+                     @"role": role, @"title": title,
+                     @"note": @"用真实鼠标事件点的。界面有没有真的变化要再 ui_inspect 一次确认——"
+                              @"点在正确的坐标上不等于那里就有响应。"}, nil);
+        return;
+    } else if ([action isEqualToString:@"press"]) {
         status = AXUIElementPerformAction(target, kAXPressAction);
     } else if ([action isEqualToString:@"focus"]) {
         status = AXUIElementSetAttributeValue(target, kAXFocusedAttribute, kCFBooleanTrue);
