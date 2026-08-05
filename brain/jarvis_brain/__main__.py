@@ -125,6 +125,41 @@ def _chat():
         print("\n")
 
 
+def _doctor_external(cfg):
+    """外部 CLI 代理装没装。**必须用补齐后的 PATH 去找**——
+    doctor 是在终端里跑的，终端 PATH 很宽，直接 which 会得出"装了"的结论，
+    而 Brain 在 launchd 下用的是另一套 PATH。用错 PATH 自检等于没查。"""
+    import shutil
+    from .mcp import launch_env
+    from . import external_agent
+
+    agents = external_agent.available(cfg)
+    if not agents:
+        print("外部代理      未启用")
+        return
+    path = launch_env((cfg.get("mcp") or {}).get("extra_path"))["PATH"]
+    rows = []
+    for name, spec in sorted(agents.items()):
+        command = spec.get("command") or name
+        found = shutil.which(command, path=path)
+        rows.append("%s %s" % (name, found or "\033[31m找不到 %s\033[0m" % command))
+    print("外部代理      %s" % "，".join(rows))
+
+
+def _doctor_mcp(cfg):
+    settings = cfg.get("mcp") or {}
+    servers = settings.get("servers") or {}
+    if not settings.get("enabled"):
+        print("MCP           已关闭")
+        return
+    if not servers:
+        print("MCP           已开启，但没有配置 server（config.json 的 mcp.servers）")
+        return
+    print("MCP           %d 个 server：%s" % (len(servers), "、".join(sorted(servers))))
+    print("              （真正的连接状态要在运行中的 Jarvis 里问 mcp_status，"
+          "这里只看配置）")
+
+
 def _doctor():
     cfg = config.load()
     print("配置文件      %s%s" % (
@@ -141,6 +176,8 @@ def _doctor():
         sum(1 for t in registry.TOOLS if t["executor"] == "native"),
         sum(1 for t in registry.TOOLS if t["executor"] == "python"),
     ))
+    _doctor_external(cfg)
+    _doctor_mcp(cfg)
 
     print("\n— 联网搜索自检 —")
     from .tools.web import web_search

@@ -457,6 +457,13 @@ body.workbench #agentBar .ag-todos { display: none; }
   margin-left: 14px; }
 .subagent.folded > .sub-body { display: none; }
 
+/* 委派给外部 CLI 代理的卡片：活干在 Jarvis 之外，边线用虚线标出来。
+   刻意不换配色——它仍然是 Jarvis 派出去的活，走同一套琥珀金（见球体的 cAmb/cGold）；
+   青紫多色状态灯那套方案 2026-08-01 已被明确否决，别在这里开新色。 */
+.subagent.external > .sub-body { border-left-style: dashed; }
+.subagent.external > .sub-head .mark { color: var(--amber); }
+.subagent.external.done > .sub-head .mark { color: var(--ok); }
+
 /* ── 工作台（宽屏两栏）─────────────────────────────── */
 #rail {
   display: none; flex-direction: column; flex: none; width: 268px;
@@ -1097,18 +1104,39 @@ function addSubagentCard(event) {
     activeToolStack = el('div', 'tool-stack');
     log.appendChild(activeToolStack);
   }
-  const card = el('div', 'subagent');
+  // external 非空 = 这不是子代理，是委派给本机另一个 CLI 代理（Claude Code / Codex）。
+  // 共用同一套卡片是有意的：形态一样（一件外包出去的事 + 一份报告），
+  // 只是标题、计时和进度策略不同。
+  const external = event.external || '';
+  const card = el('div', 'subagent' + (external ? ' external' : ''));
   const head = el('div', 'sub-head');
-  head.appendChild(el('span', 'mark', '◇'));
-  head.appendChild(el('span', 'what', '子代理 · ' + (event.description || '')));
-  head.appendChild(el('span', 'meta', event.scope === 'full' ? '完整权限' : '只读'));
+  head.appendChild(el('span', 'mark', external ? '⇱' : '◇'));
+  const title = external ? (EXTERNAL_LABELS[external] || external) : '子代理';
+  head.appendChild(el('span', 'what', title + ' · ' + (event.description || '')));
+  head.appendChild(el('span', 'meta',
+    external ? (PERMISSION_LABELS[event.permission] || '') : (event.scope === 'full' ? '完整权限' : '只读')));
   const body = el('div', 'sub-body');
   head.addEventListener('click', () => card.classList.toggle('folded'));
   card.append(head, body);
   activeToolStack.appendChild(card);
-  subagentNodes.set(event.id, { card, head, body });
+  subagentNodes.set(event.id, { card, head, body, external, started: Date.now() });
   endStreaming();
   scroll();
+}
+
+const EXTERNAL_LABELS = { claude: 'Claude Code', codex: 'Codex' };
+const PERMISSION_LABELS = { ask: '只读', accept_edits: '可改文件', bypass: '完整权限' };
+
+// 委派出去的任务可能跑好几分钟，期间面板必须一直有动静——不刷进度的话，
+// 用户看到的是一张十分钟不变的卡片，那和卡死没有区别。子代理不需要这个：
+// 它几秒就回来了，逐步刷只会让日志抖。
+function updateSubagentProgress(event) {
+  const node = subagentNodes.get(event.id);
+  if (!node || !node.external) return;
+  const seconds = Math.round((Date.now() - node.started) / 1000);
+  const label = event.label ? ' · ' + event.label : '';
+  node.head.querySelector('.meta').textContent =
+    (event.step || 0) + ' 步' + label + ' · ' + seconds + 's';
 }
 
 function finishSubagentCard(event) {
@@ -2389,7 +2417,8 @@ function handle(event) {
 
     case 'subagent_started':
       addSubagentCard(event);
-      timelineNote('子代理 · ' + (event.description || ''));
+      timelineNote((event.external ? (EXTERNAL_LABELS[event.external] || event.external)
+                                   : '子代理') + ' · ' + (event.description || ''));
       break;
 
     case 'subagent_done':
@@ -2397,7 +2426,19 @@ function handle(event) {
       break;
 
     case 'subagent_step':
-      break;      // 面板不逐步刷子代理，跑完给一行结论就够
+      // 子代理不逐步刷（几秒就回来，刷了只会抖）；委派出去的外部代理必须刷，
+      // 它能跑十分钟，一动不动的卡片和卡死没区别。
+      updateSubagentProgress(event);
+      break;
+
+    case 'mcp_tools':
+      // MCP server 是后台连的，可能对话到一半才就绪。给一行提示，
+      // 否则用户不知道工具是什么时候多出来的。
+      if (event.count) {
+        timelineNote('MCP 已接入 ' + (event.servers || []).join('、')
+                     + '（' + event.count + ' 个工具）');
+      }
+      break;
 
     case 'tool_confirm_request':
       addStep(event.id, '等待你确认');

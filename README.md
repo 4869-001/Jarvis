@@ -240,6 +240,111 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 实测：「统计 mean/median 的定义与使用」这个任务，子代理用 6 步（glob + 3 次 grep +
 2 次 fs_read）10 秒查完，主上下文只多了一段结论，文件内容一行都没进去。
 
+## 接第三方服务（MCP）
+
+Jarvis 能当 **MCP 客户端**，把第三方 MCP server 的工具接进来当自己的工具用。
+不给每个服务写一个原生工具，是因为「指挥任意应用」那一期已经给过教训：
+写死的工具只覆盖当初想到的那几个，而第三方服务比本机应用多一个数量级。
+
+配置形状和 Claude Code 的 `mcpServers` 一致，可以直接抄：
+
+```jsonc
+"mcp": {
+  "enabled": true,
+  "servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "~/Projects"],
+      "agent_only": false      // true = 只在 Agent 模式露出，别把平时的工具表撑大
+    }
+  },
+  "extra_path": [],            // 启动器装在冷门位置时补目录，见下
+  "startup_timeout": 60,       // npx 首次要下载包
+  "call_timeout": 60
+}
+```
+
+接进来的工具叫 `mcp__<server>__<tool>`，和 Claude Code 同名规则，用户一眼看得出来源。
+连接是**后台做的**：npx 第一次拉包能跑几十秒，同步连会把 Jarvis 卡在启动上；
+连上之后工具表当轮就更新，面板给一行「MCP 已接入 …」。
+问 `mcp_status` 可以看接了哪些、每个几个工具、报什么错。
+
+**风险等级从 server 自己声明的 annotations 推断**：`readOnlyHint` → L0 免确认，
+`destructiveHint` → L4，**其余一律 L2 起，也就是默认都要确认**。
+声明只能当参考不能当保证，所以只用它把只读工具放宽，不用它放行写操作。
+确认框上写的是「调用外部服务 <server>」而不是工具名——用户得能判断这一下会不会
+把东西发到公司群里去。
+
+只做 stdio 传输。SSE / Streamable HTTP 要处理会话恢复、重连和鉴权，
+而本机场景下 server 全是 npx/uvx 拉起来的子进程。
+
+## 委派给外部代理
+
+`agent_delegate` 把一整件事交给本机的 **Claude Code 或 Codex** 去做完。
+
+和子代理的分工，一句话：**子代理是「我自己换个上下文再想一遍」，
+外部代理是「这活我不干，交给更专业的那个」。** Jarvis 的大脑是 DeepSeek、
+工具集是按桌面管家配的；真要连续改一个代码仓库，那两位强得多，而且自带沙箱、
+diff 审阅和 git 集成。与其在 Jarvis 里重造，不如把任务原样交出去，
+Jarvis 只负责派活、盯进度、收结论。
+
+```jsonc
+"external_agents": {
+  "enabled": true,
+  "agents": {
+    "claude": {"enabled": true},
+    "codex":  {"enabled": false}   // 两个都开的话模型每次都要先纠结派给谁
+  }
+}
+```
+
+最终结果走各自的**稳定契约**（Claude 取 `--output-format stream-json` 的 `result`
+事件，Codex 取 `--output-last-message` 写出的文件）；`--json` 事件流只用来画进度，
+认不出的事件直接忽略——它的 schema 会随对方版本变，绝不让进度解析拖累最终结果。
+
+面板复用子代理那张卡片，虚线边框 + `⇱` 标出是外包的。但**进度是逐步刷的**
+（子代理不刷）：委派可能跑十分钟，一动不动的卡片和卡死没区别。
+
+### ⚠️ 权限档位决定它能不能真的干完
+
+外部代理的权限**跟随 Jarvis 当前档位**，不单独配——两套权限各配一份，
+早晚会出现「以为收紧了其实没有」的错位。但委派进程是非交互的（stdin 关着），
+外部代理弹出的权限请求**没有任何人能应答**，它只能跳过那步继续：
+
+| Jarvis 档位 | Claude Code | 实测结果 |
+|---|---|---|
+| `ask` | `manual` | 写文件和跑命令都被拒 → 基本只能侦察 |
+| `accept_edits` | `acceptEdits` | 改得动代码，**跑不了命令**，所以验证不了自己的改动 |
+| `bypass` | `bypassPermissions` | 才能真正把活干完 |
+
+（`dontAsk` 试过，比 `manual` 还严，Write 和 Bash 全拒，不是能用的中间档。）
+
+所以受限档位下返回值里会多一条 `permission_note`，明确要求模型把「某步因缺少
+授权没做」如实转达。**不因此把 `accept_edits` 偷偷提权到 bypass**——那是拿用户的
+权限设置开玩笑。要它整件事做完，把档位切到 bypass 再委派。
+
+### 递归是禁止的
+
+子代理拿不到 `agent_delegate`。它是另一种形式的递归，而且比 `subagent_run` 更贵：
+一个子代理再派一个 Claude Code 出去，那一轮能跑十几分钟，主会话却只当它在查东西。
+
+### ⚠️ launchd 的 PATH 里没有 npx / claude
+
+Brain 由 LaunchAgent 拉起，`launchctl getenv PATH` 是空的，
+子进程只有 `/usr/bin:/bin:/usr/sbin:/sbin`。本机实测四个启动器**一个都不在里面**：
+
+```
+npx -> /usr/local/bin        uvx    -> ~/.local/bin
+claude -> ~/.local-npm/bin   codex  -> ~/bin
+```
+
+`mcp.py` 的 `launch_env()` 内置一张常见目录表补 PATH，MCP server 和外部代理共用它。
+装在别处就写进 `mcp.extra_path`。不补的表现是每个 server 都以 FileNotFoundError
+起不来，而在终端里手动跑同一条命令完全正常——这种「终端能跑、App 里不行」最费时间。
+
+不去跑 `zsh -lic 'echo $PATH'` 抓登录 shell 的 PATH：那要多花几百毫秒，
+且用户的 rc 文件一旦有交互式内容会直接把 Brain 卡住。
+
 ### 工作台（⌥W）
 
 面板加宽成两栏：左栏常驻**待办 + 步骤时间线**，右栏还是对话。

@@ -121,6 +121,37 @@ DEFAULTS = {
         "max_tool_rounds": 8,
         "history_limit": 40,
     },
+    "mcp": {
+        # 接第三方 MCP server，把它们的工具当成 Jarvis 自己的工具用。
+        # servers 的形状和 Claude Code 的 mcpServers 一致，可以直接抄过来：
+        #   "servers": {
+        #     "filesystem": {
+        #       "command": "npx",
+        #       "args": ["-y", "@modelcontextprotocol/server-filesystem", "~/Projects"],
+        #       "agent_only": false        // true = 只在 Agent 模式露出，别把平时的工具表撑大
+        #     }
+        #   }
+        "enabled": True,
+        "servers": {},
+        # ⚠️ Brain 由 launchd 拉起，PATH 里没有 npx/uvx（本机实测它们在
+        # /usr/local/bin 和 ~/.local/bin）。mcp.py 内置了一张常见目录表，
+        # 装在别处时把目录写这里。外部 agent 共用这张表。
+        "extra_path": [],
+        # npx 第一次跑要下载包，给宽一点；连接是后台做的，不阻塞 Jarvis 启动。
+        "startup_timeout": 60,
+        "call_timeout": 60,
+    },
+    "external_agents": {
+        # 把整件事委派给本机另一个 CLI agent。权限档位跟随 Jarvis 当前档位，
+        # 不在这里单独配——两套权限各配一份早晚会错位。
+        "enabled": True,
+        "agents": {
+            "claude": {"enabled": True},
+            # codex 默认关着：两个都开的话模型每次都要先纠结派给谁，
+            # 而绝大多数情况下派给哪个都行。要用就把它打开。
+            "codex": {"enabled": False},
+        },
+    },
     "agent": {
         # Agent 模式：长程任务循环（面板 ⌥A 开关，这里是重启后的默认值）。
         # 开启后工具集扩展出编辑/检索/进程那一组，步数上限抬高，中间步骤不播报。

@@ -301,6 +301,33 @@ TOOLS = [
            "recoverable_only": _p("只看失败或中断的任务", _BOOL)},
           "L0", "python", tasking_impl.task_history),
 
+    # ------------------------------------------------ 委派给外部 agent（会话执行）
+    # 放在平时那份工具表里而不是 agent_only：用户说「让 Claude Code 去修这个 bug」
+    # 是从普通对话起手的，要求先 agent_enter 再委派会白花一轮。而且委派出去之后
+    # Jarvis 这边只是盯进度，本来也用不上 Agent 模式那组编辑检索工具。
+    _tool("agent_delegate",
+          "把一整件事交给本机另一个 CLI 编码代理（Claude Code / Codex）去做完，"
+          "它用自己的工具、自己的沙箱干活，只把结果报回来。"
+          "**需要连续改一个代码仓库、跑通构建、把测试修到绿这类工程任务时优先用它**——"
+          "它在这件事上比你强，也比你一步步 file_edit 快得多。"
+          "prompt 要写成一个完整独立的任务书：它看不到你们之前的对话，"
+          "也不能反过来问你，交代不清它就只能猜。"
+          "读一两个文件、改一处配置这种小事别用它，直接自己做更快。"
+          "任务可能跑几分钟，期间面板会显示它的进度。",
+          {"agent": _p("派给谁：claude（默认，工程任务最稳）或 codex"),
+           "description": _p("一句话说明这次委派要干什么，显示在面板上"),
+           "prompt": _p("给外部代理的完整任务说明：做什么、在哪做、做到什么程度算完成、"
+                        "要它回报哪些信息"),
+           "cwd": _p("在哪个目录里干活，默认当前工作目录")},
+          "L2", "session", None, required=["description", "prompt"],
+          recover="外部代理的改动不由 Jarvis 备份；它自己会报告改了哪些文件，"
+                  "在 git 仓库里可以 git checkout 回退"),
+
+    _tool("mcp_status",
+          "查看已接入的 MCP server 及它们提供的工具。用户问「你接了哪些外部服务」、"
+          "「MCP 连上了吗」，或某个 mcp__ 开头的工具报错要排查时使用。",
+          {}, "L0", "session", None),
+
     # ------------------------------------------------ 兜底
     _tool("shell_run", "执行一条 zsh 命令。仅在没有任何其他工具能完成时使用；默认被禁用。"
           "Agent 模式下可以用 run_in_background 起长跑进程（开发服务器、监听器），"
@@ -405,6 +432,34 @@ TOOLS = [
 
 BY_NAME = {tool["name"]: tool for tool in TOOLS}
 
+# ---------------------------------------------------------------- 动态工具
+#
+# MCP server 的工具在编译期不存在，只能等连上之后才知道有哪些，所以注册表分成
+# 静态的 TOOLS 和运行时灌进来的这一份。**整表替换而不是增量增删**：server 掉线、
+# 重连、发 tools/list_changed 都会让工具表整个变一遍，增量维护迟早对不上，
+# 而整表替换只有一个真相来源（MCPHub 当前的状态）。
+_DYNAMIC = []
+_DYNAMIC_BY_NAME = {}
+
+
+def set_dynamic(tools):
+    global _DYNAMIC, _DYNAMIC_BY_NAME
+    _DYNAMIC = list(tools or [])
+    _DYNAMIC_BY_NAME = {tool["name"]: tool for tool in _DYNAMIC}
+
+
+def all_tools():
+    return TOOLS + _DYNAMIC
+
+
+def lookup(name):
+    """按名字找工具。**所有查表都必须走它**，直接用 BY_NAME 会漏掉 MCP 那批。"""
+    return BY_NAME.get(name) or _DYNAMIC_BY_NAME.get(name)
+
+
+def is_mcp(name):
+    return name in _DYNAMIC_BY_NAME
+
 
 def needs_confirmation(tool):
     return _ORDER.get(tool["risk"], 9) >= _ORDER[CONFIRM_FROM]
@@ -419,7 +474,7 @@ def openai_schema(tools=None, agent_mode=False):
     """
     if tools is None:
         selected = []
-        for tool in TOOLS:
+        for tool in all_tools():
             if tool["name"] == "agent_enter":
                 if not agent_mode:
                     selected.append(tool)
@@ -481,11 +536,21 @@ def describe(name, arguments):
         "shell_list": "查看后台进程",
         "todo_write": "更新待办清单",
         "subagent_run": "派子代理：{description}",
+        "agent_delegate": "委派给外部代理：{description}",
+        "mcp_status": "查看 MCP 接入状态",
     }
     template = templates.get(name)
     if not template:
+        info = _mcp_info(name)
+        if info:
+            return "调用 %s 的 %s" % (info["server"], info["tool"])
         return name
     return template.format_map(_Blank(arguments))
+
+
+def _mcp_info(name):
+    tool = _DYNAMIC_BY_NAME.get(name)
+    return (tool or {}).get("mcp")
 
 
 class _Blank(dict):
@@ -518,13 +583,19 @@ _ACTIONS = {
     "grep": "检索内容", "glob": "查找文件", "shell_output": "读取后台输出",
     "shell_kill": "结束后台进程", "shell_list": "查看后台进程", "todo_write": "更新待办",
     "subagent_run": "派出子代理",
+    "agent_delegate": "委派给外部代理", "mcp_status": "查看 MCP 接入状态",
 }
 _TARGET_KEYS = ("path", "source", "command", "script", "name", "url", "text", "query", "id",
                 "contact", "pattern", "shell_id", "goal", "app", "description")
 
 
 def action_of(name):
-    return _ACTIONS.get(name, name)
+    if name in _ACTIONS:
+        return _ACTIONS[name]
+    info = _mcp_info(name)
+    # 确认框上必须写清楚这是**外部服务**在动手，不是本机操作——
+    # 只写工具名的话，用户没法判断这一下会不会把东西发到公司群里去。
+    return "调用外部服务 %s" % info["server"] if info else name
 
 
 def target_of(name, arguments):
@@ -532,6 +603,16 @@ def target_of(name, arguments):
     arguments = arguments or {}
     if name == "fs_move":
         return "%s  →  %s" % (arguments.get("source", "?"), arguments.get("destination", "?"))
+    info = _mcp_info(name)
+    if info:
+        # MCP 工具的参数名完全由对方定义，猜不到哪个是"主语"。
+        # 与其猜错，不如把工具名和实参一起摆出来让用户自己看。
+        head = info["tool"]
+        if arguments:
+            body = ", ".join("%s=%s" % (key, str(value)[:60])
+                             for key, value in list(arguments.items())[:4])
+            return "%s（%s）" % (head, body)
+        return head
     for key in _TARGET_KEYS:
         value = arguments.get(key)
         if value:

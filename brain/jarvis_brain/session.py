@@ -14,7 +14,9 @@ import uuid
 
 from . import models, tasking, tts
 from .agent import AgentRuntime, COMPACT_PROMPT, compaction_marker
+from . import external_agent as external_mod
 from . import subagent as subagent_mod
+from .mcp import MCPHub
 from .memory import STORE as MEMORY
 from .identity import STORE as IDENTITY
 from . import local_router
@@ -151,6 +153,21 @@ User: "how's my Mac doing"
 - File-changing operations already prompt the user for confirmation; don't ask again.
 - If the user declines a tool call, accept it. Don't retry it with different wording.
 - You may call several tools at once, but don't pad.
+- Tools named mcp__<server>__<tool> come from third-party MCP servers Frank has
+  connected. They reach services outside this Mac, so their side effects are real and
+  often not undoable — read the tool's own description before calling it, and never
+  call one speculatively to see what it does. mcp_status lists what is connected; use
+  it when he asks what you're plugged into, or when one of them fails and you need to
+  say whether the server is even up.
+- agent_delegate hands a whole job to Claude Code or Codex running locally. Reach for
+  it when the task is real software engineering — work through a repository, get a
+  build passing, fix failing tests — because those agents are better at that than you
+  and carry their own toolchain. Write the prompt as a self-contained brief: they
+  cannot see this conversation and cannot ask you anything back. It may run for
+  minutes; that's expected, not a hang. Don't use it for reading a file or a one-line
+  edit, and don't use it to dodge work you can do directly. When it returns, report
+  what it actually did — including any warning that it exited badly. Never present a
+  delegated result as your own work.
 
 == MEMORY ==
 You keep a long-term memory that survives restarts. What you already remember is
@@ -265,6 +282,12 @@ class SessionCoordinator:
         self._pending_lock = threading.Lock()
 
         self.agent = AgentRuntime(cfg, emit, log)
+
+        # MCP：后台连第三方 server，连上之后它们的工具就出现在工具表里。
+        # 后台连是必须的——npx 第一次拉包能跑几十秒，同步连会把 Jarvis 卡在启动上。
+        self.mcp = MCPHub(cfg, log)
+        self.mcp.start_async()
+        self._mcp_generation = -1
 
         self.tool_ctx = {
             "fs_roots": cfg["tools"]["fs_roots"],
@@ -753,7 +776,7 @@ class SessionCoordinator:
                 call_id = "local_" + uuid.uuid4().hex[:10]
                 self.emit({"type": "tool_started", "id": call_id, "name": tool_name,
                            "arguments": route["arguments"],
-                           "risk": (registry.BY_NAME.get(tool_name) or {}).get("risk", "L1"),
+                           "risk": (registry.lookup(tool_name) or {}).get("risk", "L1"),
                            "summary": registry.describe(tool_name, route["arguments"]),
                            "action": registry.action_of(tool_name),
                            "target": registry.target_of(tool_name, route["arguments"])})
@@ -842,6 +865,9 @@ class SessionCoordinator:
             # 这条只在请求里出现，不进 history。
             messages = ([self._system_message(memory_block, environment)] + history
                         + [self._format_reminder()])
+            # MCP server 是后台连的，可能在对话进行到一半才就绪（或掉线）。
+            # 每轮同步一次工具表，模型下一步就能用上新接进来的东西。
+            self._sync_mcp_tools()
             tools = (registry.openai_schema(agent_mode=agent_mode)
                      if round_index < max_rounds else None)
 
@@ -961,10 +987,29 @@ class SessionCoordinator:
 
     # ------------------------------------------------------------ 工具执行
 
+    def _sync_mcp_tools(self):
+        """把 MCPHub 当前的工具表灌进注册表。只在版本号变过时才真的重建。
+
+        版本号这层不是过早优化：tool_specs() 要遍历所有 server 的所有工具重新
+        造一遍 dict，而 _loop 每一轮都会调这里，Agent 模式下一轮就是几十次。
+        """
+        if not self.mcp.enabled:
+            return
+        if self.mcp.generation == self._mcp_generation:
+            return
+        self._mcp_generation = self.mcp.generation
+        specs = self.mcp.tool_specs()
+        registry.set_dynamic(specs)
+        if specs:
+            self.log("MCP 工具表已更新：%d 个" % len(specs))
+        self.emit({"type": "mcp_tools", "count": len(specs),
+                   "servers": [row["name"] for row in self.mcp.status()["servers"]
+                               if row.get("state") == "ready"]})
+
     def _execute(self, name, raw_arguments, call_id, generation, subagent=None):
         """subagent 非空表示这次调用属于某个子代理，事件带上它，面板好把
         这些卡片收进那个子代理的折叠区，而不是和主线的步骤混在一起。"""
-        tool = registry.BY_NAME.get(name)
+        tool = registry.lookup(name)
         if not tool:
             return {"error": "没有名为 %s 的工具" % name}
 
@@ -1016,7 +1061,12 @@ class SessionCoordinator:
                 if tool["executor"] == "native":
                     result = self._call_native(call_id, name, arguments)
                 elif tool["executor"] == "session":
-                    result = self._call_session_tool(name, arguments)
+                    result = self._call_session_tool(name, arguments, generation)
+                elif tool["executor"] == "mcp":
+                    result = self.mcp.call(
+                        name, arguments,
+                        cancelled=lambda: (self._cancel.is_set()
+                                           or generation != self._turn_generation))
                 else:
                     result = tool["fn"](arguments, self._call_ctx(call_id, generation))
             except PathDenied as exc:
@@ -1073,8 +1123,36 @@ class SessionCoordinator:
         })
         return ctx
 
-    def _call_session_tool(self, name, arguments):
-        """由会话自己执行的工具——它们改的是会话状态，不是外部世界。"""
+    def _call_session_tool(self, name, arguments, generation=None):
+        """由会话自己执行的工具——它们改的是会话状态，或者代表整个会话去调外部的东西。"""
+        if generation is None:
+            generation = self._turn_generation
+        if name == "agent_delegate":
+            agents = external_mod.available(self.cfg)
+            if not agents:
+                return {"error": "没有可用的外部代理。在 config.json 的 external_agents "
+                                 "里启用 claude 或 codex。"}
+            wanted = (arguments.get("agent") or "").strip().lower()
+            if wanted and wanted not in agents:
+                return {"error": "外部代理 %s 没有启用。当前可用：%s"
+                                 % (wanted, "、".join(sorted(agents)))}
+            if not wanted:
+                # 没指定就挑第一个可用的，claude 优先——它是默认打开的那个。
+                wanted = "claude" if "claude" in agents else sorted(agents)[0]
+            runner = external_mod.ExternalAgentRun(
+                self, wanted, agents[wanted],
+                arguments.get("description"), arguments.get("prompt"),
+                arguments.get("cwd"))
+            return runner.run(generation)
+        if name == "mcp_status":
+            if not self.mcp.enabled:
+                return {"enabled": False,
+                        "note": "MCP 已在 config.json 的 mcp.enabled 里关闭"}
+            status = self.mcp.status()
+            if not status["servers"]:
+                status["note"] = ("还没有配置任何 MCP server。在 config.json 的 "
+                                  "mcp.servers 里加，形状和 Claude Code 的 mcpServers 一样。")
+            return status
         if name == "subagent_run":
             # 子代理跑在当前这个 worker 线程里，同步返回——它的报告就是这次
             # 工具调用的结果，主循环本来就在等这个返回值。
@@ -1114,7 +1192,7 @@ class SessionCoordinator:
             "name": name, "arguments": arguments, "risk": risk, "summary": summary,
             "action": registry.action_of(name),
             "target": registry.target_of(name, arguments),
-            "recover": (registry.BY_NAME.get(name) or {}).get("recover") or "",
+            "recover": (registry.lookup(name) or {}).get("recover") or "",
             "permission_mode": self.agent.permission_mode,
         }, timeout=180)
         if value.get("cancelled"):

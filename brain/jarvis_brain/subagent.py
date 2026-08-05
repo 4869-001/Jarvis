@@ -34,7 +34,9 @@ EXPLORE_TOOLS = {
 }
 
 # 无论哪个档位都不给子代理的：会改变会话形态的，以及递归。
-NEVER = {"agent_enter", "subagent_run", "todo_write"}
+# agent_delegate 也在里面——它是另一种形式的递归，而且比 subagent_run 更贵：
+# 一个子代理再派一个 Claude Code 出去，那一轮能跑十几分钟，主会话却只当它在查东西。
+NEVER = {"agent_enter", "subagent_run", "todo_write", "agent_delegate"}
 
 REPORT_RULES = """You are a sub-agent. You were given one specific job by the main
 assistant, you do it with tools, and you return a report. The user never sees your
@@ -69,7 +71,10 @@ class SubAgent:
 
     def tool_schema(self):
         selected = []
-        for tool in registry.TOOLS:
+        # all_tools() 而不是 TOOLS：MCP 那批是运行时才有的。full 档的子代理
+        # 拿得到它们，explore 档拿不到——白名单里没写 mcp__ 前缀，
+        # 而外部服务的副作用我们判断不了，不该在无人盯着的上下文里放开。
+        for tool in registry.all_tools():
             name = tool["name"]
             if name in NEVER:
                 continue

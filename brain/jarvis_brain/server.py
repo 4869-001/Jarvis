@@ -131,6 +131,13 @@ class BrainServer:
 
     def shutdown(self):
         self.reminders.stop()
+        # MCP server 是我们拉起来的子进程。不收就会变成孤儿留在系统里，
+        # 而且它们多半是 node，一个就几十 MB——反复重启 Brain 会攒出一堆。
+        # 这和 Brain 自己那个 ppid 看门狗是同一类问题，只是这次我们在父亲这一侧。
+        try:
+            self.session.mcp.stop_all()
+        except Exception as exc:
+            self.log("关闭 MCP server 时出错：%s" % exc)
         try:
             if self.listener:
                 self.listener.close()

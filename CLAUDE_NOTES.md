@@ -249,3 +249,85 @@ App 通知"那种没有公共 API 的路子。走 Mail 自己的 AppleScript 就
   唤醒模式/日历/主动提醒。
 - `feature/wake-mode-settings`（我的独立分支，`69374a6`）：内容已经被 codex 拣
   进 develop 了，这条分支可以删了，留着也没事。
+
+## 2026-08-05 MCP 客户端 + 委派外部代理（分支 `feature/mcp-and-external-agents`）
+
+用户指出「本地应用控制还可以，但第三方软件的控制与协作没有实现」，
+选定两条路：**接 MCP 生态** + **调用其他 CLI agent**。基于 `feature/agent-mode` 开的分支
+（依赖它的权限档位、确认弹窗和子代理事件通道），那条分支仍未并 main。
+
+新增 `brain/jarvis_brain/mcp.py`、`brain/jarvis_brain/external_agent.py`，
+两个新工具 `agent_delegate` / `mcp_status`，注册表加了动态工具那一层。
+设计与配置写在 README「接第三方服务（MCP）」「委派给外部代理」两节。
+
+### ⚠️ launchd 的 PATH 里没有 npx / uvx / claude / codex（最该记住的一条）
+
+`launchctl getenv PATH` 是空的，Brain 子进程只有 `/usr/bin:/bin:/usr/sbin:/sbin`。
+在**运行中的 Brain 上实测**（`ps eww -p <pid>` 读它真实的环境变量）确认了这一点，
+而四个启动器全在 `/usr/local/bin`、`~/.local/bin`、`~/.local-npm/bin`、`~/bin`——
+裸 PATH 一个都找不到，补齐后四个全部解析成功。
+
+不补的表现是**每个 server 都 FileNotFoundError，而终端里手动跑完全正常**。
+`mcp.py` 的 `launch_env()` 管这件事，MCP 和外部代理共用。别改成去跑
+`zsh -lic 'echo $PATH'`：慢几百毫秒，且 rc 文件里有交互式内容会把 Brain 卡死。
+
+### MCP 侧几条踩过的
+
+- **stderr 必须**和 stdout 一样一直有人读。MCP server 普遍往 stderr 打日志，
+  管道缓冲（64KB）一满，子进程下次写 stderr 就永久阻塞——表现是「跑着跑着不响应了」，
+  而进程还活着、stdout 也没关。`external_agent.py` 里同理，两处都开了收集线程。
+- **连接必须后台做。** npx 首次拉包实测 8.8s（缓存后 1.3s），同步连会把 Jarvis 卡在
+  启动上，而且一个坏 server 就能拖垮全部。工具表在 `_loop` 每轮同步一次，
+  靠 `MCPHub.generation` 版本号挡住重复重建（Agent 模式一轮就是几十次）。
+- **动态工具整表替换，不做增量。** server 掉线、重连、发 `tools/list_changed`
+  都会让工具表整个变一遍，增量维护迟早对不上；整表替换只有一个真相来源。
+  代价是所有查表都必须走 `registry.lookup()` / `all_tools()`，
+  **直接用 `BY_NAME` / `TOOLS` 会漏掉 MCP 那批**——改这块时先 grep 一遍。
+- **`structuredContent` 常常就是 text 的副本。** 规范建议 server 把结构化结果同时
+  序列化进 text 块以兼容老客户端，实测 `server-filesystem` 的 structuredContent 就是
+  `{"content": <和 text 一字不差>}`。照单全收等于每次调用都把结果双倍塞进上下文，
+  所以加了 `_same_content()` 判重。只认「整体相同」和「单键 dict 值相同」两种确定情况，
+  多键 dict 照给——另外几个键是真信息。
+- **risk 从 annotations 推断，但只用来放宽不用来放行**：`readOnlyHint` → L0，
+  `destructiveHint` → L4，其余一律 L2 起。那是 server 自己的声明，只能当参考。
+  实测 `server-filesystem` 的 14 个工具分档正确（read_* 全 L0、write/edit L4）。
+- server → client 的请求（sampling/roots/elicitation）我们没声明 capability，
+  正常收不到；真收到必须回一条 JSON-RPC 错误**而不是沉默**——对方会一直等到超时。
+
+### 外部代理：权限档位决定它能不能真的干完（这条最容易误判）
+
+委派进程是非交互的（stdin 关掉），外部代理弹的权限请求**没有任何人能应答**，
+它只能跳过那步继续。实测 Claude Code 2.1.220：
+
+    manual      写文件和跑命令都被拒 → 基本只能侦察
+    acceptEdits 写文件放行、跑命令被拒 → 改得动代码，验证不了
+    dontAsk     比 manual 还严，Write 和 Bash 全拒（不是能用的中间档，试过了）
+    bypassPermissions  才能真正把活干完
+
+真机跑「建 hello.py 并运行」：14.1s、2 步（Write + Bash），文件真建出来了，
+但因为在 `accept_edits` 档，Bash 被拒，Claude 如实报告「命令需要授权所以没跑」。
+**那句话埋在报告正文里，主模型很容易读漏，把半成品当成功报给用户**——
+所以受限档位下会额外返回 `permission_note` 逼它正视。
+**别把 accept_edits 偷偷提权到 bypass**：那是拿用户的权限设置开玩笑，
+用户在顶栏调档就是在表达意图。
+
+### 面板
+
+外部代理复用子代理那张卡片（形态一样：一件外包出去的事 + 一份报告），
+虚线边框 + `⇱` 区分，**配色仍走琥珀金**——2026-08-01 已明确否决多色状态灯方案，
+别在这里开新色。唯一的行为差别：**外部代理逐步刷进度，子代理不刷**。
+委派能跑十分钟，一动不动的卡片和卡死没区别；子代理几秒就回来，刷了只会让日志抖。
+
+改完 `ui/conversation.html` 照例 `node --check` 过一遍（提取 script 块再 check）。
+注意别把提取脚本的 stdout 重定向到同一个文件——会把刚写进去的 JS 冲掉，
+报一个莫名其妙的 `Unexpected number`。
+
+### 验证方式
+
+`/tmp/mcp_probe.py`、`/tmp/ext_probe.py`、`/tmp/integration_probe.py`（临时文件，没进仓库）：
+分别验协议层、委派、以及走真的 `SessionCoordinator._execute` 的端到端接线。
+第三个最有价值——前两个是模块级的，测不出注册表查表和执行分发的接线错误。
+三个都刻意把 `os.environ["PATH"]` 设成 launchd 那四个目录再跑。
+
+端到端结果：工具表 51 个（静态 37 + MCP 14），L0 不弹确认、参数错误变成 error 不抛异常、
+子代理拿不到 `agent_delegate`、explore 档拿不到 MCP 工具——全过。
