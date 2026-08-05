@@ -121,6 +121,12 @@ DEFAULTS = {
         "max_tool_rounds": 8,
         "history_limit": 40,
     },
+    "weather": {
+        # 天气走本地路由（不经过大模型）。留空则按出口 IP 自动定位——
+        # 但**挂代理时会定到机房所在地**（实测定到了日本），所以建议明确填城市。
+        # 城市名中英文都行："西安" / "Xian" / "Shanghai"。
+        "location": "",
+    },
     "mcp": {
         # 接第三方 MCP server，把它们的工具当成 Jarvis 自己的工具用。
         # servers 的形状和 Claude Code 的 mcpServers 一致，可以直接抄过来：

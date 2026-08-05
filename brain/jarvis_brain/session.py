@@ -403,7 +403,7 @@ class SessionCoordinator:
         self._dispatch_turn(text, message_id)
 
     def _dispatch_turn(self, text, message_id):
-        local = local_router.route(text, IDENTITY)
+        local = local_router.route(text, IDENTITY, self.cfg)
         if local:
             self._start_local_turn(text, message_id, local)
             return
