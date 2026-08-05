@@ -891,6 +891,19 @@ static const NSInteger kMaxUINodes = 220;
 static NSString *const kChromeName = @"Google Chrome";
 static NSString *const kSafariName = @"Safari";
 
+/// JS 执行失败时的标记。Chrome 对抛异常的脚本返回 `missing value`，
+/// AppleScript 侧看起来和"成功但没有返回值"一模一样——**静默失败**。
+/// 实测踩过：browser_eval 里写了顶层 return（eval 不允许），结果报 ok=true、
+/// 值是空的，看着像页面上真没这个东西。所以一律用 try/catch 兜住再把错带回来。
+static NSString *const kJSErrorMarker = @"__JARVIS_JS_ERROR__";
+
+/// 把一段 JS **语句**包成带错误捕获的 IIFE。source 里可以直接写 return。
+static NSString *JarvisGuardJS(NSString *source) {
+    return [NSString stringWithFormat:
+            @"(function(){try{\n%@\n}catch(e){return '%@'+(e&&e.message?e.message:String(e));}})()",
+            source, kJSErrorMarker];
+}
+
 /// JS 源码用 base64 塞进 AppleScript。
 /// 直接内联的话要同时逃 AppleScript 的引号/反斜杠和 JS 自己的引号，
 /// 嵌套两层转义写出来没人看得懂，而且 JS 里但凡出现一个引号就会炸。
@@ -955,7 +968,24 @@ static NSString *JarvisWrapJS(NSString *source) {
                   @"  execute %@ javascript \"%@\"\n"
                   @"end tell", tabExpr, wrapped];
     }
-    [self runRawScript:script app:browser completion:completion];
+    [self runRawScript:script app:browser completion:^(NSString *value, NSString *error) {
+        if (error) { completion(nil, error); return; }
+        if ([value hasPrefix:kJSErrorMarker]) {
+            completion(nil, [NSString stringWithFormat:@"页面里的 JavaScript 报错：%@",
+                             [value substringFromIndex:kJSErrorMarker.length]]);
+            return;
+        }
+        // chrome:// 、扩展页面和 Chrome 网上应用店禁止注入脚本，Chrome 不报错，
+        // 只是什么都不返回。不认出来的话表现是"读到一个空白页面"，
+        // 模型会以为页面真的是空的然后开始瞎猜。
+        if (!value.length) {
+            completion(nil, @"这个标签页拿不到任何结果。多半是 chrome:// 设置页、扩展页面或"
+                            @"网上应用店——浏览器禁止在这些页面执行脚本。换一个普通网页的标签页，"
+                            @"用 browser_tabs 看有哪些。");
+            return;
+        }
+        completion(value, nil);
+    }];
 }
 
 /// 跑一段 AppleScript 拿字符串结果。和 runScript: 共用队列与错误翻译，
@@ -1129,16 +1159,21 @@ static NSString *JarvisWrapJS(NSString *source) {
 
     NSString *js = [NSString stringWithFormat:@
         "(function(){\n"
-        "function cssPath(el){\n"
-        "  if(el.id){var q='#'+CSS.escape(el.id);try{if(document.querySelectorAll(q).length===1)return q;}catch(e){}}\n"
+        // 选择器要能穿过 shadow DOM 边界，所以用 ' >>> ' 分段：
+        // 'settings-ui >>> settings-main >>> #foo' 表示逐层进 shadowRoot。
+        // 那是早年 CSS 的 deep 组合子、现在已经不是合法 CSS，拿来当分隔符不会和
+        // 真实选择器撞车。browser_act 按同样的规则解析。
+        "function cssPathIn(el,root){\n"
+        "  if(el.id){var q='#'+CSS.escape(el.id);try{if(root.querySelectorAll(q).length===1)return q;}catch(e){}}\n"
         "  var parts=[];\n"
-        "  while(el&&el.nodeType===1&&el!==document.body){\n"
-        "    var seg=el.tagName.toLowerCase(),par=el.parentElement;\n"
+        "  while(el&&el.nodeType===1&&el!==root){\n"
+        "    var par=el.parentElement,seg=el.tagName.toLowerCase();\n"
         "    if(par){var same=[].filter.call(par.children,function(c){return c.tagName===el.tagName;});\n"
-        "      if(same.length>1)seg+=':nth-of-type('+([].indexOf.call(same,el)+1)+')';}\n"
-        "    parts.unshift(seg);el=par;\n"
+        "      if(same.length>1)seg+=':nth-of-type('+([].indexOf.call(same,el)+1)+')';\n"
+        "      parts.unshift(seg);el=par;}\n"
+        "    else{parts.unshift(seg);break;}\n"
         "  }\n"
-        "  return 'body>'+parts.join('>');\n"
+        "  return parts.join('>');\n"
         "}\n"
         "function label(el){\n"
         "  var t=(el.getAttribute('aria-label')||el.getAttribute('title')||el.getAttribute('placeholder')||\n"
@@ -1151,25 +1186,40 @@ static NSString *JarvisWrapJS(NSString *source) {
         "  var s=getComputedStyle(el);\n"
         "  return s.visibility!=='hidden'&&s.display!=='none'&&s.opacity!=='0';\n"
         "}\n"
-        "var root=%@;\n"
         "var sel='a,button,input,textarea,select,[role=\"button\"],[role=\"link\"],[role=\"tab\"],[role=\"menuitem\"],[onclick],[contenteditable=\"true\"]';\n"
-        "var els=[].slice.call(root.querySelectorAll(sel)).filter(visible).slice(0,120);\n"
-        "var items=els.map(function(el){\n"
-        "  var o={tag:el.tagName.toLowerCase(),label:label(el),selector:cssPath(el)};\n"
-        "  if(el.type)o.type=el.type;\n"
-        "  if(el.disabled)o.disabled=true;\n"
-        "  return o;\n"
-        "});\n"
+        "var out=[],shadowHosts=0;\n"
+        "function collect(root,prefix,depth){\n"
+        "  if(depth>8||out.length>=150)return;\n"
+        "  try{\n"
+        "    [].slice.call(root.querySelectorAll(sel)).forEach(function(el){\n"
+        "      if(out.length>=150||!visible(el))return;\n"
+        "      var o={tag:el.tagName.toLowerCase(),label:label(el),\n"
+        "             selector:prefix+cssPathIn(el,root)};\n"
+        "      if(el.type)o.type=el.type;\n"
+        "      if(el.disabled)o.disabled=true;\n"
+        "      out.push(o);\n"
+        "    });\n"
+        "    [].slice.call(root.querySelectorAll('*')).forEach(function(el){\n"
+        "      if(el.shadowRoot){shadowHosts++;\n"
+        "        collect(el.shadowRoot,prefix+cssPathIn(el,root)+' >>> ',depth+1);}\n"
+        "    });\n"
+        "  }catch(e){}\n"
+        "}\n"
+        "var root=%@;\n"
+        "collect(root,'',0);\n"
         "var text=(root.innerText||'').replace(/\\n{3,}/g,'\\n\\n').trim();\n"
+        "var frames=document.querySelectorAll('iframe,frame').length;\n"
         "var truncated=text.length>%ld;\n"
         "return JSON.stringify({title:document.title,url:location.href,\n"
-        "  text:text.slice(0,%ld),truncated:truncated,elements:items});\n"
+        "  text:text.slice(0,%ld),truncated:truncated,elements:out,\n"
+        "  shadow_hosts:shadowHosts,iframes:frames});\n"
         "})()", filter.length ? [NSString stringWithFormat:@"(document.querySelector(%@)||document.body)",
                                  [self jsStringLiteral:filter]] : @"document.body",
         (long)maxChars, (long)maxChars];
 
     NSString *browser = [self resolveBrowser:arguments];
-    [self evaluateJS:js browser:browser arguments:arguments
+    [self evaluateJS:JarvisGuardJS([@"return " stringByAppendingString:js])
+             browser:browser arguments:arguments
           completion:^(NSString *value, NSString *error) {
         if (error) { completion(nil, error); return; }
         NSDictionary *parsed = [self parseJSON:value];
@@ -1179,6 +1229,28 @@ static NSString *JarvisWrapJS(NSString *source) {
         }
         NSMutableDictionary *out = [parsed mutableCopy];
         out[@"browser"] = browser;
+        // 读到一张"什么都没有"的页面时必须说明白，别让模型以为页面真是空的。
+        // 最常见的两个原因是内容在 shadow DOM（已经会穿了，但闭合的 shadow root
+        // 穿不了）或在跨域 iframe 里（拿不到）。silent empty 是最坏的失败方式：
+        // 它长得和成功一模一样。
+        NSString *text = out[@"text"];
+        NSArray *elements = out[@"elements"];
+        if (!text.length && !elements.count) {
+            NSMutableArray *reasons = [NSMutableArray array];
+            if ([out[@"iframes"] integerValue] > 0) {
+                [reasons addObject:[NSString stringWithFormat:@"页面里有 %@ 个 iframe，"
+                                    @"跨域的读不到", out[@"iframes"]]];
+            }
+            if ([out[@"shadow_hosts"] integerValue] > 0) {
+                [reasons addObject:@"有闭合的 shadow DOM"];
+            }
+            out[@"note"] = reasons.count
+                ? [NSString stringWithFormat:@"这一页没读到任何正文和可操作元素（%@）。"
+                   @"别当成页面是空的——换个标签页，或用 browser_eval 针对性地取。",
+                   [reasons componentsJoinedByString:@"；"]]
+                : @"这一页没读到任何正文和可操作元素。可能还在加载，也可能是浏览器的"
+                  @"内部页面（chrome://、扩展页）——那些禁止注入脚本。别当成页面是空的。";
+        }
         completion(out, nil);
     }];
 }
@@ -1196,7 +1268,18 @@ static NSString *JarvisWrapJS(NSString *source) {
     // 直接改 .value 它们收不到，表现是"字填进去了但提交时是空的"。
     NSString *js = [NSString stringWithFormat:@
         "(function(){\n"
-        "var el=document.querySelector(%@);\n"
+        // selector 可能带 ' >>> '，逐层进 shadowRoot。规则和 browser_read 生成时一致。
+        "function resolve(path){\n"
+        "  var segs=path.split('>>>').map(function(x){return x.trim();}).filter(Boolean);\n"
+        "  var ctx=document,el=null;\n"
+        "  for(var i=0;i<segs.length;i++){\n"
+        "    el=ctx.querySelector(segs[i]);\n"
+        "    if(!el)return null;\n"
+        "    if(i<segs.length-1){if(!el.shadowRoot)return null;ctx=el.shadowRoot;}\n"
+        "  }\n"
+        "  return el;\n"
+        "}\n"
+        "var el=resolve(%@);\n"
         "if(!el)return JSON.stringify({ok:false,error:'选择器没有匹配到元素，页面可能已经变了，重新 browser_read'});\n"
         "if(el.disabled)return JSON.stringify({ok:false,error:'这个元素是禁用状态'});\n"
         "el.scrollIntoView({block:'center'});\n"
@@ -1218,7 +1301,8 @@ static NSString *JarvisWrapJS(NSString *source) {
         [self jsStringLiteral:value]];
 
     NSString *browser = [self resolveBrowser:arguments];
-    [self evaluateJS:js browser:browser arguments:arguments
+    [self evaluateJS:JarvisGuardJS([@"return " stringByAppendingString:js])
+             browser:browser arguments:arguments
           completion:^(NSString *raw, NSString *error) {
         if (error) { completion(nil, error); return; }
         NSDictionary *parsed = [self parseJSON:raw];
@@ -1240,7 +1324,9 @@ static NSString *JarvisWrapJS(NSString *source) {
         return;
     }
     NSString *browser = [self resolveBrowser:arguments];
-    [self evaluateJS:source browser:browser arguments:arguments
+    // 用户/模型给的是语句，包成函数体——`eval` 不允许顶层 return，
+    // 而工具说明里让模型用 return，不包的话每次都是静默的 SyntaxError。
+    [self evaluateJS:JarvisGuardJS(source) browser:browser arguments:arguments
           completion:^(NSString *value, NSString *error) {
         if (error) { completion(nil, error); return; }
         completion(@{@"ok": @YES, @"browser": browser, @"result": value ?: @""}, nil);

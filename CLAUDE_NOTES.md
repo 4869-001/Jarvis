@@ -429,3 +429,29 @@ React/Vue 监听的是 input/change 事件，不是 `.value`。直接赋值的�
 「字填进去了但提交时是空的」。现在用 `Object.getOwnPropertyDescriptor` 拿到
 原生 setter 再调，然后手动 dispatch——只 dispatch 不用原生 setter 的话，
 React 的 value tracker 会认为值没变，事件照样被吃掉。
+
+### shadow DOM 必须穿，而且"读到空页面"必须说出来
+
+第一版 `browser_read` 只 `document.body.querySelectorAll`，在
+`chrome://settings` 上返回**标题正常、元素 0 个**——内容全在 shadow DOM 里。
+这是最坏的失败方式：**它长得和成功一模一样**，模型会得出"这页面上什么都没有"
+然后开始瞎猜。现代企业 Web 应用大量用 Web Components，不是只有 chrome:// 会这样。
+
+现在递归进 `el.shadowRoot`，选择器用 ` >>> ` 分段：
+
+    settings-ui >>> #toolbar >>> #menuButton
+
+`>>>` 是早年 CSS 的 deep 组合子、现在已经不是合法 CSS，拿来当分隔符不会和真实
+选择器撞车。`browser_act` 按同样规则逐层进 shadowRoot 解析。
+实测 `chrome://settings`：**568 个 shadow 宿主 → 读出 21 个可操作元素**，
+沿多层路径点击成功。闭合的 shadow root 仍然穿不了（拿不到 shadowRoot），
+跨域 iframe 也拿不到——所以正文和元素都为空时会带一条 `note` 说明原因，
+**绝不返回一个看起来权威的空结果**。
+
+### JS 出错在 AppleScript 侧是静默的
+
+Chrome 对抛异常的脚本返回 `missing value`，和"成功但没有返回值"长得一样。
+第一次踩：`browser_eval` 里写顶层 `return`（`eval` 不允许，是 SyntaxError），
+结果报 `ok=true`、值是 `—`，看着像页面上真没这个东西。
+现在所有 JS 都包一层 `try/catch` 并把错误用 `__JARVIS_JS_ERROR__` 前缀带回来，
+`browser_eval` 的源码额外包成函数体（这样文档里承诺的 `return` 才真的能用）。
