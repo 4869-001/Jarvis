@@ -116,6 +116,45 @@ static BOOL MainWindowBoundsForPID(pid_t pid, CGRect *outBounds) {
     return NO;
 }
 
+/// 自家挡在点击位置上的窗口，在这几下点击期间先收起来。
+///
+/// 起因：对话面板是**浮动层级**，网易云再怎么激活也压不到它上面，于是合成点击
+/// 打在面板上被它接走——症状正是「搜索能搜，就是不播放」。面板又能被用户拖到
+/// 屏幕任何位置，所以「把目标挪到左边」这种写死的躲法迟早再被挡。
+///
+/// 为什么不去查别人的窗口挡没挡：CGWindowList 给不出命中测试。实测程序坞和
+/// 截屏工具都把自己报成全屏窗口（0,0 1470×956），可它们是透明的、点击照穿——
+/// 单靠矩形包含判断，会得出"哪儿都被挡住了"的荒唐结论。自家窗口不一样：
+/// 是不是浮动、在不在那个位置、透不透事件，我们全都确切知道。
+///
+/// 试过 ignoresMouseEvents（不改层序、无视觉变化，理论上最干净）——**在这个面板上
+/// 没用**：2026-08-06 实测日志明明打了"放行鼠标事件"，右上角那一下仍被面板接走，
+/// 而同一次里没被盖住的两下标签点击照常生效。所以老老实实 orderOut，点完立刻放回。
+/// `[jarvisApp hide]` 也拦不住这件事——NSRunningApplication 的 hide 对浮动面板无效。
+static NSArray<NSWindow *> *HideOwnWindowsCovering(NSArray<NSValue *> *points) {
+    NSScreen *primary = NSScreen.screens.firstObject;
+    if (!primary || NSApp == nil) return @[];
+    CGFloat flipHeight = NSMaxY(primary.frame);
+
+    NSMutableArray<NSWindow *> *changed = [NSMutableArray array];
+    for (NSWindow *window in NSApp.windows) {
+        // 只有浮动层级的窗口才可能压在网易云上面。球体在桌面层，永远在下面。
+        if (!window.isVisible || window.level <= NSNormalWindowLevel) continue;
+        for (NSValue *value in points) {
+            CGPoint p = value.pointValue;
+            // CGEvent 用左上原点、y 向下；NSWindow.frame 用左下原点、y 向上。
+            if (!NSPointInRect(NSMakePoint(p.x, flipHeight - p.y), window.frame)) continue;
+            [changed addObject:window];
+            [window orderOut:nil];
+            NSLog(@"[jarvis] 面板(%.0f,%.0f %.0fx%.0f) 挡住点击位置 (%.0f,%.0f)，先收起",
+                  window.frame.origin.x, window.frame.origin.y,
+                  window.frame.size.width, window.frame.size.height, p.x, p.y);
+            break;
+        }
+    }
+    return changed;
+}
+
 static void MoveMouse(CGPoint point) {
     CGEventRef move = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, point, kCGMouseButtonLeft);
     CGEventPost(kCGHIDEventTap, move);
@@ -337,10 +376,8 @@ static void PostClick(CGPoint point) {
                 completion(r, nil);
                 return;
             }
-            [self clickNetEasePlayAllInWindow:bounds];
-            CGPoint playAll = CGPointMake(CGRectGetMaxX(bounds) - kNetEasePlayAllRightInset,
-                                          CGRectGetMinY(bounds) + kNetEasePlayAllY);
-            [self pollNetEasePlayback:4 query:query clicked:playAll
+            CGPoint clicked = [self clickNetEasePlayInWindow:bounds];
+            [self pollNetEasePlayback:4 query:query clicked:clicked
                               restore:restorePreviousApp completion:completion];
         }];
     };
@@ -361,19 +398,44 @@ static void PostClick(CGPoint point) {
     }];
 }
 
-/// 切到「单曲」标签页，再点右上角的「播放全部」。
+/// 切到「单曲」标签页，再点右上角「播放全部」，从第一首开始播。返回点下去的位置。
 ///
-/// 两次标签点击对应两种页头布局，都落在标签行内；点空了是无害的空白区。
+/// 标签点两下是因为页头有两种布局（搜索框下方是「猜你想搜」一行时标签在 140，
+/// 是查询大标题时在 152），两下都落在标签行内，点空无副作用。
 /// 中间要留时间给标签页切换渲染——网易云是 Electron，切页不是同步的，
 /// 不等就会点在还没出现的按钮位置上。
-- (void)clickNetEasePlayAllInWindow:(CGRect)bounds {
-    CGFloat x = CGRectGetMinX(bounds) + kNetEaseSongsTabX;
-    PostClick(CGPointMake(x, CGRectGetMinY(bounds) + kNetEaseSongsTabYA));
-    usleep(150000);
-    PostClick(CGPointMake(x, CGRectGetMinY(bounds) + kNetEaseSongsTabYB));
-    usleep(900000);
-    PostClick(CGPointMake(CGRectGetMaxX(bounds) - kNetEasePlayAllRightInset,
-                          CGRectGetMinY(bounds) + kNetEasePlayAllY));
+///
+/// 选「播放全部」而不是列表第一行，是因为它点空了最安全：万一标签没切过去，
+/// 这个位置在综合页上是空白，什么都不会发生；而第一行那个位置在综合页上是
+/// 歌手卡片，点下去会跳转，一跳转后面的坐标就全落进另一套布局了。
+- (CGPoint)clickNetEasePlayInWindow:(CGRect)bounds {
+    CGFloat tabX = CGRectGetMinX(bounds) + kNetEaseSongsTabX;
+    CGPoint tabA = CGPointMake(tabX, CGRectGetMinY(bounds) + kNetEaseSongsTabYA);
+    CGPoint tabB = CGPointMake(tabX, CGRectGetMinY(bounds) + kNetEaseSongsTabYB);
+    CGPoint play = CGPointMake(CGRectGetMaxX(bounds) - kNetEasePlayAllRightInset,
+                               CGRectGetMinY(bounds) + kNetEasePlayAllY);
+
+    NSArray<NSWindow *> *reopened = HideOwnWindowsCovering(@[
+        [NSValue valueWithPoint:NSPointFromCGPoint(tabA)],
+        [NSValue valueWithPoint:NSPointFromCGPoint(tabB)],
+        [NSValue valueWithPoint:NSPointFromCGPoint(play)],
+    ]);
+
+    // ⚠️ 必须让运行循环转一圈，改动才会真正到达窗口服务器。
+    // 用 usleep 阻塞主线程的话 CATransaction 一次都不提交——实测症状是
+    // 日志里明明打了"放行鼠标事件"，点击却照样被面板接走。
+    // 后面几处等待同理，一律走 CFRunLoopRunInMode，不用 usleep。
+    if (reopened.count) CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.2, false);
+
+    PostClick(tabA);
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.15, false);
+    PostClick(tabB);
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.9, false);
+    PostClick(play);
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.2, false);
+
+    for (NSWindow *window in reopened) [window orderFront:nil];
+    return play;
 }
 
 /// 播放到的是不是用户要的那首。
