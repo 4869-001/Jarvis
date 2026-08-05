@@ -282,6 +282,36 @@ TOOLS = [
            "tab": _p("标签号", _INT)},
           "L4", "native", required=["javascript"]),   # 等价任意代码，撤法未知
 
+    # ------------------------------------------------ 分栏表单（ObjC 执行，一次调用完成）
+    # 瓶颈从来不是工具（一次 0.02~0.06s），是模型轮次（一轮首字 1.4~12s）。
+    # 所以把「找栏目→滚动→点击→输入→读回验证」合成一次调用，
+    # 五轮往返变一轮，十几秒变零点几秒。
+    _tool("form_write",
+          "往分栏表单的某个栏目里写内容，**一次调用完成定位、滚动、点击、输入和读回验证**。"
+          "日报周报、审批单、工单、问卷这类「标题+内容」重复若干组的界面一律用它，"
+          "不要再用 ui_inspect→ui_action→ui_type 拆成三四步——那是三四轮模型往返。\n"
+          "返回里带 before/after 和 verified：**verified 为真才算写成了**。"
+          "为假时会告诉你文字落到哪儿去了，那种情况要如实报告并清理，不要重试同样的参数。",
+          {"app": _p("应用名，如 钉钉"),
+           "section": _p("栏目标题的**原文**，如「今日遇到的问题及解决方案」"),
+           "text": _p("要写进去的内容"),
+           "mode": {"type": "string", "enum": ["line_replace", "line_end", "append_line"],
+                    "description": "line_replace 替换该栏当前那一行（默认，如把「无」换成实际内容）；"
+                                   "line_end 接在该栏最后一行后面；"
+                                   "append_line 同 line_end"},
+           "sections": {"type": "array", "items": _STR,
+                        "description": "这一页所有栏目的标题。**填上更准**——"
+                                       "它用来判断某一栏在哪里结束，不填则自动猜"}},
+          "L2", "native", required=["app", "section", "text"],
+          recover="写错了可以再调一次用 line_replace 改回去；原内容在返回的 before 里"),
+
+    _tool("form_read",
+          "一次读回分栏表单里各栏目的当前内容。写之前先看现状、写之后核对都用它。",
+          {"app": _p("应用名"),
+           "sections": {"type": "array", "items": _STR,
+                        "description": "要读哪几个栏目的标题"}},
+          "L0", "native", required=["app", "sections"]),
+
     # ------------------------------------------------ 界面操作剧本（会话执行）
     # 这不是"给某个 App 写工具"——剧本是数据不是代码，任何应用的任何重复流程都能存，
     # 界面改版重录一遍就行，不用改 Jarvis。
@@ -723,6 +753,8 @@ def describe(name, arguments):
         "shell_list": "查看后台进程",
         "todo_write": "更新待办清单",
         "subagent_run": "派子代理：{description}",
+        "form_write": "写入「{section}」",
+        "form_read": "读取表单内容",
         "browser_tabs": "查看浏览器标签页",
         "browser_read": "读取网页内容",
         "browser_act": "操作网页元素 {selector}",
@@ -775,12 +807,13 @@ _ACTIONS = {
     "grep": "检索内容", "glob": "查找文件", "shell_output": "读取后台输出",
     "shell_kill": "结束后台进程", "shell_list": "查看后台进程", "todo_write": "更新待办",
     "subagent_run": "派出子代理",
+    "form_write": "写入表单栏目", "form_read": "读取表单内容",
     "browser_tabs": "查看浏览器标签页", "browser_read": "读取网页",
     "browser_act": "操作网页元素", "browser_open": "打开网页",
     "browser_eval": "在网页里执行脚本",
     "agent_delegate": "委派给外部代理", "mcp_status": "查看 MCP 接入状态",
 }
-_TARGET_KEYS = ("path", "source", "command", "script", "javascript", "selector", "name",
+_TARGET_KEYS = ("section", "path", "source", "command", "script", "javascript", "selector", "name",
                 "url", "text", "query", "id", "contact", "pattern", "shell_id", "goal",
                 "app", "description")
 

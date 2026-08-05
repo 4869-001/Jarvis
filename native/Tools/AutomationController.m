@@ -30,7 +30,8 @@ static const NSInteger kMaxUINodes = 600;
                                       @"menu_list", @"menu_invoke",
                                       @"ui_inspect", @"ui_action",
                                       @"browser_tabs", @"browser_read", @"browser_act",
-                                      @"browser_eval", @"browser_open", @"ui_type"]];
+                                      @"browser_eval", @"browser_open", @"ui_type",
+                                      @"form_read", @"form_write"]];
     });
     return [names containsObject:name];
 }
@@ -57,6 +58,8 @@ static const NSInteger kMaxUINodes = 600;
     else if ([name isEqualToString:@"browser_eval"])   { [self browserEval:arguments completion:completion]; }
     else if ([name isEqualToString:@"browser_open"])   { [self browserOpen:arguments completion:completion]; }
     else if ([name isEqualToString:@"ui_type"])        { [self typeText:arguments completion:completion]; }
+    else if ([name isEqualToString:@"form_read"])      { [self formRead:arguments completion:completion]; }
+    else if ([name isEqualToString:@"form_write"])     { [self formWrite:arguments completion:completion]; }
     else { completion(nil, [NSString stringWithFormat:@"自动化层不认识工具 %@", name]); }
 }
 
@@ -825,12 +828,7 @@ static CGEventSourceRef JarvisKeyboardSource(void) {
             return;
         }
         // 键盘事件发给**当前前台应用**，目标不在前台就是往别人窗口里乱敲字。
-        if (!app.active) {
-            [app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
-            for (int i = 0; i < 40 && !app.active; i++) [NSThread sleepForTimeInterval:0.025];
-            [NSThread sleepForTimeInterval:0.15];
-        }
-        if (!app.active) {
+        if (![self bringToFront:app]) {
             completion(nil, [NSString stringWithFormat:@"没能把「%@」切到前台，"
                              @"这时候敲字会敲进别的应用里，已放弃", appName]);
             return;
@@ -1122,6 +1120,33 @@ static CGEventSourceRef JarvisKeyboardSource(void) {
 
 /// 这个点落在某块屏幕里吗。坐标是全局的，多显示器下可能是负数，所以逐屏检查，
 /// 不能拿主屏的 frame 去卡。
+
+/// 这个应用现在在前台吗。
+///
+/// ⚠️ **不能用 `NSRunningApplication.active`**：那是靠 KVO 通知更新的属性，
+/// 而通知要 runloop 才会送达。`--tool` 这种一次性进程根本没有 runloop，
+/// 于是它永远停在实例创建时的值——表现是"明明已经激活了，仍然报没能切到前台"。
+/// 每次实时问 NSWorkspace 拿最新的前台进程，才是可靠的。
+- (BOOL)isFrontmost:(NSRunningApplication *)app {
+    NSRunningApplication *front = [NSWorkspace sharedWorkspace].frontmostApplication;
+    return front && front.processIdentifier == app.processIdentifier;
+}
+
+/// 把应用切到前台并等它真的到位。等待期间**必须转 runloop**，
+/// 否则激活相关的系统事件送不进来。
+- (BOOL)bringToFront:(NSRunningApplication *)app {
+    if ([self isFrontmost:app]) return YES;
+    [app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+    for (int i = 0; i < 60; i++) {
+        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.025]];
+        if ([self isFrontmost:app]) {
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
+            return YES;
+        }
+    }
+    return [self isFrontmost:app];
+}
+
 - (BOOL)isPointOnScreen:(CGPoint)point {
     CGFloat maxY = NSMaxY([NSScreen screens].firstObject.frame);
     for (NSScreen *screen in [NSScreen screens]) {
@@ -1134,14 +1159,7 @@ static CGEventSourceRef JarvisKeyboardSource(void) {
 }
 
 - (NSString *)clickElement:(AXUIElementRef)element app:(NSRunningApplication *)app {
-    if (!app.active) {
-        [app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
-        // 等窗口真的到前台。没有回调可等，只能轮询——比固定 sleep 快，也更可靠。
-        for (int i = 0; i < 40 && !app.active; i++) {
-            [NSThread sleepForTimeInterval:0.025];
-        }
-        [NSThread sleepForTimeInterval:0.15];      // 让窗口画完
-    }
+    [self bringToFront:app];
 
     CGPoint origin = CGPointZero;
     CGSize size = CGSizeZero;
@@ -1866,6 +1884,307 @@ static NSString *JarvisWrapJS(NSString *source) {
     NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
     id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
     return [parsed isKindOfClass:[NSDictionary class]] ? parsed : nil;
+}
+
+
+
+#pragma mark - 分栏表单：一次调用完成读 / 写 / 验证
+//
+//  为什么要有这一层：**瓶颈从来不是工具，是模型的轮次。**
+//  实测原生工具一次 0.02~0.06s，而模型一轮首字 1.4~12s。所以「找栏目 → 滚动 →
+//  点击 → 输入 → 读回验证」拆成五个工具调用意味着五轮模型往返，十几秒起步；
+//  合成一次调用之后总耗时由 AX 遍历决定，还是 0.1s 级别。
+//
+//  这不是把通用能力特化成某个 App 的工具——分栏表单（标题 + 它下面的内容，
+//  一页里重复若干组）是极其常见的形态：日报、周报、审批单、工单、问卷。
+//  ui_inspect/ui_action 仍然在，任何这层覆盖不到的界面照旧走它们。
+
+/// 一次遍历拿到整棵树（含 webview 内部）。分栏表单的内容常在 AXWebArea 里，
+/// 而 AXWebArea 是可读的——别因为"是 webview"就放弃。
+- (NSArray<NSDictionary *> *)flatTreeFor:(NSRunningApplication *)app {
+    AXUIElementRef root = [self rootElementForApp:app];
+    if (!root) return nil;
+    NSMutableArray *nodes = [NSMutableArray array];
+    [self walkElement:root path:@"" depth:0 maxDepth:14 into:nodes];
+    CFRelease(root);
+    [self inferLabelsFor:nodes];
+    return nodes;
+}
+
+static NSString *JarvisNodeText(NSDictionary *node) {
+    for (NSString *key in @[@"value", @"title", @"inferred_label", @"label"]) {
+        NSString *text = node[key];
+        if ([text isKindOfClass:[NSString class]] && text.length) return text;
+    }
+    return nil;
+}
+
+/// 找栏目标题。要求完全相等——分栏表单里标题是确定的字符串，
+/// 模糊匹配只会匹到正文里提到同样词的那一行。
+static NSDictionary *JarvisFindHeading(NSArray *nodes, NSString *section) {
+    for (NSDictionary *node in nodes) {
+        NSString *text = JarvisNodeText(node);
+        if ([text isEqualToString:section] && node[@"frame"]) return node;
+    }
+    return nil;
+}
+
+/// 取某个标题**下面、下一个标题之前**的所有内容行。
+/// 判据是纵坐标顺序，不是树结构——webview 里 DOM 层级和视觉顺序常常对不上，
+/// 而"在这个标题下面、在下个标题上面"永远符合人的理解。
+static NSArray<NSDictionary *> *JarvisSectionBody(NSArray *nodes, NSDictionary *heading,
+                                                  NSArray<NSString *> *allSections) {
+    NSInteger headY = [heading[@"frame"][@"y"] integerValue];
+    NSInteger headXForBound = [heading[@"frame"][@"x"] integerValue];
+    NSInteger nextY = NSIntegerMax;
+    // 边界只认调用方声明的栏目标题。
+    // 试过按"和标题左对齐且短"自动识别，**不行**：内容行和标题也是左对齐的
+    // （这个表单里都是 x=479），于是第一行内容就被当成了边界，每一栏都读成空的。
+    // 左对齐区分不了标题和内容，别再往这个方向修。
+    (void)headXForBound;
+    for (NSDictionary *node in nodes) {
+        NSString *text = JarvisNodeText(node);
+        if (!text || ![allSections containsObject:text]) continue;
+        NSInteger y = [node[@"frame"][@"y"] integerValue];
+        if (y > headY && y < nextY) nextY = y;
+    }
+    // ⚠️ 只按纵坐标切会把**侧边栏**的文字混进来——它和内容区处在同一 y 区间。
+    // 实测「今日工作完成内容与进度」读出来夹着"最近使用""写日志""帮助"。
+    // 内容行和它的标题是左对齐（或略缩进）的，所以再卡一道横向：
+    // 从标题左边缘往右一小段之内。右边远处的窗口装饰（"共 66 个字"）也一并排除。
+    NSInteger headX = [heading[@"frame"][@"x"] integerValue];
+    NSMutableArray *body = [NSMutableArray array];
+    for (NSDictionary *node in nodes) {
+        NSDictionary *frame = node[@"frame"];
+        if (!frame) continue;
+        NSInteger y = [frame[@"y"] integerValue];
+        if (y <= headY || y >= nextY) continue;
+        NSInteger x = [frame[@"x"] integerValue];
+        // 收得比较紧（+160 而不是 +320）：栏目内容和标题基本左对齐，
+        // 放宽到 +320 会把**固定在顶部的工具栏**放进来——栏目滚到屏幕上方之后，
+        // 工具栏就落在它的 y 区间里了，读出来一堆 toolbar-bold/toolbar-italic。
+        if (x < headX - 24 || x > headX + 160) continue;
+        NSString *text = JarvisNodeText(node);
+        if (!text.length) continue;
+        // 图标字体的私用区码位和工具栏图标名不是内容，别混进正文。
+        if ([text hasPrefix:@"toolbar-"]) continue;
+        unichar first = [text characterAtIndex:0];
+        if (first >= 0xE000 && first <= 0xF8FF && text.length <= 2) continue;
+        [body addObject:node];
+    }
+    [body sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [a[@"frame"][@"y"] compare:b[@"frame"][@"y"]];
+    }];
+    // 去重：富文本编辑器会给同一段文字挂好几个 AX 节点（渲染出来的 AXStaticText、
+    // contenteditable 的后备 AXTextArea、以及它的文本子节点），三者坐标重叠、
+    // 值相同。不去重的话读回来是同一句话出现两三遍，**看着像被写了两遍**——
+    // 用户会以为出了数据问题，实际文档里只有一份。
+    NSMutableArray *unique = [NSMutableArray array];
+    NSMutableSet *seen = [NSMutableSet set];
+    for (NSDictionary *node in body) {
+        NSString *text = JarvisNodeText(node);
+        if (!text.length || [seen containsObject:text]) continue;
+        [seen addObject:text];
+        [unique addObject:node];
+    }
+    // **最后一栏没有下一个标题作边界**，会一路吃到页尾（实测把图片/附件/备注/
+    // 发送到人/提交全吞进来）。截断是兜底，真正的保护是写入时点**第一行**而不是
+    // 最后一行——见 formWrite 里的说明。
+    if (unique.count > 12) {
+        return [unique subarrayWithRange:NSMakeRange(0, 12)];
+    }
+    return unique;
+}
+
+/// 猜这一页有哪些栏目标题。用户没传 sections 时用它，省掉"先问一次有哪些栏目"。
+/// 判据：短、独占一行、后面跟着别的文字。宁可多认几个——多认只影响分段边界，
+/// 少认会让某一栏的内容被并进上一栏。
+static NSArray<NSString *> *JarvisGuessSections(NSArray *nodes) {
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSDictionary *node in nodes) {
+        NSString *text = JarvisNodeText(node);
+        if (!text.length || text.length > 24) continue;
+        if (![node[@"role"] isEqualToString:@"AXStaticText"]) continue;
+        if (!node[@"frame"]) continue;
+        if (![out containsObject:text]) [out addObject:text];
+    }
+    return out;
+}
+
+- (void)formRead:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    if (!AXIsProcessTrusted()) {
+        completion(nil, @"没有辅助功能权限：系统设置 → 隐私与安全性 → 辅助功能，把 JARVIS 打开");
+        return;
+    }
+    NSRunningApplication *app = [self runningAppNamed:arguments[@"app"]];
+    if (!app) {
+        completion(nil, [NSString stringWithFormat:@"「%@」没在运行", arguments[@"app"] ?: @""]);
+        return;
+    }
+    NSArray *nodes = [self flatTreeFor:app];
+    if (!nodes) { completion(nil, @"拿不到界面元素"); return; }
+
+    NSArray *sections = [arguments[@"sections"] isKindOfClass:[NSArray class]]
+        ? arguments[@"sections"] : nil;
+    if (!sections.count) {
+        completion(nil, @"要传 sections（这一页有哪些栏目标题）。"
+                        @"不知道有哪些就先 ui_inspect 看一眼。");
+        return;
+    }
+
+    NSMutableDictionary *out = [NSMutableDictionary dictionary];
+    NSMutableArray *missing = [NSMutableArray array];
+    for (NSString *section in sections) {
+        NSDictionary *heading = JarvisFindHeading(nodes, section);
+        if (!heading) { [missing addObject:section]; continue; }
+        NSMutableArray *lines = [NSMutableArray array];
+        for (NSDictionary *node in JarvisSectionBody(nodes, heading, sections)) {
+            NSString *text = JarvisNodeText(node);
+            if (text.length) [lines addObject:text];
+        }
+        out[section] = lines;
+    }
+    NSMutableDictionary *result = [@{@"app": app.localizedName ?: @"",
+                                     @"sections": out} mutableCopy];
+    if (missing.count) result[@"not_found"] = missing;
+    // 标题滚出可视区时，按纵坐标切分不可靠（页面上固定不动的元素会落进它的区间）。
+    // 说出来，别让调用方拿一份可能掺了杂质的结果当准。
+    NSMutableArray *offscreen = [NSMutableArray array];
+    for (NSString *section in sections) {
+        NSDictionary *h = JarvisFindHeading(nodes, section);
+        if (h && [h[@"frame"][@"y"] integerValue] < 0) [offscreen addObject:section];
+    }
+    if (offscreen.count) {
+        result[@"offscreen"] = offscreen;
+        result[@"note"] = @"这些栏目滚出了可视区，读回的内容可能掺进页面上固定不动的元素。"
+                          @"要准确的话先把它滚进来（ui_action click 它的标题会自动滚动）。";
+    }
+    completion(result, nil);
+}
+
+- (void)formWrite:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    if (!AXIsProcessTrusted()) {
+        completion(nil, @"没有辅助功能权限：系统设置 → 隐私与安全性 → 辅助功能，把 JARVIS 打开");
+        return;
+    }
+    NSString *section = arguments[@"section"];
+    NSString *text = arguments[@"text"];
+    if (![section isKindOfClass:[NSString class]] || !section.length) {
+        completion(nil, @"缺少 section（要写进哪个栏目，填栏目标题的原文）");
+        return;
+    }
+    if (![text isKindOfClass:[NSString class]] || !text.length) {
+        completion(nil, @"缺少 text");
+        return;
+    }
+    NSRunningApplication *app = [self runningAppNamed:arguments[@"app"]];
+    if (!app) {
+        completion(nil, [NSString stringWithFormat:@"「%@」没在运行", arguments[@"app"] ?: @""]);
+        return;
+    }
+    NSString *mode = [arguments[@"mode"] isKindOfClass:[NSString class]]
+        ? arguments[@"mode"] : @"line_replace";
+    NSDate *started = [NSDate date];
+
+    NSArray *nodes = [self flatTreeFor:app];
+    if (!nodes) { completion(nil, @"拿不到界面元素"); return; }
+    NSArray *sections = [arguments[@"sections"] isKindOfClass:[NSArray class]]
+        ? arguments[@"sections"] : JarvisGuessSections(nodes);
+
+    NSDictionary *heading = JarvisFindHeading(nodes, section);
+    if (!heading) {
+        NSMutableArray *seen = [NSMutableArray array];
+        for (NSDictionary *node in nodes) {
+            NSString *t = JarvisNodeText(node);
+            if (t.length && t.length <= 24 && ![seen containsObject:t] && seen.count < 30) {
+                [seen addObject:t];
+            }
+        }
+        completion(nil, [NSString stringWithFormat:
+            @"这一页没有叫「%@」的栏目。看到的有：%@", section,
+            [seen componentsJoinedByString:@"、"]]);
+        return;
+    }
+
+    NSArray *body = JarvisSectionBody(nodes, heading, sections);
+    NSMutableArray *before = [NSMutableArray array];
+    for (NSDictionary *node in body) {
+        NSString *t = JarvisNodeText(node);
+        if (t.length) [before addObject:t];
+    }
+
+    // ⚠️ 点这一栏的**第一行**，不是最后一行。
+    // 最后一行看着更合理（"接着往后写"），但**最后一个栏目没有下一个标题作边界**，
+    // 它的 body 会一路延伸到页尾——那样 lastObject 就是「提 交」按钮，
+    // 一点就把日报发出去了，而且不可撤销。第一行永远在这一栏内，没有这个风险。
+    // 代价是 line_end 追加时接在第一行末尾而不是整栏末尾，可以接受。
+    NSDictionary *target = body.firstObject ?: heading;
+    AXUIElementRef root = [self rootElementForApp:app];
+    if (!root) { completion(nil, @"拿不到界面元素"); return; }
+    NSString *failure = nil;
+    AXUIElementRef element = [self elementAtPath:target[@"path"] from:root error:&failure];
+    CFRelease(root);
+    if (!element) { completion(nil, failure ?: @"定位不到这一栏的内容行"); return; }
+
+    NSString *clickError = [self clickElement:element app:app];
+    CFRelease(element);
+    if (clickError) { completion(nil, [NSString stringWithFormat:@"点不进「%@」：%@",
+                                       section, clickError]); return; }
+    [NSThread sleepForTimeInterval:0.15];
+
+    NSDictionary *typed = nil;
+    __block NSString *typeError = nil;
+    __block NSDictionary *typeResult = nil;
+    [self typeText:@{@"app": app.localizedName ?: @"", @"text": text, @"mode": mode}
+        completion:^(NSDictionary *r, NSString *e) { typeResult = r; typeError = e; }];
+    typed = typeResult;
+    if (typeError) { completion(nil, [NSString stringWithFormat:@"写入失败：%@", typeError]); return; }
+    [NSThread sleepForTimeInterval:0.35];
+
+    // 读回验证。**这一步不能省**：写进去了不等于写对了地方，而分栏表单最容易犯的错
+    // 就是内容落到隔壁栏。省掉它就只能报告"我不确定"，那等于没做完。
+    NSArray *after = [self flatTreeFor:app];
+    NSDictionary *headingAfter = JarvisFindHeading(after, section);
+    NSMutableArray *now = [NSMutableArray array];
+    if (headingAfter) {
+        for (NSDictionary *node in JarvisSectionBody(after, headingAfter, sections)) {
+            NSString *t = JarvisNodeText(node);
+            if (t.length) [now addObject:t];
+        }
+    }
+    BOOL landed = NO;
+    for (NSString *line in now) {
+        if ([line rangeOfString:text].location != NSNotFound) { landed = YES; break; }
+    }
+
+    NSMutableDictionary *result = [@{@"ok": @(landed),
+                                     @"section": section,
+                                     @"mode": mode,
+                                     @"before": before,
+                                     @"after": now,
+                                     @"verified": @(landed),
+                                     @"ms": @((NSInteger)([[NSDate date] timeIntervalSinceDate:started] * 1000))}
+                                   mutableCopy];
+    if (!landed) {
+        // 没落在目标栏就要找出它落哪儿了——只说"失败"会让人以为什么都没发生，
+        // 而实际上字很可能写进了别的栏目，那是需要人去清理的。
+        NSMutableArray *elsewhere = [NSMutableArray array];
+        for (NSDictionary *node in after) {
+            NSString *t = JarvisNodeText(node);
+            if (t.length && [t rangeOfString:text].location != NSNotFound) {
+                [elsewhere addObject:t];
+            }
+        }
+        result[@"landed_elsewhere"] = elsewhere;
+        result[@"note"] = elsewhere.count
+            ? @"⚠️ 文字没有出现在目标栏，但在页面别处找到了——它写进了错误的位置，需要清理。"
+            : @"文字没有出现在目标栏，页面上也找不到它。可能焦点没进编辑区。";
+    }
+    completion(result, nil);
+}
+
+- (void)formRead2Unused:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    completion(nil, nil);
 }
 
 
