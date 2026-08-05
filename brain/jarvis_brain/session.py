@@ -20,6 +20,7 @@ from .mcp import MCPHub
 from .memory import STORE as MEMORY
 from .identity import STORE as IDENTITY
 from . import local_router
+from . import recipes
 from .providers.deepseek import Cancelled, DeepSeekProvider, ProviderError
 from .tools import registry
 from .tools import shell as shell_impl
@@ -164,6 +165,19 @@ User: "how's my Mac doing"
   use it whenever the app has a dictionary; (2) no dictionary → menu_list then
   menu_invoke, since a menu item is a real command; (3) neither → ui_inspect then
   ui_action. Never guess AppleScript command names — read the dictionary first.
+- When an app is installed on this Mac, drive the installed app. Do not substitute its
+  web version — Frank asked for this explicitly. Browser tools are for looking things up
+  on the web: research, services that only exist as a website, pages that need a login to
+  read. Never answer "I'll use the web version instead" for DingTalk, WeChat, or anything
+  else with a local client; if the local channel is genuinely stuck, say so and stop.
+- Before working through a multi-step interface task, call ui_recipe_list. A saved recipe
+  replays in seconds what costs twenty exploratory steps, and it has already been verified
+  once. After you succeed at a multi-step interface task by hand, save it with
+  ui_recipe_save so the next request is a replay — locate elements by their visible text,
+  never by index paths, and leave irreversible steps like submitting or sending out of the
+  recipe entirely.
+- To fill a text field, click it and then use ui_type. set_value goes through the
+  accessibility API and silently does nothing on many apps.
 - On the ui_action channel, prefer action=click over action=press. press goes through
   the accessibility API, which plenty of apps — DingTalk and other Qt apps especially —
   only half implement: the call reports success and the interface does not move at all.
@@ -269,6 +283,40 @@ class BilingualSplitter:
         if not rest:
             return []
         return [("zh" if self.switched else "en", rest)]
+
+
+class _RecipeHost:
+    """剧本执行器和会话之间的那层薄适配。
+
+    剧本本身不认识 native 工具、确认弹窗、call_id 这些东西——它只需要"看界面、
+    点一下、敲字、开应用"四件事。把它们收在这里，剧本模块就能单独测（不用起一个
+    真的 SessionCoordinator），会话那边也不用为剧本开特例。
+    """
+
+    def __init__(self, session, generation):
+        self.session = session
+        self.generation = generation
+        self._sequence = 0
+
+    def _call(self, name, arguments):
+        self._sequence += 1
+        call_id = "recipe_%d_%d" % (self.generation, self._sequence)
+        # 走 _call_native 而不是 _execute：剧本的每一步不该各自弹一次确认框，
+        # 用户确认的是"跑这个剧本"这一件事（ui_recipe_run 本身是 L2）。
+        # 每步再问一遍，一个二十步的剧本要点二十次头，人只会直接去开 bypass。
+        return self.session._call_native(call_id, name, arguments)
+
+    def inspect(self, app):
+        return self._call("ui_inspect", {"app": app, "depth": 12})
+
+    def act(self, app, path, action):
+        return self._call("ui_action", {"app": app, "path": path, "action": action})
+
+    def type_text(self, app, text):
+        return self._call("ui_type", {"app": app, "text": text})
+
+    def open_app(self, app):
+        return self._call("app_open", {"name": app})
 
 
 class SessionCoordinator:
@@ -1231,6 +1279,8 @@ class SessionCoordinator:
                 status["note"] = ("还没有配置任何 MCP server。在 config.json 的 "
                                   "mcp.servers 里加，形状和 Claude Code 的 mcpServers 一样。")
             return status
+        if name in ("ui_recipe_list", "ui_recipe_run", "ui_recipe_save", "ui_recipe_delete"):
+            return self._call_recipe_tool(name, arguments, generation)
         if name == "subagent_run":
             # 子代理跑在当前这个 worker 线程里，同步返回——它的报告就是这次
             # 工具调用的结果，主循环本来就在等这个返回值。
@@ -1252,6 +1302,39 @@ class SessionCoordinator:
                              "已进入 Agent 模式：编辑、检索、后台进程和待办清单现在可用，"
                              "继续把这件事做完，别停下来问。")}
         return {"error": "未知的会话工具：%s" % name}
+
+    def _call_recipe_tool(self, name, arguments, generation):
+        """界面操作剧本。执行器跑在 Brain 里，但每一步的界面动作都转发给宿主——
+        TCC 按 bundle 授权，AX 调用必须由 Jarvis.app 自己发出去。"""
+        try:
+            if name == "ui_recipe_list":
+                found = recipes.listing()
+                if not found:
+                    return {"recipes": [],
+                            "note": "还没有存过剧本。靠 ui_inspect/ui_action 成功做完一件"
+                                    "多步的事之后，用 ui_recipe_save 把它存下来。"}
+                return {"count": len(found), "recipes": found}
+
+            if name == "ui_recipe_delete":
+                return {"ok": True, "deleted": recipes.delete(arguments.get("name"))}
+
+            if name == "ui_recipe_save":
+                recipe = {key: arguments[key] for key in
+                          ("name", "title", "description", "app", "stops_at", "params", "steps")
+                          if arguments.get(key) is not None}
+                path = recipes.save(recipe)
+                return {"ok": True, "saved": path, "name": recipe["name"],
+                        "steps": len(recipe.get("steps") or []),
+                        "note": "存好了。以后同样的请求先 ui_recipe_list 找到它再 ui_recipe_run，"
+                                "别再从头摸索一遍。"}
+
+            recipe = recipes.load(arguments.get("name"))
+            run = recipes.RecipeRun(recipe, arguments.get("params") or {},
+                                    _RecipeHost(self, generation),
+                                    emit=self.emit, log=self.log)
+            return run.run()
+        except recipes.RecipeError as exc:
+            return {"error": str(exc)}
 
     def _finish_task(self, generation, status):
         task = self._task_runs.pop(generation, None)

@@ -30,7 +30,7 @@ static const NSInteger kMaxUINodes = 600;
                                       @"menu_list", @"menu_invoke",
                                       @"ui_inspect", @"ui_action",
                                       @"browser_tabs", @"browser_read", @"browser_act",
-                                      @"browser_eval", @"browser_open"]];
+                                      @"browser_eval", @"browser_open", @"ui_type"]];
     });
     return [names containsObject:name];
 }
@@ -56,6 +56,7 @@ static const NSInteger kMaxUINodes = 600;
     else if ([name isEqualToString:@"browser_act"])    { [self browserAct:arguments completion:completion]; }
     else if ([name isEqualToString:@"browser_eval"])   { [self browserEval:arguments completion:completion]; }
     else if ([name isEqualToString:@"browser_open"])   { [self browserOpen:arguments completion:completion]; }
+    else if ([name isEqualToString:@"ui_type"])        { [self typeText:arguments completion:completion]; }
     else { completion(nil, [NSString stringWithFormat:@"自动化层不认识工具 %@", name]); }
 }
 
@@ -760,6 +761,82 @@ static const NSInteger kMaxUINodes = 600;
 ///     11/5/0/7/0/0  AXButton      title=U+F281
 ///     11/5/0/7/0/1  AXStaticText  value=待办
 /// 所以给没有可读标题的按钮补一个 inferred_label：在同一个父节点下找最近的静态文字。
+
+/// 往当前焦点敲一段文字。
+///
+/// ⚠️ 为什么不用 set_value：和 AXPress 是同一类问题。Qt 应用对 AX 的写入支持同样
+/// 残缺——钉钉日志页那几个输入框连 **读** 都读不回来（AXValue 是空的，内容却明明
+/// 显示在界面上），写进去更没有保证。键盘事件是所有应用都必须处理的东西。
+///
+/// 用 CGEventKeyboardSetUnicodeString 直接送 Unicode，**不做键位映射**：
+/// 键位映射要依赖当前输入法和键盘布局，中文根本没法映射，而这个接口是绕过
+/// 键盘布局直接投递字符的。
+///
+/// 分块送：一次投递的字符数太多会被丢，实测按 20 个字符一批稳定。
+- (void)typeText:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    if (!AXIsProcessTrusted()) {
+        completion(nil, @"没有辅助功能权限：系统设置 → 隐私与安全性 → 辅助功能，把 JARVIS 打开");
+        return;
+    }
+    NSString *text = arguments[@"text"];
+    if (![text isKindOfClass:[NSString class]] || !text.length) {
+        completion(nil, @"缺少 text");
+        return;
+    }
+    NSString *appName = arguments[@"app"];
+    if ([appName isKindOfClass:[NSString class]] && appName.length) {
+        NSRunningApplication *app = [self runningAppNamed:appName];
+        if (!app) {
+            completion(nil, [NSString stringWithFormat:@"「%@」没在运行。", appName]);
+            return;
+        }
+        // 键盘事件发给**当前前台应用**，目标不在前台就是往别人窗口里乱敲字。
+        if (!app.active) {
+            [app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+            for (int i = 0; i < 40 && !app.active; i++) [NSThread sleepForTimeInterval:0.025];
+            [NSThread sleepForTimeInterval:0.15];
+        }
+        if (!app.active) {
+            completion(nil, [NSString stringWithFormat:@"没能把「%@」切到前台，"
+                             @"这时候敲字会敲进别的应用里，已放弃", appName]);
+            return;
+        }
+    }
+
+    NSUInteger chunk = 20;
+    for (NSUInteger offset = 0; offset < text.length; offset += chunk) {
+        NSRange range = NSMakeRange(offset, MIN(chunk, text.length - offset));
+        // 别在代理对（emoji）中间切开，否则送出去的是半个字符。
+        range = [text rangeOfComposedCharacterSequencesForRange:range];
+        NSString *piece = [text substringWithRange:range];
+
+        NSUInteger length = piece.length;
+        unichar *buffer = malloc(sizeof(unichar) * length);
+        if (!buffer) { completion(nil, @"内存不足"); return; }
+        [piece getCharacters:buffer range:NSMakeRange(0, length)];
+
+        CGEventRef down = CGEventCreateKeyboardEvent(NULL, 0, true);
+        CGEventRef up = CGEventCreateKeyboardEvent(NULL, 0, false);
+        if (down) {
+            CGEventKeyboardSetUnicodeString(down, length, buffer);
+            CGEventPost(kCGHIDEventTap, down);
+            CFRelease(down);
+        }
+        if (up) {
+            CGEventKeyboardSetUnicodeString(up, length, buffer);
+            CGEventPost(kCGHIDEventTap, up);
+            CFRelease(up);
+        }
+        free(buffer);
+        [NSThread sleepForTimeInterval:0.03];
+        offset = NSMaxRange(range) - chunk;      // 对齐到实际切出去的位置
+    }
+
+    completion(@{@"ok": @YES, @"typed": @(text.length),
+                 @"note": @"文字已敲给当前焦点。**一定要再 ui_inspect 确认它进了正确的输入框**——"
+                          @"焦点不在预期的地方时，这些字会落到别处。"}, nil);
+}
+
 - (void)inferLabelsFor:(NSMutableArray *)nodes {
     NSMutableDictionary<NSString *, NSMutableArray *> *byParent = [NSMutableDictionary dictionary];
     for (NSDictionary *node in nodes) {
