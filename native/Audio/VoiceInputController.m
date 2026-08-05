@@ -17,6 +17,10 @@ static const NSTimeInterval kFloorWarmup = 0.35;
 static const double kNoisyEndpointFactor = 2.2;
 /// 一次最多喂给识别器多少条专有名词。给太多反而稀释效果。
 static const NSUInteger kMaxContextualStrings = 100;
+/// 识别器"假死"的判据：人确实说了这么久的话，却连一版 partial 都没吐出来。
+/// 正常听写第一版 partial 在半秒内就到，累计 2.5 秒人声还是空的只有一种解释——
+/// 任务是死的。取 2.5 秒是为了不被空调/电视这类持续噪声误判成"在说话"。
+static const NSTimeInterval kNoResponseVoicedSeconds = 2.5;
 
 typedef NS_ENUM(NSInteger, JarvisVoicePhase) {
     JarvisVoicePhaseIdle = 0,
@@ -24,7 +28,7 @@ typedef NS_ENUM(NSInteger, JarvisVoicePhase) {
     JarvisVoicePhaseFinalizing,  ///< 麦克风已关，在等识别器的终版结果
 };
 
-@interface VoiceInputController ()
+@interface VoiceInputController () <SFSpeechRecognizerDelegate>
 @property (nonatomic, copy)   NSString *localeIdentifier;
 @property (nonatomic, assign) JarvisVoiceOptions options;
 
@@ -42,6 +46,12 @@ typedef NS_ENUM(NSInteger, JarvisVoicePhase) {
 @property (nonatomic, assign) NSTimeInterval finalizingAt;
 @property (nonatomic, assign) float smoothedLevel;
 @property (nonatomic, assign) float noiseFloor;
+
+/// 这一次收音的统计。只为了收尾时打一行日志——没有它就分不清
+/// "根本没声音进来"和"有声音但识别器不吐字"，而这两条的修法完全不同。
+@property (nonatomic, assign) NSTimeInterval voicedSeconds;
+@property (nonatomic, assign) float peakLevel;
+@property (nonatomic, assign) NSUInteger resultCount;
 @end
 
 @implementation VoiceInputController
@@ -96,15 +106,30 @@ typedef NS_ENUM(NSInteger, JarvisVoicePhase) {
 
 /// 识别器复用。每次开麦都 new 一个的话，系统要重新解析语言资源；
 /// 复用之后开麦几乎是瞬时的。locale 不变就一直用同一个。
+///
+/// ⚠️ 但复用的前提是它还活着。Jarvis 是常驻进程，一个识别器一建就是好几天，
+/// 中间要经历系统休眠唤醒、语音资源更新、speechrecognitiond 重启——这些都会让
+/// 旧对象变成 `isAvailable == NO`，而**它派出的任务既不吐结果也不报错**，
+/// 收音全程静悄悄地什么都不发生。症状就是「麦克风开了，但一个字都不出」。
+/// 所以每次开麦都要重新验一遍，死了就丢掉重建。
 - (SFSpeechRecognizer *)ensureRecognizer {
-    if (self.recognizer) return self.recognizer;
+    if (self.recognizer && self.recognizer.isAvailable) return self.recognizer;
+    if (self.recognizer) {
+        NSLog(@"[jarvis] 缓存的识别器（%@）已不可用，重建",
+              self.recognizer.locale.localeIdentifier);
+        self.recognizer = nil;
+    }
 
     NSArray<NSString *> *candidates = @[self.localeIdentifier,
                                         [NSLocale currentLocale].localeIdentifier,
                                         @"en-US"];
+    SFSpeechRecognizer *first = nil;
     for (NSString *identifier in candidates) {
         SFSpeechRecognizer *recognizer = [[SFSpeechRecognizer alloc]
             initWithLocale:[NSLocale localeWithLocaleIdentifier:identifier]];
+        if (!recognizer) continue;
+        recognizer.delegate = self;
+        if (!first) first = recognizer;
         if (!recognizer.isAvailable) continue;
         if (![identifier isEqualToString:self.localeIdentifier]) {
             NSLog(@"[jarvis] %@ 的识别器不可用，退到 %@", self.localeIdentifier, identifier);
@@ -112,7 +137,23 @@ typedef NS_ENUM(NSInteger, JarvisVoicePhase) {
         self.recognizer = recognizer;
         return recognizer;
     }
-    return nil;
+
+    // 一个都不报可用。刚 new 出来的识别器是异步确定可用性的，头几十毫秒
+    // 报 NO 属于正常，这时候直接判死刑会把"其实能用"的场景也挡掉。
+    // 先用着，真死了由 checkTimeouts 里的假死判据兜住。
+    if (first) {
+        NSLog(@"[jarvis] 识别器暂时报不可用（%@），先用着", first.locale.localeIdentifier);
+        self.recognizer = first;
+    }
+    return first;
+}
+
+/// 可用性变化是异步推过来的。这行日志本身就是排障线索：
+/// 「开麦前变 NO」能一眼说明识别器是什么时候、因为什么死的。
+- (void)speechRecognizer:(SFSpeechRecognizer *)recognizer
+  availabilityDidChange:(BOOL)available {
+    NSLog(@"[jarvis] 识别器可用性变化：%@ → %@",
+          recognizer.locale.localeIdentifier, available ? @"可用" : @"不可用");
 }
 
 - (void)prewarm {
@@ -184,6 +225,14 @@ typedef NS_ENUM(NSInteger, JarvisVoicePhase) {
     self.lastTextAt = now;
     self.smoothedLevel = 0;
     self.noiseFloor = 0;
+    self.voicedSeconds = 0;
+    self.peakLevel = 0;
+    self.resultCount = 0;
+
+    NSLog(@"[jarvis] 开始收音：%@ 离线=%@ 提示词 %lu 条",
+          recognizer.locale.localeIdentifier,
+          self.request.requiresOnDeviceRecognition ? @"是" : @"否",
+          (unsigned long)self.request.contextualStrings.count);
 
     self.task = [recognizer recognitionTaskWithRequest:self.request
                                          resultHandler:^(SFSpeechRecognitionResult *result,
@@ -230,6 +279,12 @@ typedef NS_ENUM(NSInteger, JarvisVoicePhase) {
     if (self.phase == JarvisVoicePhaseIdle) return;
     NSString *text = [(self.transcript ?: @"") stringByTrimmingCharactersInSet:
                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    // 这一行是排障的主入口：有声时长和峰值说明"音频有没有进来"，
+    // 结果条数说明"识别器有没有在干活"，两者一比就知道该查哪一头。
+    NSLog(@"[jarvis] 收音结束 %.1fs：有声 %.1fs 峰值 %.3f 底噪 %.4f 结果 %lu 条 → 「%@」",
+          [NSDate timeIntervalSinceReferenceDate] - self.startedAt,
+          self.voicedSeconds, self.peakLevel, self.noiseFloor,
+          (unsigned long)self.resultCount, text);
     [self teardown];
     [self.delegate voiceInput:self finalText:text];
 }
@@ -258,6 +313,7 @@ typedef NS_ENUM(NSInteger, JarvisVoicePhase) {
     if (self.phase == JarvisVoicePhaseIdle) return;
 
     if (result) {
+        self.resultCount++;
         NSString *text = result.bestTranscription.formattedString ?: @"";
         if (![text isEqualToString:self.transcript]) {
             self.transcript = text;
@@ -276,10 +332,14 @@ typedef NS_ENUM(NSInteger, JarvisVoicePhase) {
         // 已经进入收尾阶段的错误一律当"没有更好的结果了"处理，用手里的 partial。
         // 两种情况都不该再等——不会有更好的结果了。
         BOOL noSpeech = (error.code == 1110 || error.code == 203);
+        NSLog(@"[jarvis] 识别回调报错 %@/%ld：%@%@", error.domain, (long)error.code,
+              error.localizedDescription, noSpeech ? @"（没听到人声，不算故障）" : @"");
         if (noSpeech || self.phase == JarvisVoicePhaseFinalizing) {
             [self deliverFinal];
             return;
         }
+        // 识别器出过错就别再留着复用了，下次开麦重建一个干净的。
+        self.recognizer = nil;
         NSString *message = [NSString stringWithFormat:@"识别失败：%@", error.localizedDescription];
         [self teardown];
         [self.delegate voiceInput:self failed:message];
@@ -318,7 +378,13 @@ typedef NS_ENUM(NSInteger, JarvisVoicePhase) {
         self.lastVoiceAt = now;                  // 采底噪期间不做判决
     } else if (rms > gate) {
         self.lastVoiceAt = now;
+        // 累计"确实有人在说话"的时长。假死判据用它而不是用挂钟时间，
+        // 免得安静地举着麦克风发呆也被当成识别器坏了。
+        if (buffer.format.sampleRate > 0) {
+            self.voicedSeconds += (double)count / buffer.format.sampleRate;
+        }
     }
+    if (rms > self.peakLevel) self.peakLevel = rms;
 
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -342,6 +408,13 @@ typedef NS_ENUM(NSInteger, JarvisVoicePhase) {
     if (now - self.startedAt > self.options.maxSeconds) { [self stop]; return; }
 
     if (self.transcript.length == 0) {
+        // 说了半天却一版 partial 都没有 = 识别任务是死的。它不会报错，
+        // 干等只会等到 idleTimeout 然后交出一句空话，用户看到的就是
+        // 「麦克风开了，但一个字都不出」。识破它，重建识别器，让下一次能用。
+        if (self.voicedSeconds >= kNoResponseVoicedSeconds && self.resultCount == 0) {
+            [self handleDeadRecognizer];
+            return;
+        }
         // 一个字都没识别出来：必须按开麦后的绝对时长判，不能按"距上次有声"。
         // AGC 会不断刷新 lastVoiceAt，按它算的话麦克风永远关不掉。
         // 到点自动关麦是用户明确要的——开着不用的麦克风既费电也占着音频引擎。
@@ -359,6 +432,17 @@ typedef NS_ENUM(NSInteger, JarvisVoicePhase) {
     } else if (textQuiet >= self.options.silenceTimeout * kNoisyEndpointFactor) {
         [self stop];
     }
+}
+
+/// 识别任务假死：音频确实进来了，识别器却一声不吭。
+/// 丢掉这个识别器（下次开麦 ensureRecognizer 会重建），并明确告诉用户再说一次——
+/// 悄悄收场的话，用户只会觉得"Jarvis 又聋了"，不知道再按一次就好了。
+- (void)handleDeadRecognizer {
+    NSLog(@"[jarvis] 识别器假死：有声 %.1fs 峰值 %.3f，但一条结果都没有。丢弃重建。",
+          self.voicedSeconds, self.peakLevel);
+    self.recognizer = nil;
+    [self teardown];
+    [self.delegate voiceInput:self failed:@"识别器没有响应，已重建。请再说一次。"];
 }
 
 @end
