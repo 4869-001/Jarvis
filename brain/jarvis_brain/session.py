@@ -40,6 +40,28 @@ from .tools.paths import PathDenied
 ZH_MARKER = "[[ZH]]"
 
 
+# ── 控制标记泄漏（2026-08-05 加）────────────────────────────────
+# 症状：长工具循环之后，模型不再走 tool_calls 字段，而是把工具调用**当正文**
+# 吐出来，于是 <｜｜DSML｜｜invoke name="ui_action"> 这种东西被逐字念了出去。
+# brain.log 里实测到两次，都发生在 Agent 模式连续调用十几次工具之后。
+#
+# 念出乱码只是表象，真正的伤害是**那次工具调用丢了**：模型以为自己点了钉钉的
+# 按钮，实际什么都没发生，而 Jarvis 把这段当成普通回答收下，任务就地卡死。
+#
+# 匹配的是「尖括号紧跟全角竖线」这个组合，DeepSeek 自家的 <｜tool▁calls▁begin｜>
+# 和上面那种 DSML 包装都落在里面。正常中英文散文里不会出现这个组合。
+_CONTROL_LEAK = re.compile(r"</?｜")
+
+CONTROL_LEAK_NUDGE = (
+    "Your last message started emitting tool-call markup as plain text "
+    "(a '<' followed by a full-width vertical bar). That is not how you call tools "
+    "here — it produced no tool call at all, so nothing was executed.\n\n"
+    "Do it again properly: emit a real tool call through the function-calling "
+    "interface, or, if you no longer need a tool, just answer in the normal "
+    "three-part format. Do not write tool syntax into your prose."
+)
+
+
 def _speech_key(text):
     """播报去重键：忽略 Markdown、大小写、空白和标点。
 
@@ -635,6 +657,12 @@ class SessionCoordinator:
         （原句 + 2 次重复）便判定模型跑飞并截断生成。原句只会播放一次。
         """
         with self._speech_lock:
+            # 控制标记绝不出声。_loop 那层已经会在检测到时截断这一轮，这里是最后
+            # 一道网：标记可能在被检测到之前就已经攒进 _speech_buffer 了，
+            # 而"念一串 <｜｜DSML｜｜parameter name=…" 是这个 bug 最刺耳的部分。
+            if _CONTROL_LEAK.search(sentence or ""):
+                self.log("拦截控制标记播报：%s" % sentence.strip()[:80])
+                return
             norm = _speech_key(sentence)
             if norm and norm in self._speech_seen:
                 self._repeat_streak += 1
@@ -842,6 +870,7 @@ class SessionCoordinator:
     def _loop(self, message_id, memory_block, generation, environment=None):
         history = list(self.history)   # 本轮私有快照，reset() 清得动 self.history，清不动这份
         round_index = -1
+        leak_retries = 0               # 控制标记泄漏重试次数，跨轮累计
 
         # Agent 模式的步数上限比普通对话高一个数量级，而且**每轮重新读**：
         # 模型可能在第一步用 agent_enter 把自己切进 Agent 模式，预算要当场跟上。
@@ -875,6 +904,8 @@ class SessionCoordinator:
             chinese_parts = []
             tool_calls = []
             started_speaking = False
+            leaked_markup = False
+            raw_tail = ""
             splitter = BilingualSplitter()
             # 这一轮先按"可能是中间步骤"处理。是不是最终回答，要等流结束、
             # 看有没有工具调用才知道——那时再解除静音、把整段补给合成。
@@ -893,6 +924,15 @@ class SessionCoordinator:
                         # 静音时别切 speaking：球体亮着"在说话"却没有声音，
                         # 比停在 thinking 更让人以为坏了。
                         self.set_state("speaking" if not self._speech_muted else "thinking")
+                    # 检测必须在喂给 splitter **之前**：一旦喂进去，这段文字就同时
+                    # 进了字幕和播报队列，再拦就晚了。标记可能被切在两个增量之间
+                    # （"<" 和 "｜｜DSML" 分两块到），所以在拼接后的尾巴上找。
+                    raw_tail = (raw_tail + value)[-64:]
+                    if _CONTROL_LEAK.search(raw_tail):
+                        leaked_markup = True
+                        self.provider.cancel()
+                        self.log("检测到控制标记泄漏，丢弃这一轮并要求模型重来")
+                        break
                     for channel, chunk in splitter.feed(value):
                         self._emit_segment(message_id, channel, chunk,
                                            english_parts, chinese_parts, generation)
@@ -905,6 +945,35 @@ class SessionCoordinator:
                         break
                 elif kind == "tool_calls":
                     tool_calls = value
+
+            if leaked_markup:
+                # 这一轮整个作废：内容是坏的，而且模型本来想调的工具**根本没调成**。
+                # 三件事都得做，少一件就会留下痕迹：
+                #   1) 丢掉已经排队的残句（标记前面那半句已经进了播报队列）
+                #   2) 让面板把这条气泡清空重画（delta 已经流出去了，收不回来）
+                #   3) 给模型一条纠正提示，让它用真的工具调用重来
+                self._abandon_speech()
+                self.emit({"type": "assistant_reset", "id": message_id})
+                leak_retries += 1
+                if leak_retries <= 2:
+                    history.append({"role": "system", "content": CONTROL_LEAK_NUDGE})
+                    continue
+                # 连着三次都这样，多半是这段上下文本身把模型带偏了，再试只是白烧
+                # token。如实说出来，别让用户以为它在正常干活。
+                self.log("控制标记泄漏连续 %d 次，放弃这一轮" % leak_retries)
+                message = ("I garbled a tool call three times in a row and stopped, sir. "
+                           "Nothing was executed. The conversation has run long enough that "
+                           "I'm losing the format — starting a fresh session should clear it."
+                           "%s 连续三次把工具调用写坏了，已经停下。什么都没有执行。"
+                           "这段对话太长把格式带偏了，重开一个会话应该就好。" % ZH_MARKER)
+                english, chinese = message.split(ZH_MARKER)
+                self._speech_muted = False
+                self._feed_speech(english)
+                self._flush_speech()
+                self.emit({"type": "assistant_done", "id": message_id,
+                           "text": english, "text_zh": chinese})
+                self._finish_task(generation, "failed")
+                return
 
             for channel, chunk in splitter.flush():
                 self._emit_segment(message_id, channel, chunk, english_parts, chinese_parts,
