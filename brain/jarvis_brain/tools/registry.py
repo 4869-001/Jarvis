@@ -213,6 +213,9 @@ TOOLS = [
            "role": _p("配合 find 限定角色，如 AXButton；不确定就别填"),
            "x_min": _p("配合 find：只在这个横坐标右边找。侧边栏和内容区有同名元素时用它区分", _INT),
            "x_max": _p("配合 find：只在这个横坐标左边找", _INT),
+           "y_min": _p("配合 find：只找这个纵坐标下面的，并取最靠近的那个。"
+                       "分栏表单里「无」「请输入」会重复出现，用栏目标题的 y 值把它们区分开", _INT),
+           "y_max": _p("配合 find：只找这个纵坐标上面的", _INT),
            "path": _p("元素路径，来自 ui_inspect。有 find 就不用它"),
            "action": {"type": "string", "enum": ["click", "press", "focus", "set_value"],
                       "description": "click 真实鼠标点击（默认首选，什么都能点）；"
@@ -334,6 +337,8 @@ TOOLS = [
                                    "role": _p("限定角色，如 AXButton；不确定就别填"),
                                    "exact": _p("要求文字完全相等", _BOOL),
                                    "text": _p("type 时要填入的文字，可用 {{参数名}}"),
+                                   "mode": _p("type 的写入方式，默认 line_end（分栏表单用它）；"
+                                              "取值同 ui_type 的 mode"),
                                    "expect": _p("这一步做完后界面上应该出现的文字——**关键步骤都要写**。"
                                                 "必须挑「只在目标状态下才会出现」的文字：踩过一次，"
                                                 "expect 写「写日志」而侧边栏正好有同名项，"
@@ -369,10 +374,15 @@ TOOLS = [
           "曾经发生过真实的数据丢失：让它往日志里加一条，它把已有内容全删了只留新的。"
           "只有用户明确说「改写成」「换成」时才用 replace。",
           {"text": _p("要输入的文字，中英文都行"),
-           "mode": {"type": "string", "enum": ["append", "replace", "insert"],
-                    "description": "append 追加到末尾（默认，用户说「加/补充」时用它）；"
-                                   "replace 清空后重写（**会毁掉已有内容**，只在明确要求改写时用）；"
-                                   "insert 在当前光标处插入"},
+           "mode": {"type": "string",
+                    "enum": ["append", "line_end", "line_replace", "insert", "replace"],
+                    "description": "append 跳到**整个文档**末尾再写（单一输入框用它）；"
+                                   "line_end 跳到**当前行**末尾再写（**分栏表单必须用它**——"
+                                   "先点中目标栏的现有文字让光标落进那一栏，再用它，"
+                                   "否则字会跑到最后一栏去）；"
+                                   "line_replace 选中当前整行再写（改写某一栏的一行，如把「无」换掉）；"
+                                   "insert 在当前光标处插入；"
+                                   "replace 全选后重写（**会毁掉整份内容**，极少用）"},
            "app": _p("目标应用名。**填上**——键盘事件发给前台应用，"
                      "不指定的话可能敲进别的窗口")},
           "L2", "native", required=["text"],

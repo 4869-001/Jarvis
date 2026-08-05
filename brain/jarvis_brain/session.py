@@ -178,6 +178,16 @@ User: "how's my Mac doing"
   recipe entirely.
 - To fill a text field, click it and then use ui_type. set_value goes through the
   accessibility API and silently does nothing on many apps.
+- Writing into one section of a multi-section form (a DingTalk log, any long template)
+  follows a fixed shape, and it is three calls, not thirty. Read the section heading with
+  ui_inspect find=<heading> to get its y. Click the existing content line under it with
+  ui_action find=<that text> y_min=<heading y>, which lands the caret inside that section
+  — a click also scrolls the target into view on its own, so do not add steps for that.
+  Then ui_type with mode=line_end to add to that line or line_replace to rewrite it.
+  Never use append here: append jumps to the end of the whole document, so the text lands
+  in the last section instead of the one asked for. Verify with the same targeted
+  ui_inspect find — the content is readable, so an unverifiable write means the write went
+  somewhere wrong, not that verification is impossible.
 - Never destroy content Frank already has in order to write new content. When he says to
   add, append, or supplement something, the existing text stays and yours goes after it —
   ui_type's default append mode does this. Only reach for replace when he explicitly says
@@ -321,8 +331,10 @@ class _RecipeHost:
     def act(self, app, path, action):
         return self._call("ui_action", {"app": app, "path": path, "action": action})
 
-    def type_text(self, app, text):
-        return self._call("ui_type", {"app": app, "text": text})
+    def type_text(self, app, text, mode="line_end"):
+        # 剧本里的输入默认 line_end 而不是 append：剧本几乎都是在填分栏表单，
+        # append 会把内容送到整份文档的末尾（进错栏目）。
+        return self._call("ui_type", {"app": app, "text": text, "mode": mode})
 
     def open_app(self, app):
         return self._call("app_open", {"name": app})

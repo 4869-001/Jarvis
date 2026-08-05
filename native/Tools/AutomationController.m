@@ -848,7 +848,22 @@ static CGEventSourceRef JarvisKeyboardSource(void) {
         [self postKey:0 flags:kCGEventFlagMaskCommand];          // ⌘A 全选，下一次输入即覆盖
         [NSThread sleepForTimeInterval:0.08];
     } else if ([mode isEqualToString:@"append"]) {
-        [self postKey:125 flags:kCGEventFlagMaskCommand];        // ⌘↓ 移到文末，光标在哪都不怕
+        [self postKey:125 flags:kCGEventFlagMaskCommand];        // ⌘↓ 移到**整个文档**末尾
+        [NSThread sleepForTimeInterval:0.08];
+    } else if ([mode isEqualToString:@"line_end"]) {
+        // ⚠️ 分栏表单（钉钉日报这种一页里有好几个栏目的）**必须用这个，不能用 append**。
+        // append 是 ⌘↓ = 跳到整个文档末尾，在分栏表单里意味着字落到最后一栏去了，
+        // 而用户要写的是中间某一栏。用户实测就撞了这个：报告"字输进去了但不确定
+        // 进了哪个板块"——它确实进去了，只是进错了栏。
+        // 正确做法是先点中目标栏的现有文字（光标就落在那一栏），再 ⌘→ 到本行末尾。
+        [self postKey:124 flags:kCGEventFlagMaskCommand];        // ⌘→ 本行末尾
+        [NSThread sleepForTimeInterval:0.08];
+    } else if ([mode isEqualToString:@"line_replace"]) {
+        // 改写某一栏原有的一行（比如把「无」换成真实内容）：
+        // ⌘← 回行首 → ⇧⌘→ 选中整行 → 输入即替换。只动这一行，别的栏目不受影响。
+        [self postKey:123 flags:kCGEventFlagMaskCommand];
+        [NSThread sleepForTimeInterval:0.05];
+        [self postKey:124 flags:kCGEventFlagMaskCommand | kCGEventFlagMaskShift];
         [NSThread sleepForTimeInterval:0.08];
     }
     // insert：什么都不做，在当前光标处插入
@@ -1104,6 +1119,20 @@ static CGEventSourceRef JarvisKeyboardSource(void) {
 ///      是在赌。
 ///   3. 点完把鼠标**放回原处**。用户的光标毫无预兆地跳走非常吓人，而且他可能正
 ///      悬停在别的东西上。
+
+/// 这个点落在某块屏幕里吗。坐标是全局的，多显示器下可能是负数，所以逐屏检查，
+/// 不能拿主屏的 frame 去卡。
+- (BOOL)isPointOnScreen:(CGPoint)point {
+    CGFloat maxY = NSMaxY([NSScreen screens].firstObject.frame);
+    for (NSScreen *screen in [NSScreen screens]) {
+        NSRect f = screen.frame;
+        // AX 坐标是左上原点，NSScreen 是左下原点，换算一下再比。
+        NSRect flipped = NSMakeRect(f.origin.x, maxY - NSMaxY(f), f.size.width, f.size.height);
+        if (NSPointInRect(NSMakePoint(point.x, point.y), flipped)) return YES;
+    }
+    return NO;
+}
+
 - (NSString *)clickElement:(AXUIElementRef)element app:(NSRunningApplication *)app {
     if (!app.active) {
         [app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
@@ -1138,19 +1167,30 @@ static CGEventSourceRef JarvisKeyboardSource(void) {
 
     CGPoint center = CGPointMake(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
 
-    // 落在任何一块屏幕里吗。坐标是全局的，多显示器下可能是负数，所以要逐屏检查，
-    // 不能拿主屏的 frame 去卡。点到屏幕外面是静默无效的，必须提前拦下来。
-    BOOL onScreen = NO;
-    for (NSScreen *screen in [NSScreen screens]) {
-        NSRect f = screen.frame;
-        // AX 坐标是左上原点，NSScreen 是左下原点，换算一下再比。
-        CGFloat maxY = NSMaxY([NSScreen screens].firstObject.frame);
-        NSRect flipped = NSMakeRect(f.origin.x, maxY - NSMaxY(f), f.size.width, f.size.height);
-        if (NSPointInRect(NSMakePoint(center.x, center.y), flipped)) { onScreen = YES; break; }
+    // ⚠️ 元素滚出可视区时坐标是负的（实测钉钉日报某个栏目在 y=-536），
+    // 往那儿点等于什么都没做。用户遇到的"字输进去了但不知道进了哪"很大一部分
+    // 来自这里：目标根本不在屏幕上。
+    // 先让它滚进来——这一步必须自动做，不能指望调用方先想到要滚屏，
+    // 那是白白多花一轮工具调用，而且模型多半想不到。
+    if (![self isPointOnScreen:center]) {
+        AXUIElementPerformAction(element, CFSTR("AXScrollToVisible"));
+        [NSThread sleepForTimeInterval:0.35];
+        CFTypeRef again = NULL;
+        if (AXUIElementCopyAttributeValue(element, kAXPositionAttribute, &again) == kAXErrorSuccess
+            && again) {
+            CGPoint moved = CGPointZero;
+            if (AXValueGetValue((AXValueRef)again, kAXValueCGPointType, &moved)) {
+                origin = moved;
+                center = CGPointMake(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
+            }
+            CFRelease(again);
+        }
     }
-    if (!onScreen) {
-        return [NSString stringWithFormat:@"元素中心 (%.0f, %.0f) 不在任何一块屏幕上，"
-                @"窗口可能被移到屏幕外或最小化了", center.x, center.y];
+
+    if (![self isPointOnScreen:center]) {
+        return [NSString stringWithFormat:@"元素中心 (%.0f, %.0f) 不在屏幕上，"
+                @"滚动也没能把它带进可视区（可能在折叠区里，或窗口被移出了屏幕）",
+                center.x, center.y];
     }
 
     CGEventRef probe = CGEventCreate(NULL);
@@ -1187,6 +1227,7 @@ static CGEventSourceRef JarvisKeyboardSource(void) {
                     arguments:(NSDictionary *)arguments {
     NSString *role = [arguments[@"role"] isKindOfClass:[NSString class]] ? arguments[@"role"] : nil;
     NSNumber *xMin = arguments[@"x_min"], *xMax = arguments[@"x_max"];
+    NSNumber *yMin = arguments[@"y_min"], *yMax = arguments[@"y_max"];
 
     NSMutableArray *pool = [NSMutableArray array];
     for (NSDictionary *node in nodes) {
@@ -1194,7 +1235,17 @@ static CGEventSourceRef JarvisKeyboardSource(void) {
         NSDictionary *frame = node[@"frame"];
         if (xMin && [frame[@"x"] integerValue] < xMin.integerValue) continue;
         if (xMax && [frame[@"x"] integerValue] > xMax.integerValue) continue;
+        // 纵向约束用于分栏表单：一页里「无」「请输入」这种占位文字会重复好几次，
+        // 只有"在某个栏目标题下面"能把它们区分开。
+        if (yMin && [frame[@"y"] integerValue] < yMin.integerValue) continue;
+        if (yMax && [frame[@"y"] integerValue] > yMax.integerValue) continue;
         [pool addObject:node];
+    }
+    // 有纵向下限时按 y 排序，取最靠近它的那个——"标题下面第一个"就是目标。
+    if (yMin) {
+        [pool sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            return [a[@"frame"][@"y"] compare:b[@"frame"][@"y"]];
+        }];
     }
 
     NSArray *keys = @[@"inferred_label", @"title", @"label", @"value"];

@@ -292,7 +292,7 @@ class RecipeRun:
             if clicked.get("error"):
                 raise RecipeError("%s：点不动输入框「%s」：%s" % (described, wanted, clicked["error"]))
             time.sleep(0.3)
-            typed = self.host.type_text(self.app, text)
+            typed = self.host.type_text(self.app, text, step.get("mode") or "line_end")
             if typed.get("error"):
                 raise RecipeError("%s：输入失败：%s" % (described, typed["error"]))
             self.trace.append("%s → 往「%s」敲了 %d 个字" % (described, wanted, len(text)))
