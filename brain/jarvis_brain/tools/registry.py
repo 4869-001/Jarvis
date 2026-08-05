@@ -201,6 +201,62 @@ TOOLS = [
           "L2", "native", required=["app", "path"],
           recover="界面操作没有通用撤法，多数应用里可以按 ⌘Z"),
 
+    # ------------------------------------------------ 浏览器（ObjC 执行）
+    # 桌面应用不是都能驱动的：钉钉是 Qt 应用，没有脚本字典，Qt 的 macOS 辅助功能
+    # 桥接又把大量控件暴露成 static text 而不是 button，ui_action 在它上面点不中。
+    # 这类应用的**网页版**反而是完整可控的，所以浏览器是第四条通道。
+    _tool("browser_tabs",
+          "列出浏览器当前打开的所有标签页（窗口号、标签号、标题、网址）。"
+          "要操作网页之前先用它确认目标在第几个标签页。",
+          {"browser": _p("chrome 或 safari；不填则自动挑正在运行的那个")},
+          "L0", "native"),
+
+    _tool("browser_read",
+          "读取某个标签页：正文文本 + 页面上所有可点可填的元素清单，"
+          "每个元素带一个 selector。**这是操作网页的第一步**，"
+          "相当于网页版的 ui_inspect——不先读就没有 selector 可用。"
+          "网页版应用（钉钉、飞书、各种后台系统）优先走这条路，"
+          "它们的桌面客户端常常是 Qt/自绘界面，ui_action 点不动。",
+          {"browser": _p("chrome 或 safari；不填则自动挑"),
+           "window": _p("窗口号，来自 browser_tabs，默认最前面那个", _INT),
+           "tab": _p("标签号，来自 browser_tabs，默认当前标签页", _INT),
+           "selector": _p("只读页面的某一块，如 #main、.sidebar；不填则整页"),
+           "max_chars": _p("正文最多返回多少字符，默认 6000", _INT)},
+          "L0", "native"),
+
+    _tool("browser_act",
+          "操作网页元素：点击、填写输入框、选择下拉项。"
+          "selector 必须来自刚刚那次 browser_read——页面变过就要重新读。"
+          "填表单用 fill（会正确触发前端框架的事件，直接改值那些框架收不到）。",
+          {"selector": _p("CSS 选择器，来自 browser_read 的 elements"),
+           "action": {"type": "string", "enum": ["click", "fill", "select", "focus"],
+                      "description": "click 点击（默认），fill 填输入框，"
+                                     "select 选下拉项，focus 聚焦"},
+           "value": _p("fill / select 时要填入或选中的值"),
+           "browser": _p("chrome 或 safari；不填则自动挑"),
+           "window": _p("窗口号", _INT),
+           "tab": _p("标签号", _INT)},
+          "L2", "native", required=["selector"],
+          recover="网页操作没有通用撤法；表单填写可以再填回去，提交类操作不可撤"),
+
+    _tool("browser_open",
+          "在浏览器里打开一个网址（新开标签页并切过去）。"
+          "和 url_open 的区别：这个能指定用哪个浏览器，并返回打开后的实际网址，"
+          "接着就能用 browser_read 读它。",
+          {"url": _p("网址，不带协议头会自动补 https://"),
+           "browser": _p("chrome 或 safari；不填则自动挑")},
+          "L1", "native", required=["url"]),
+
+    _tool("browser_eval",
+          "在当前网页里执行一段 JavaScript 并拿回返回值。"
+          "**只在 browser_read / browser_act 做不到时用**——那两个够用的场景不要用它。"
+          "适合：翻页滚动、读取页面里的结构化数据、等待某个元素出现。",
+          {"javascript": _p("JS 源码。要拿回结果就 return，复杂结果先 JSON.stringify"),
+           "browser": _p("chrome 或 safari；不填则自动挑"),
+           "window": _p("窗口号", _INT),
+           "tab": _p("标签号", _INT)},
+          "L4", "native", required=["javascript"]),   # 等价任意代码，撤法未知
+
     # ------------------------------------------------ 文件（Brain 执行）
     _tool("fs_list", "列出目录内容。",
           {"path": _p("目录路径，默认 ~"),
@@ -536,6 +592,11 @@ def describe(name, arguments):
         "shell_list": "查看后台进程",
         "todo_write": "更新待办清单",
         "subagent_run": "派子代理：{description}",
+        "browser_tabs": "查看浏览器标签页",
+        "browser_read": "读取网页内容",
+        "browser_act": "操作网页元素 {selector}",
+        "browser_open": "在浏览器打开 {url}",
+        "browser_eval": "在网页里执行脚本",
         "agent_delegate": "委派给外部代理：{description}",
         "mcp_status": "查看 MCP 接入状态",
     }
@@ -583,10 +644,14 @@ _ACTIONS = {
     "grep": "检索内容", "glob": "查找文件", "shell_output": "读取后台输出",
     "shell_kill": "结束后台进程", "shell_list": "查看后台进程", "todo_write": "更新待办",
     "subagent_run": "派出子代理",
+    "browser_tabs": "查看浏览器标签页", "browser_read": "读取网页",
+    "browser_act": "操作网页元素", "browser_open": "打开网页",
+    "browser_eval": "在网页里执行脚本",
     "agent_delegate": "委派给外部代理", "mcp_status": "查看 MCP 接入状态",
 }
-_TARGET_KEYS = ("path", "source", "command", "script", "name", "url", "text", "query", "id",
-                "contact", "pattern", "shell_id", "goal", "app", "description")
+_TARGET_KEYS = ("path", "source", "command", "script", "javascript", "selector", "name",
+                "url", "text", "query", "id", "contact", "pattern", "shell_id", "goal",
+                "app", "description")
 
 
 def action_of(name):

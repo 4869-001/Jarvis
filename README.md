@@ -240,6 +240,46 @@ Brain 按分隔符把流拆成两路——**只有英文那路进 TTS**，中文
 实测：「统计 mean/median 的定义与使用」这个任务，子代理用 6 步（glob + 3 次 grep +
 2 次 fs_read）10 秒查完，主上下文只多了一段结论，文件内容一行都没进去。
 
+## 浏览器控制（第四条通道）
+
+前面三条通道（脚本字典 → 菜单 → 辅助功能）覆盖不了所有应用。**钉钉就是反例**：
+它是 Qt 应用（Frameworks 下是 QtConcurrent/QtNetwork/QtOpenGL），没有脚本字典，
+而 Qt 的 macOS AX 桥接把大量控件暴露成 `static text` 而不是 `button`——
+`ui_action` 在它上面点不中，不是代码不够好，**是那条通道本身就是残的**。
+
+这类应用的**网页版反而是完整可控的**，所以浏览器是第四条通道：
+
+| 工具 | 干什么 |
+|---|---|
+| `browser_tabs` | 列出所有标签页（窗口号、标签号、标题、网址） |
+| `browser_read` | 读页面正文 + 所有可点可填元素，每个带一个 selector |
+| `browser_act` | 点击 / 填表单 / 选下拉，selector 来自上一步 |
+| `browser_open` | 打开网址并切过去 |
+| `browser_eval` | 兜底：执行任意 JS（L4） |
+
+用法和 `ui_inspect` → `ui_action` 是同构的：**先 read 拿 selector，再 act**。
+区别是 selector 自包含（`#id` 或从 body 开始的 nth-of-type 路径），
+不像 AX 那种序号路径，页面稍微一变就指到别的东西上。
+
+`browser_act` 的 `fill` **会派发 input/change 事件**。React/Vue 这类框架监听的是
+事件而不是 `.value`，直接改值它们收不到，表现是「字填进去了但提交时是空的」。
+
+### ⚠️ 要先开一个开关（一次性）
+
+这条通道走浏览器自己的 AppleScript 字典，而**「允许 Apple 事件中的 JavaScript」
+默认是关的**：
+
+- **Chrome**：菜单栏 → 查看 → 开发者 → 允许 Apple 事件中的 JavaScript
+- **Safari**：设置 → 高级 → 勾「显示网页开发者功能」，再到 开发 → 允许 Apple 事件中的 JavaScript
+
+**这个开关和系统设置里的隐私权限无关**，改系统设置没有用。关着的时候
+`browser_read` 会原样报出上面这句指引——错误文案必须具体到菜单路径，
+笼统说一句「失败了」会让模型跑去让用户改 TCC，那是另一个开关，改了也不管用。
+
+没有走 CDP（`--remote-debugging-port`）：那要求用户改浏览器启动方式并重启，
+还会让**任何**本地进程都能接管浏览器；AppleScript 这条路受 TCC 管，
+权限归属清楚，也不用动用户日常在用的浏览器。
+
 ## 接第三方服务（MCP）
 
 Jarvis 能当 **MCP 客户端**，把第三方 MCP server 的工具接进来当自己的工具用。

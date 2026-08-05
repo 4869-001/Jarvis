@@ -374,3 +374,58 @@ provider 那一侧是干净的（`delta.content` 来什么吐什么），不用�
 `List<String>`、`</div>`、Markdown 表格的 `|`、以及全角竖线单独出现（`名称｜类型`）
 **都不能命中**——已验证全部符合预期。放宽成只匹配 `｜` 会把中文排版里的全角竖线
 一起吃掉，那会让正常回答被整轮丢弃。
+
+## 2026-08-05 浏览器控制（第四条通道，同分支）
+
+起因是上一条：钉钉那轮 `ui_action` 反复点不中。查了才知道**钉钉是 Qt 应用**
+（`/Applications/DingTalk.app/Contents/Frameworks` 下是 QtConcurrent/QtNetwork/
+QtOpenGL/QtXml），没有 `.sdef`，也不是 Electron/CEF。Qt 的 macOS AX 桥接把大量
+控件暴露成 `static text` 而不是 `button`——**那条通道本身是残的，优化点击逻辑没用**。
+以后遇到"AX 点不中"先看它是不是 Qt，别急着调代码。
+
+五个工具加在 `AutomationController` 里（不是新建类）：`browser_tabs` /
+`browser_read` / `browser_act` / `browser_open` / `browser_eval`。
+放在一起是为了复用 `automationBlockedFor:` 和 `describeScriptError:`——
+那两个方法编码了错误码的坑（-1743 vs -25211 vs -1719），复制一份才是真风险。
+
+### ⚠️ `tab` 在浏览器的 tell 块里不是制表符（不报错，最费时间）
+
+`browser_tabs` 第一版返回 0 个标签页，但脚本**不报错**。原因是 AppleScript 的
+制表符常量 `tab` 和浏览器字典里的 `tab` 类**同名**，在 `tell application
+"Google Chrome"` 块里 `& tab &` 被当成字面字符串 `"tab"` 拼了进去：
+
+    1tab1tab新标签页tabchrome://newtab/     ← 实际返回长这样
+
+于是按 `\t` 分割一个都分不出来。修法是**在 tell 块外面**先
+`set d to character id 9` 再用 `d`。任何在浏览器 tell 块里拼分隔符的地方都要这么写。
+
+### JS 用 base64 送进去
+
+`execute <tab> javascript "..."` 要同时逃 AppleScript 的引号和 JS 自己的引号，
+两层嵌套转义写出来没人看得懂，JS 里出现一个引号就炸。
+现在统一 `eval(decodeURIComponent(escape(atob('BASE64'))))`——base64 之后只剩
+`[A-Za-z0-9+/=]`，两边都不用转义。`decodeURIComponent(escape(...))` 那层是为了
+UTF-8：`atob` 出来的是 latin1，中文页面直接 `atob` 会变乱码。
+
+传给 JS 的字符串参数走 `jsStringLiteral:`，用 `NSJSONSerialization` 编码再削掉
+外层方括号——手写引号转义迟早漏一种（换行、反斜杠、U+2028）。
+
+### 「允许 Apple 事件中的 JavaScript」默认是关的
+
+Chrome：查看 → 开发者 → 允许 Apple 事件中的 JavaScript。
+Safari：设置 → 高级 → 显示网页开发者功能，再 开发 → 允许 Apple 事件中的 JavaScript。
+
+**这个开关和 TCC 无关**，所以报错必须单独认出来（`describeBrowserError:`）
+并把菜单路径写全。笼统报"脚本失败"会让模型跑去让用户改系统设置 →
+改了还是不行 → 白绕一大圈。这类"看起来像权限但不是权限"的错误，
+和 -1719/-1728 那条是同一类教训。
+
+没走 CDP：要求用户改浏览器启动方式并重启，且开了端口之后**任何**本地进程都能
+接管浏览器。AppleScript 这条受 TCC 管，权限归属清楚。
+
+### `fill` 必须派发事件
+
+React/Vue 监听的是 input/change 事件，不是 `.value`。直接赋值的表现是
+「字填进去了但提交时是空的」。现在用 `Object.getOwnPropertyDescriptor` 拿到
+原生 setter 再调，然后手动 dispatch——只 dispatch 不用原生 setter 的话，
+React 的 value tracker 会认为值没变，事件照样被吃掉。

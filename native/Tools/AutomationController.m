@@ -26,7 +26,9 @@ static const NSInteger kMaxUINodes = 220;
     dispatch_once(&once, ^{
         names = [NSSet setWithArray:@[@"app_script", @"app_dictionary", @"app_scriptable",
                                       @"menu_list", @"menu_invoke",
-                                      @"ui_inspect", @"ui_action"]];
+                                      @"ui_inspect", @"ui_action",
+                                      @"browser_tabs", @"browser_read", @"browser_act",
+                                      @"browser_eval", @"browser_open"]];
     });
     return [names containsObject:name];
 }
@@ -47,6 +49,11 @@ static const NSInteger kMaxUINodes = 220;
     else if ([name isEqualToString:@"menu_invoke"])    { [self invokeMenu:arguments completion:completion]; }
     else if ([name isEqualToString:@"ui_inspect"])     { [self inspectUI:arguments completion:completion]; }
     else if ([name isEqualToString:@"ui_action"])      { [self actUI:arguments completion:completion]; }
+    else if ([name isEqualToString:@"browser_tabs"])   { [self browserTabs:arguments completion:completion]; }
+    else if ([name isEqualToString:@"browser_read"])   { [self browserRead:arguments completion:completion]; }
+    else if ([name isEqualToString:@"browser_act"])    { [self browserAct:arguments completion:completion]; }
+    else if ([name isEqualToString:@"browser_eval"])   { [self browserEval:arguments completion:completion]; }
+    else if ([name isEqualToString:@"browser_open"])   { [self browserOpen:arguments completion:completion]; }
     else { completion(nil, [NSString stringWithFormat:@"自动化层不认识工具 %@", name]); }
 }
 
@@ -861,5 +868,403 @@ static const NSInteger kMaxUINodes = 220;
                  @"value_now": readback ?: @"",
                  @"ok": @YES}, nil);
 }
+
+
+#pragma mark - 浏览器控制
+//
+//  为什么需要它：桌面版应用不是都能驱动的。钉钉是 Qt 应用（Frameworks 里是
+//  QtConcurrent/QtNetwork/QtOpenGL），既没有脚本字典，Qt 的 macOS AX 桥接又
+//  把大量控件暴露成 static text 而不是 button——`ui_action` 在它上面点不中，
+//  不是代码不够好，是那条通道本身就是残的。这类应用的网页版反而是完整可控的。
+//
+//  通道走浏览器的 AppleScript 字典（Chrome 的 `execute … javascript`、
+//  Safari 的 `do JavaScript … in`）。没有走 CDP（--remote-debugging-port），
+//  因为那要求用户改浏览器的启动方式并重启，还会让任何本地进程都能接管浏览器；
+//  AppleScript 这条路受 TCC 管，权限归属清楚，且不用动用户的日常浏览器。
+//
+//  ⚠️ 这条通道默认是关的，要用户手动开一次：
+//     Chrome：查看 → 开发者 → 允许 Apple 事件中的 JavaScript
+//     Safari：开发 → 允许 Apple 事件中的 JavaScript（先在设置里打开"开发"菜单）
+//  关着的时候报错文案很具体，必须原样转达而不是笼统说"失败了"——
+//  这是一次性设置，说清楚用户点一下就好了。
+
+static NSString *const kChromeName = @"Google Chrome";
+static NSString *const kSafariName = @"Safari";
+
+/// JS 源码用 base64 塞进 AppleScript。
+/// 直接内联的话要同时逃 AppleScript 的引号/反斜杠和 JS 自己的引号，
+/// 嵌套两层转义写出来没人看得懂，而且 JS 里但凡出现一个引号就会炸。
+/// base64 之后只剩 [A-Za-z0-9+/=]，两边都不需要转义。
+static NSString *JarvisWrapJS(NSString *source) {
+    NSData *data = [source dataUsingEncoding:NSUTF8StringEncoding];
+    return [NSString stringWithFormat:@"eval(decodeURIComponent(escape(atob('%@'))))",
+            [data base64EncodedStringWithOptions:0]];
+}
+
+/// 浏览器名归一。默认挑一个"正在运行的"，都没开就用 Chrome。
+- (NSString *)resolveBrowser:(NSDictionary *)arguments {
+    NSString *wanted = arguments[@"browser"];
+    if ([wanted isKindOfClass:[NSString class]] && wanted.length) {
+        if ([wanted rangeOfString:@"safari" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return kSafariName;
+        }
+        return kChromeName;
+    }
+    for (NSRunningApplication *app in [NSWorkspace sharedWorkspace].runningApplications) {
+        NSString *bundleID = app.bundleIdentifier;
+        if (!bundleID) continue;          // 后台守护进程的 bundleIdentifier 是 nil
+        if ([bundleID isEqualToString:@"com.google.Chrome"]) return kChromeName;
+        if ([bundleID isEqualToString:@"com.apple.Safari"]) return kSafariName;
+    }
+    return kChromeName;
+}
+
+/// 指定哪个标签页。不传就是当前标签页。
+- (NSString *)tabExpressionFor:(NSString *)browser arguments:(NSDictionary *)arguments {
+    BOOL safari = [browser isEqualToString:kSafariName];
+    id window = arguments[@"window"];
+    id tab = arguments[@"tab"];
+    NSString *windowExpr = [window respondsToSelector:@selector(integerValue)] && [window integerValue] > 0
+        ? [NSString stringWithFormat:@"window %ld", (long)[window integerValue]]
+        : @"front window";
+    if ([tab respondsToSelector:@selector(integerValue)] && [tab integerValue] > 0) {
+        return [NSString stringWithFormat:@"tab %ld of %@", (long)[tab integerValue], windowExpr];
+    }
+    return [NSString stringWithFormat:@"%@ of %@", safari ? @"current tab" : @"active tab", windowExpr];
+}
+
+/// 把一段 JS 送进浏览器执行，回调拿到的是 JS 的返回值字符串。
+- (void)evaluateJS:(NSString *)js
+           browser:(NSString *)browser
+         arguments:(NSDictionary *)arguments
+        completion:(void (^)(NSString *value, NSString *error))completion {
+
+    NSString *tabExpr = [self tabExpressionFor:browser arguments:arguments];
+    NSString *wrapped = JarvisWrapJS(js);
+    NSString *script;
+    if ([browser isEqualToString:kSafariName]) {
+        script = [NSString stringWithFormat:
+                  @"tell application \"Safari\"\n"
+                  @"  if (count of windows) = 0 then error \"浏览器没有打开的窗口\" number -1728\n"
+                  @"  do JavaScript \"%@\" in %@\n"
+                  @"end tell", wrapped, tabExpr];
+    } else {
+        script = [NSString stringWithFormat:
+                  @"tell application \"Google Chrome\"\n"
+                  @"  if (count of windows) = 0 then error \"浏览器没有打开的窗口\" number -1728\n"
+                  @"  execute %@ javascript \"%@\"\n"
+                  @"end tell", tabExpr, wrapped];
+    }
+    [self runRawScript:script app:browser completion:completion];
+}
+
+/// 跑一段 AppleScript 拿字符串结果。和 runScript: 共用队列与错误翻译，
+/// 但不接受 JXA、不暴露给模型——模型碰到的是上面那几个具体工具。
+- (void)runRawScript:(NSString *)source
+                 app:(NSString *)appName
+          completion:(void (^)(NSString *value, NSString *error))completion {
+
+    if (self.scriptRunning) {
+        completion(nil, @"上一段脚本还没结束，等它超时或换个方式");
+        return;
+    }
+    __block BOOL settled = NO;
+    NSObject *lock = [NSObject new];
+    void (^finish)(NSString *, NSString *) = ^(NSString *value, NSString *error) {
+        @synchronized (lock) {
+            if (settled) return;
+            settled = YES;
+        }
+        completion(value, error);
+    };
+
+    self.scriptRunning = YES;
+    dispatch_async(self.scriptQueue, ^{
+        NSString *blocked = [self automationBlockedFor:appName];
+        if (blocked) {
+            self.scriptRunning = NO;
+            finish(nil, blocked);
+            return;
+        }
+        NSDictionary *scriptError = nil;
+        OSAScript *script = [[OSAScript alloc] initWithSource:source
+                                                     language:[OSALanguage languageForName:@"AppleScript"]];
+        NSAppleEventDescriptor *answer = [script executeAndReturnError:&scriptError];
+        self.scriptRunning = NO;
+        if (scriptError) {
+            finish(nil, [self describeBrowserError:scriptError browser:appName]);
+            return;
+        }
+        finish([self stringFromDescriptor:answer depth:0] ?: @"", nil);
+    });
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kScriptCeiling * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        finish(nil, [NSString stringWithFormat:@"浏览器脚本超过 %.0fs 没返回。"
+                     @"页面可能卡在加载或弹了原生对话框。", kScriptCeiling]);
+    });
+}
+
+/// 「允许 Apple 事件中的 JavaScript」没开时报的是一条普通脚本错误，
+/// 笼统转达会让模型以为是权限没给、跑去让用户改系统设置——那是另一个开关，
+/// 改了也没用。这里单独认出来，把真正该点的地方说清楚。
+- (NSString *)describeBrowserError:(NSDictionary *)scriptError browser:(NSString *)browser {
+    NSString *message = scriptError[OSAScriptErrorMessageKey]
+                     ?: scriptError[NSAppleScriptErrorMessage] ?: @"";
+    BOOL jsDisabled = [message rangeOfString:@"JavaScript"].location != NSNotFound
+        && ([message rangeOfString:@"已关闭"].location != NSNotFound
+            || [message rangeOfString:@"not allowed"options:NSCaseInsensitiveSearch].location != NSNotFound
+            || [message rangeOfString:@"turned off"options:NSCaseInsensitiveSearch].location != NSNotFound
+            || [message rangeOfString:@"disabled"options:NSCaseInsensitiveSearch].location != NSNotFound);
+    if (jsDisabled) {
+        if ([browser isEqualToString:kSafariName]) {
+            return @"Safari 没有允许通过 Apple 事件执行 JavaScript。这是一次性设置，"
+                   @"请用户打开：Safari → 设置 → 高级 → 勾选「显示网页开发者功能」，"
+                   @"然后在菜单栏「开发」→「允许 Apple 事件中的 JavaScript」。"
+                   @"这个开关和系统设置里的权限无关，改系统设置没有用。";
+        }
+        return @"Chrome 没有允许通过 Apple 事件执行 JavaScript。这是一次性设置，"
+               @"请用户在 Chrome 菜单栏打开：查看 → 开发者 → 「允许 Apple 事件中的 JavaScript」。"
+               @"这个开关和系统设置里的权限无关，改系统设置没有用。";
+    }
+    return [self describeScriptError:scriptError];
+}
+
+#pragma mark 浏览器工具实现
+
+- (void)browserTabs:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    NSString *browser = [self resolveBrowser:arguments];
+    BOOL safari = [browser isEqualToString:kSafariName];
+    // 用制表符分隔自己拼串，比让 AppleScript 返回嵌套 list 好解析得多。
+    // ⚠️ 分隔符必须在 tell 块**外面**算好。`tab` 是 AppleScript 的制表符常量，
+    // 但在浏览器的 tell 块里 `tab` 同时是它字典里的类名，于是 `& tab &` 会被
+    // 当成字面字符串 "tab" 拼进去——脚本不报错，只是返回的行里没有制表符，
+    // 解析出 0 个标签页。这个坑不报错所以特别费时间，实测过才发现。
+    NSString *script = [NSString stringWithFormat:
+        @"set d to character id 9\n"
+        @"tell application \"%@\"\n"
+        @"  set out to \"\"\n"
+        @"  set wi to 0\n"
+        @"  repeat with w in windows\n"
+        @"    set wi to wi + 1\n"
+        @"    set ti to 0\n"
+        @"    repeat with t in tabs of w\n"
+        @"      set ti to ti + 1\n"
+        @"      set out to out & wi & d & ti & d & (name of t) & d & (URL of t) & linefeed\n"
+        @"    end repeat\n"
+        @"  end repeat\n"
+        @"  return out\n"
+        @"end tell", safari ? @"Safari" : @"Google Chrome"];
+
+    [self runRawScript:script app:browser completion:^(NSString *value, NSString *error) {
+        if (error) { completion(nil, error); return; }
+        NSMutableArray *tabs = [NSMutableArray array];
+        for (NSString *line in [value componentsSeparatedByString:@"\n"]) {
+            if (!line.length) continue;
+            NSArray *parts = [line componentsSeparatedByString:@"\t"];
+            if (parts.count < 4) continue;
+            [tabs addObject:@{@"window": @([parts[0] integerValue]),
+                              @"tab": @([parts[1] integerValue]),
+                              @"title": parts[2],
+                              @"url": [[parts subarrayWithRange:NSMakeRange(3, parts.count - 3)]
+                                       componentsJoinedByString:@"\t"]}];
+        }
+        completion(@{@"browser": browser, @"count": @(tabs.count), @"tabs": tabs}, nil);
+    }];
+}
+
+- (void)browserOpen:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    NSString *url = arguments[@"url"];
+    if (![url isKindOfClass:[NSString class]] || !url.length) {
+        completion(nil, @"缺少 url");
+        return;
+    }
+    if ([url rangeOfString:@"://"].location == NSNotFound) {
+        url = [@"https://" stringByAppendingString:url];
+    }
+    NSString *browser = [self resolveBrowser:arguments];
+    BOOL safari = [browser isEqualToString:kSafariName];
+    NSString *escaped = [url stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
+    // 没有窗口时 `make new tab` 会失败，所以两种情况分开写。
+    NSString *script = safari
+        ? [NSString stringWithFormat:
+           @"tell application \"Safari\"\n"
+           @"  activate\n"
+           @"  if (count of windows) = 0 then\n"
+           @"    make new document with properties {URL:\"%@\"}\n"
+           @"  else\n"
+           @"    tell front window to set current tab to (make new tab with properties {URL:\"%@\"})\n"
+           @"  end if\n"
+           @"  return URL of current tab of front window\n"
+           @"end tell", escaped, escaped]
+        : [NSString stringWithFormat:
+           @"tell application \"Google Chrome\"\n"
+           @"  activate\n"
+           @"  if (count of windows) = 0 then\n"
+           @"    make new window\n"
+           @"    set URL of active tab of front window to \"%@\"\n"
+           @"  else\n"
+           @"    tell front window to make new tab with properties {URL:\"%@\"}\n"
+           @"  end if\n"
+           @"  return URL of active tab of front window\n"
+           @"end tell", escaped, escaped];
+
+    [self runRawScript:script app:browser completion:^(NSString *value, NSString *error) {
+        if (error) { completion(nil, error); return; }
+        completion(@{@"ok": @YES, @"browser": browser, @"url": value ?: url}, nil);
+    }];
+}
+
+/// 页面快照：正文 + 可交互元素清单。相当于网页版的 ui_inspect。
+/// 每个元素带一个**自包含的 CSS 选择器**，browser_act 直接拿它定位——
+/// 不用序号是因为序号会随页面变动错位，而 ui_action 那条"路径只在界面没变时
+/// 有效"的限制已经证明了那种设计有多容易出错。
+- (void)browserRead:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    NSInteger maxChars = 6000;
+    if ([arguments[@"max_chars"] respondsToSelector:@selector(integerValue)]) {
+        maxChars = MIN(MAX([arguments[@"max_chars"] integerValue], 500), 20000);
+    }
+    NSString *filter = [arguments[@"selector"] isKindOfClass:[NSString class]]
+        ? arguments[@"selector"] : @"";
+
+    NSString *js = [NSString stringWithFormat:@
+        "(function(){\n"
+        "function cssPath(el){\n"
+        "  if(el.id){var q='#'+CSS.escape(el.id);try{if(document.querySelectorAll(q).length===1)return q;}catch(e){}}\n"
+        "  var parts=[];\n"
+        "  while(el&&el.nodeType===1&&el!==document.body){\n"
+        "    var seg=el.tagName.toLowerCase(),par=el.parentElement;\n"
+        "    if(par){var same=[].filter.call(par.children,function(c){return c.tagName===el.tagName;});\n"
+        "      if(same.length>1)seg+=':nth-of-type('+([].indexOf.call(same,el)+1)+')';}\n"
+        "    parts.unshift(seg);el=par;\n"
+        "  }\n"
+        "  return 'body>'+parts.join('>');\n"
+        "}\n"
+        "function label(el){\n"
+        "  var t=(el.getAttribute('aria-label')||el.getAttribute('title')||el.getAttribute('placeholder')||\n"
+        "         el.getAttribute('alt')||el.value||el.innerText||'').replace(/\\s+/g,' ').trim();\n"
+        "  return t.slice(0,80);\n"
+        "}\n"
+        "function visible(el){\n"
+        "  var r=el.getBoundingClientRect();\n"
+        "  if(r.width<1||r.height<1)return false;\n"
+        "  var s=getComputedStyle(el);\n"
+        "  return s.visibility!=='hidden'&&s.display!=='none'&&s.opacity!=='0';\n"
+        "}\n"
+        "var root=%@;\n"
+        "var sel='a,button,input,textarea,select,[role=\"button\"],[role=\"link\"],[role=\"tab\"],[role=\"menuitem\"],[onclick],[contenteditable=\"true\"]';\n"
+        "var els=[].slice.call(root.querySelectorAll(sel)).filter(visible).slice(0,120);\n"
+        "var items=els.map(function(el){\n"
+        "  var o={tag:el.tagName.toLowerCase(),label:label(el),selector:cssPath(el)};\n"
+        "  if(el.type)o.type=el.type;\n"
+        "  if(el.disabled)o.disabled=true;\n"
+        "  return o;\n"
+        "});\n"
+        "var text=(root.innerText||'').replace(/\\n{3,}/g,'\\n\\n').trim();\n"
+        "var truncated=text.length>%ld;\n"
+        "return JSON.stringify({title:document.title,url:location.href,\n"
+        "  text:text.slice(0,%ld),truncated:truncated,elements:items});\n"
+        "})()", filter.length ? [NSString stringWithFormat:@"(document.querySelector(%@)||document.body)",
+                                 [self jsStringLiteral:filter]] : @"document.body",
+        (long)maxChars, (long)maxChars];
+
+    NSString *browser = [self resolveBrowser:arguments];
+    [self evaluateJS:js browser:browser arguments:arguments
+          completion:^(NSString *value, NSString *error) {
+        if (error) { completion(nil, error); return; }
+        NSDictionary *parsed = [self parseJSON:value];
+        if (!parsed) {
+            completion(nil, @"页面返回的不是预期的 JSON，可能这个标签页还没加载完");
+            return;
+        }
+        NSMutableDictionary *out = [parsed mutableCopy];
+        out[@"browser"] = browser;
+        completion(out, nil);
+    }];
+}
+
+- (void)browserAct:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    NSString *selector = arguments[@"selector"];
+    NSString *action = arguments[@"action"] ?: @"click";
+    if (![selector isKindOfClass:[NSString class]] || !selector.length) {
+        completion(nil, @"缺少 selector（用 browser_read 拿到的那个）");
+        return;
+    }
+    NSString *value = [arguments[@"value"] isKindOfClass:[NSString class]] ? arguments[@"value"] : @"";
+
+    // 填值必须派发 input/change 事件：React/Vue 这类框架监听的是事件，
+    // 直接改 .value 它们收不到，表现是"字填进去了但提交时是空的"。
+    NSString *js = [NSString stringWithFormat:@
+        "(function(){\n"
+        "var el=document.querySelector(%@);\n"
+        "if(!el)return JSON.stringify({ok:false,error:'选择器没有匹配到元素，页面可能已经变了，重新 browser_read'});\n"
+        "if(el.disabled)return JSON.stringify({ok:false,error:'这个元素是禁用状态'});\n"
+        "el.scrollIntoView({block:'center'});\n"
+        "var act=%@,val=%@;\n"
+        "if(act==='fill'){\n"
+        "  var proto=el instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;\n"
+        "  var setter=Object.getOwnPropertyDescriptor(proto,'value');\n"
+        "  if(setter&&setter.set){setter.set.call(el,val);}else{el.value=val;}\n"
+        "  el.dispatchEvent(new Event('input',{bubbles:true}));\n"
+        "  el.dispatchEvent(new Event('change',{bubbles:true}));\n"
+        "}else if(act==='select'){\n"
+        "  el.value=val;el.dispatchEvent(new Event('change',{bubbles:true}));\n"
+        "}else if(act==='focus'){el.focus();}\n"
+        "else{el.click();}\n"
+        "return JSON.stringify({ok:true,action:act,tag:el.tagName.toLowerCase(),\n"
+        "  label:(el.innerText||el.value||'').replace(/\\s+/g,' ').trim().slice(0,60),\n"
+        "  value_now:(el.value!==undefined?String(el.value).slice(0,120):'')});\n"
+        "})()", [self jsStringLiteral:selector], [self jsStringLiteral:action],
+        [self jsStringLiteral:value]];
+
+    NSString *browser = [self resolveBrowser:arguments];
+    [self evaluateJS:js browser:browser arguments:arguments
+          completion:^(NSString *raw, NSString *error) {
+        if (error) { completion(nil, error); return; }
+        NSDictionary *parsed = [self parseJSON:raw];
+        if (!parsed) { completion(nil, @"页面没有返回预期结果"); return; }
+        if (![parsed[@"ok"] boolValue]) {
+            completion(nil, parsed[@"error"] ?: @"操作失败");
+            return;
+        }
+        NSMutableDictionary *out = [parsed mutableCopy];
+        out[@"browser"] = browser;
+        completion(out, nil);
+    }];
+}
+
+- (void)browserEval:(NSDictionary *)arguments completion:(JarvisToolCompletion)completion {
+    NSString *source = arguments[@"javascript"];
+    if (![source isKindOfClass:[NSString class]] || !source.length) {
+        completion(nil, @"缺少 javascript");
+        return;
+    }
+    NSString *browser = [self resolveBrowser:arguments];
+    [self evaluateJS:source browser:browser arguments:arguments
+          completion:^(NSString *value, NSString *error) {
+        if (error) { completion(nil, error); return; }
+        completion(@{@"ok": @YES, @"browser": browser, @"result": value ?: @""}, nil);
+    }];
+}
+
+#pragma mark 小工具
+
+/// 把字符串安全地变成一个 JS 字面量。用 JSON 编码器而不是自己拼引号——
+/// 引号、反斜杠、换行、Unicode 都得逃，手写迟早漏一种。
+- (NSString *)jsStringLiteral:(NSString *)text {
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@[text ?: @""]
+                                                   options:0 error:NULL];
+    NSString *wrapped = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    // ["..."] → "..."
+    return [wrapped substringWithRange:NSMakeRange(1, wrapped.length - 2)];
+}
+
+- (NSDictionary *)parseJSON:(NSString *)text {
+    if (![text isKindOfClass:[NSString class]] || !text.length) return nil;
+    NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
+    id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+    return [parsed isKindOfClass:[NSDictionary class]] ? parsed : nil;
+}
+
 
 @end
