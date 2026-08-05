@@ -331,3 +331,14 @@ App 通知"那种没有公共 API 的路子。走 Mail 自己的 AppleScript 就
 
 端到端结果：工具表 51 个（静态 37 + MCP 14），L0 不弹确认、参数错误变成 error 不抛异常、
 子代理拿不到 `agent_delegate`、explore 档拿不到 MCP 工具——全过。
+
+### 工具表膨胀是要量的，不是凭感觉的
+
+接一个 `server-filesystem`（14 个工具）**实测让平时那份工具表从 37 个 / 14156 字符
+涨到 51 个 / 23322 字符——每一轮闲聊都多带 65%、约 3666 token**，而这 14 个工具
+几乎全和 Jarvis 自带的 `fs_*` 重叠。所以它在 `~/.jarvis/config.json` 里配的是
+`agent_only: true`，只在 Agent 模式露出；平时的表回到 37 个 / 14156 字符，零额外开销。
+
+这条就是 `agent_only` 这个开关存在的理由（和当初给 grep/file_edit 加它是同一个理由：
+**怕它们吵**，不是怕它们危险）。以后接新 server 先量一遍再决定放哪边，
+量法：`registry.openai_schema(agent_mode=False)` 序列化后数字符。
