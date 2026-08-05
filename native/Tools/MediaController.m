@@ -43,20 +43,35 @@ static void LoadMediaRemote(void) {
 static NSString *const kNetEaseBundleID = @"com.netease.163music";
 static NSString *const kJarvisBundleID = @"com.jarvis.desktop";
 
-/// 搜索结果「综合」页里单曲区那颗「▶ 播放」按钮，**相对窗口原点的点偏移**。
+/// 搜索结果页上的点击目标，**相对窗口原点的点偏移**。
 ///
-/// 2026-08-06 截图实测：窗口 1470×821、1056×821、1056×741 三种尺寸下，
-/// 按钮中心都在 (337, 326)，大小约 58×26 点——**它是固定偏移，不随窗口缩放**。
-/// 所以这里必须写点偏移，不能写窗口比例：比例只在测它时那个窗口尺寸下成立，
-/// 换个高度就漂走（0.41 的老写法在 821 高时擦着按钮下沿过，741 高时差 9 点全空）。
+/// 走的是「单曲」标签页而不是「综合」页。综合页那颗「▶ 播放」按钮的 y
+/// 取决于页面上方有没有「歌手 / MV」卡片区——出现与否由搜的内容决定，
+/// 出现时按钮在 326、不出现时在 204，差 122 点，**没有任何常数能同时对**。
+/// 单曲页没有卡片区，布局与查询内容无关；那里的「播放全部」还高 34 点，
+/// 比综合页那颗 26 点的小按钮宽容得多。
+///
+/// 更要紧的是**点空了不会闯祸**：标签行和右上角在综合页上都是空白，
+/// 点不中最多是没播成；而综合页上按老坐标点歪会落进歌手卡片，
+/// 一跳转就把后续点击带进了另一套布局，最后播的是不相干的歌。
+///
+/// 2026-08-06 实测（窗口 1470×820 与 1100×741 两种尺寸，取值完全一致）：
+///   「单曲」标签   x=316（固定左偏移）
+///   「播放全部」   距窗口**右缘** 213 点（右对齐，所以按右缘算）
+/// y 有两种页头：搜索框下方是「猜你想搜」一行时整行在 140，是查询大标题时在 152。
+/// 标签只有 16 点高，两个 y 都点一下（都落在标签行内，无副作用）；
+/// 「播放全部」34 点高，取中点 146 对两种页头都落在按钮内。
 ///
 /// 单位是**点**不是像素。AX 的 position/size 和 CGEvent 鼠标坐标说的都是点，
-/// 所以这两个常数跨显示器通用——内置 Retina、1× 外接屏、多屏负坐标都不用特判。
-/// ⚠️ 但凡以后再从截图上量这个值，记得**除以那块屏的 backing scale**
-/// （内置屏截图是 2×，一般外接 1080p 是 1×）——同一颗按钮在两块屏上量出的
+/// 所以这些常数跨显示器通用——内置 Retina、1× 外接屏、多屏负坐标都不用特判。
+/// ⚠️ 但凡以后再从截图上量这些值，记得**除以那块屏的 backing scale**
+/// （内置屏截图是 2×，一般外接 1080p 是 1×）——同一个目标在两块屏上量出的
 /// 像素数差一倍，点数才是相同的那个。
-static const CGFloat kNetEasePlayButtonX = 337.0;
-static const CGFloat kNetEasePlayButtonY = 326.0;
+static const CGFloat kNetEaseSongsTabX = 316.0;
+static const CGFloat kNetEaseSongsTabYA = 140.0;
+static const CGFloat kNetEaseSongsTabYB = 152.0;
+static const CGFloat kNetEasePlayAllRightInset = 213.0;
+static const CGFloat kNetEasePlayAllY = 146.0;
 
 /// 口语名 → bundle id。auto 不在表里，单独处理。
 static NSDictionary<NSString *, NSString *> *PlayerAliases(void) {
@@ -99,6 +114,12 @@ static BOOL MainWindowBoundsForPID(pid_t pid, CGRect *outBounds) {
         }
     }
     return NO;
+}
+
+static void MoveMouse(CGPoint point) {
+    CGEventRef move = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, point, kCGMouseButtonLeft);
+    CGEventPost(kCGHIDEventTap, move);
+    CFRelease(move);
 }
 
 static void PostClick(CGPoint point) {
@@ -242,6 +263,22 @@ static void PostClick(CGPoint point) {
         if (shouldTemporarilyHideJarvis) [RunningAppWithBundleID(kJarvisBundleID) hide];
         NSRunningApplication *runningNetEase = RunningAppWithBundleID(kNetEaseBundleID);
         [runningNetEase activateWithOptions:NSApplicationActivateAllWindows];
+        // 回车之前必须把鼠标挪出搜索框下方——**这是搜错歌的真正原因**。
+        //
+        // 网易云的搜索联想下拉**按鼠标悬停高亮**，回车提交的是被悬停的那一条，
+        // 而不是你输入的文字。上一次点击（比如点"单曲"标签）会把指针留在
+        // (316, 189) 附近，正好压在下拉列表第三行上，于是
+        // 「海阔天空 Beyond」被提交成了联想词「海阔天空 beyond伴奏」——
+        // 2026-08-06 截图实测：粘贴进去的原文一字不差，是回车挑走了别的词。
+        // 搜错了词，页面内容跟着变，后面点得再准也是在播别的歌。
+        //
+        // 停在窗口左下角：那里是侧边栏/播放条，悬停无副作用，也够远。
+        CGRect parkBounds = CGRectZero;
+        if (MainWindowBoundsForPID(runningNetEase.processIdentifier, &parkBounds)) {
+            MoveMouse(CGPointMake(CGRectGetMinX(parkBounds) + 40,
+                                  CGRectGetMaxY(parkBounds) - 40));
+        }
+
         // 搜索词走剪贴板 + ⌘V，**不要**用 keystroke 逐字符打。
         // 实测（2026-08-06）：keystroke 打进网易云的搜索框会丢字符——
         // 「Back in Black」进去成了「Back inBlack」，「Hells Bells」更是只剩
@@ -288,11 +325,8 @@ static void PostClick(CGPoint point) {
             completion(nil, @"找不到网易云音乐主窗口");
             return;
         }
-        // 「综合」页单曲区的播放按钮，从第一条歌曲开始播。
         // 已经在放要的那首就别再点了——点下去是从头重放，而且万一状态回读
         // 慢半拍还会误判成没命中、再点一次点到别的歌上去。
-        CGPoint play = CGPointMake(CGRectGetMinX(bounds) + kNetEasePlayButtonX,
-                                   CGRectGetMinY(bounds) + kNetEasePlayButtonY);
         [self fetchStatus:^(NSDictionary *status) {
             if ([status[@"playing"] boolValue] && NetEaseTrackMatches(status, query)) {
                 NSMutableDictionary *r = [status mutableCopy];
@@ -303,8 +337,10 @@ static void PostClick(CGPoint point) {
                 completion(r, nil);
                 return;
             }
-            PostClick(play);
-            [self pollNetEasePlayback:4 query:query clicked:play
+            [self clickNetEasePlayAllInWindow:bounds];
+            CGPoint playAll = CGPointMake(CGRectGetMaxX(bounds) - kNetEasePlayAllRightInset,
+                                          CGRectGetMinY(bounds) + kNetEasePlayAllY);
+            [self pollNetEasePlayback:4 query:query clicked:playAll
                               restore:restorePreviousApp completion:completion];
         }];
     };
@@ -323,6 +359,21 @@ static void PostClick(CGPoint point) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), runSearch);
     }];
+}
+
+/// 切到「单曲」标签页，再点右上角的「播放全部」。
+///
+/// 两次标签点击对应两种页头布局，都落在标签行内；点空了是无害的空白区。
+/// 中间要留时间给标签页切换渲染——网易云是 Electron，切页不是同步的，
+/// 不等就会点在还没出现的按钮位置上。
+- (void)clickNetEasePlayAllInWindow:(CGRect)bounds {
+    CGFloat x = CGRectGetMinX(bounds) + kNetEaseSongsTabX;
+    PostClick(CGPointMake(x, CGRectGetMinY(bounds) + kNetEaseSongsTabYA));
+    usleep(150000);
+    PostClick(CGPointMake(x, CGRectGetMinY(bounds) + kNetEaseSongsTabYB));
+    usleep(900000);
+    PostClick(CGPointMake(CGRectGetMaxX(bounds) - kNetEasePlayAllRightInset,
+                          CGRectGetMinY(bounds) + kNetEasePlayAllY));
 }
 
 /// 播放到的是不是用户要的那首。
