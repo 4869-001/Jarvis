@@ -2118,7 +2118,17 @@ static NSArray<NSString *> *JarvisGuessSections(NSArray *nodes) {
     // 它的 body 会一路延伸到页尾——那样 lastObject 就是「提 交」按钮，
     // 一点就把日报发出去了，而且不可撤销。第一行永远在这一栏内，没有这个风险。
     // 代价是 line_end 追加时接在第一行末尾而不是整栏末尾，可以接受。
-    NSDictionary *target = body.firstObject ?: heading;
+    // 这一栏读不到任何内容行时**不要盲敲**。webview 会把滚出可视区的内容卸载掉，
+    // 这时候点标题、敲字，光标落在哪完全不可知——字可能进别的栏，也可能哪都没进。
+    // 实测滚动之后四个栏目一起从 AX 树里消失，正是这个情形。
+    if (!body.count) {
+        completion(nil, [NSString stringWithFormat:
+            @"找到了「%@」这个标题，但读不到它下面的任何内容行——多半是页面滚动后"
+            @"这一段被卸载了。先把它滚进可视区（ui_action click 它的标题会自动滚动），"
+            @"再写。没有盲敲，页面未被改动。", section]);
+        return;
+    }
+    NSDictionary *target = body.firstObject;
     AXUIElementRef root = [self rootElementForApp:app];
     if (!root) { completion(nil, @"拿不到界面元素"); return; }
     NSString *failure = nil;

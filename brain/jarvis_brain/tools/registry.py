@@ -141,7 +141,7 @@ TOOLS = [
     _tool("app_scriptable",
           "列出本机哪些应用能用 AppleScript 驱动。不确定某个应用能不能自动化时先问这个。",
           {"filter": _p("只看名字里含这个词的应用，可选")},
-          "L0", "native"),
+          "L0", "native", agent_only=True),
 
     _tool("app_dictionary",
           "读取某个应用的脚本字典：它支持哪些命令、有哪些对象和属性。"
@@ -150,7 +150,7 @@ TOOLS = [
           "返回 scriptable=false 表示这个应用没有脚本接口，改走 menu_invoke 或 ui_action。",
           {"app": _p("应用名，如 Safari、备忘录、Mail"),
            "search": _p("只看名字或说明里含这个词的命令与类，如 tab、message")},
-          "L0", "native", required=["app"]),
+          "L0", "native", required=["app"], agent_only=True),
 
     _tool("app_script",
           "对本机应用执行一段 AppleScript 或 JavaScript(JXA)。这是驱动有脚本字典的"
@@ -163,14 +163,14 @@ TOOLS = [
            "language": {"type": "string", "enum": ["applescript", "javascript"],
                         "description": "默认 applescript；javascript 即 JXA"},
            "timeout": _p("超时秒数，默认 45，上限 45", _INT)},
-          "L4", "native", required=["script"]),   # 等价于任意代码，撤法未知
+          "L4", "native", required=["script"], agent_only=True),   # 等价任意代码，撤法未知
 
     _tool("menu_list",
           "列出某个正在运行的应用的菜单。不传 menu 时返回顶层菜单名，"
           "传了则返回那个菜单里的所有菜单项——菜单项的名字就是这个应用的能力清单。"
           "没有脚本字典的应用优先走这条路。",
           {"app": _p("应用名"), "menu": _p("看某个菜单里的项，如 文件、编辑；不传则看顶层")},
-          "L0", "native", required=["app"]),
+          "L0", "native", required=["app"], agent_only=True),
 
     _tool("menu_invoke",
           "点击某个应用的菜单项，如 [\"文件\", \"新建标签页\"]。"
@@ -180,33 +180,24 @@ TOOLS = [
                     "description": "菜单路径，从顶层菜单名开始，如 [\"文件\", \"导出\", \"PDF\"]"},
            "activate": _p("先把应用切到前台（默认真）。后台应用的菜单常常点不动", _BOOL)},
           "L2", "native", required=["app", "path"],
-          recover="多数菜单命令可以在目标应用里按 ⌘Z 撤销，但不保证"),
+          recover="多数菜单命令可以在目标应用里按 ⌘Z 撤销，但不保证", agent_only=True),
 
     _tool("ui_inspect",
-          "读取某个应用当前窗口的界面元素：按钮、输入框、文本，以及屏幕坐标。\n"
-          "**几乎总是要带 find**：不带的话整屏元素表可能上万 token，"
-          "多扫几次就把上下文挤爆、步数也烧光了。想点什么就 find 什么。\n"
-          "两个要点：(1) 图标按钮的 title 是图标字体乱码，真名在 inferred_label 里；"
-          "(2) 有 frame 就能用 ui_action 的 click 点，**pressable=false 不代表点不了**。\n"
-          "只是想点一下东西的话**根本不用先调它**——直接 ui_action 传 find 一步到位。"
-          "它主要用于「点完确认界面真的变了」和「不知道有什么，先看一眼」。",
+          "读取应用界面元素：按钮、输入框、文本、屏幕坐标。"
+          "**几乎总要带 find**，不带会返回整屏、几次就把上下文挤爆。"
+          "图标按钮的真名在 inferred_label 里；有 frame 就能 click，pressable=false 也能点。"
+          "只是要点东西的话不用先调它——直接 ui_action 传 find。",
           {"app": _p("应用名"),
            "find": _p("只返回文字里含这个词的元素。**强烈建议每次都带**"),
            "interactive": _p("只返回可交互元素（按钮/输入框/静态文字）", _BOOL),
            "limit": _p("最多返回多少个，默认 60", _INT),
            "depth": _p("往下看几层，默认 6，最多 12", _INT)},
-          "L0", "native", required=["app"]),
+          "L0", "native", required=["app"], agent_only=True),
 
     _tool("ui_action",
-          "操作 ui_inspect 找到的某个界面元素。"
-          "path 必须来自刚刚那次 ui_inspect——界面变过就要重新 inspect，"
-          "拿旧路径去点会点到别的东西上。\n"
-          "**点东西优先用 click，不要用 press。** press 走辅助功能接口，很多应用"
-          "（钉钉这类 Qt 应用是典型）只实现了读取、没实现 press，调用会返回成功但"
-          "界面纹丝不动——那是最难查的一种失败。click 发的是真实鼠标事件，"
-          "对静态文字、自绘控件一样有效，代价是会把目标应用切到前台、光标闪一下。\n"
-          "点完**一定要再 ui_inspect 一次确认界面真的变了**：点在正确的坐标上"
-          "不等于那里就有响应。",
+          "操作 ui_inspect 找到的界面元素。path 只在界面没变时有效。"
+          "点东西用 click（press 在很多应用上是空操作，会报成功但界面不动）。"
+          "点完再 ui_inspect 确认界面真的变了。",
           {"app": _p("应用名"),
            "find": _p("**首选**：按元素上的文字直接找，如「工作台」。"
                       "用它就不用先 ui_inspect，一次调用完成，省一半工具调用"),
@@ -223,7 +214,7 @@ TOOLS = [
                                      "focus 聚焦；set_value 填入文本"},
            "value": _p("set_value 时要填的文本")},
           "L2", "native", required=["app"],
-          recover="界面操作没有通用撤法，多数应用里可以按 ⌘Z"),
+          recover="界面操作没有通用撤法，多数应用里可以按 ⌘Z", agent_only=True),
 
     # ------------------------------------------------ 浏览器（ObjC 执行）
     # 桌面应用不是都能驱动的：钉钉是 Qt 应用，没有脚本字典，Qt 的 macOS 辅助功能
@@ -233,7 +224,7 @@ TOOLS = [
           "列出浏览器当前打开的所有标签页（窗口号、标签号、标题、网址）。"
           "要操作网页之前先用它确认目标在第几个标签页。",
           {"browser": _p("chrome 或 safari；不填则自动挑正在运行的那个")},
-          "L0", "native"),
+          "L0", "native", agent_only=True),
 
     _tool("browser_read",
           "读取某个标签页：正文文本 + 页面上所有可点可填的元素清单，"
@@ -247,7 +238,7 @@ TOOLS = [
            "tab": _p("标签号，来自 browser_tabs，默认当前标签页", _INT),
            "selector": _p("只读页面的某一块，如 #main、.sidebar；不填则整页"),
            "max_chars": _p("正文最多返回多少字符，默认 6000", _INT)},
-          "L0", "native"),
+          "L0", "native", agent_only=True),
 
     _tool("browser_act",
           "操作网页元素：点击、填写输入框、选择下拉项。"
@@ -262,7 +253,7 @@ TOOLS = [
            "window": _p("窗口号", _INT),
            "tab": _p("标签号", _INT)},
           "L2", "native", required=["selector"],
-          recover="网页操作没有通用撤法；表单填写可以再填回去，提交类操作不可撤"),
+          recover="网页操作没有通用撤法；表单填写可以再填回去，提交类操作不可撤", agent_only=True),
 
     _tool("browser_open",
           "在浏览器里打开一个网址（新开标签页并切过去）。"
@@ -270,7 +261,7 @@ TOOLS = [
           "接着就能用 browser_read 读它。",
           {"url": _p("网址，不带协议头会自动补 https://"),
            "browser": _p("chrome 或 safari；不填则自动挑")},
-          "L1", "native", required=["url"]),
+          "L1", "native", required=["url"], agent_only=True),
 
     _tool("browser_eval",
           "在当前网页里执行一段 JavaScript 并拿回返回值。"
@@ -280,18 +271,16 @@ TOOLS = [
            "browser": _p("chrome 或 safari；不填则自动挑"),
            "window": _p("窗口号", _INT),
            "tab": _p("标签号", _INT)},
-          "L4", "native", required=["javascript"]),   # 等价任意代码，撤法未知
+          "L4", "native", required=["javascript"], agent_only=True),   # 等价任意代码
 
     # ------------------------------------------------ 分栏表单（ObjC 执行，一次调用完成）
     # 瓶颈从来不是工具（一次 0.02~0.06s），是模型轮次（一轮首字 1.4~12s）。
     # 所以把「找栏目→滚动→点击→输入→读回验证」合成一次调用，
     # 五轮往返变一轮，十几秒变零点几秒。
     _tool("form_write",
-          "往分栏表单的某个栏目里写内容，**一次调用完成定位、滚动、点击、输入和读回验证**。"
-          "日报周报、审批单、工单、问卷这类「标题+内容」重复若干组的界面一律用它，"
-          "不要再用 ui_inspect→ui_action→ui_type 拆成三四步——那是三四轮模型往返。\n"
-          "返回里带 before/after 和 verified：**verified 为真才算写成了**。"
-          "为假时会告诉你文字落到哪儿去了，那种情况要如实报告并清理，不要重试同样的参数。",
+          "往分栏表单的某个栏目写内容，**一次调用完成定位、滚动、点击、输入和读回验证**。"
+          "日报周报、审批单、工单这类界面用它，别拆成 inspect+act+type。"
+          "返回带 before/after 和 verified；verified 为假时会说明文字落到哪去了。",
           {"app": _p("应用名，如 钉钉"),
            "section": _p("栏目标题的**原文**，如「今日遇到的问题及解决方案」"),
            "text": _p("要写进去的内容"),
@@ -303,14 +292,14 @@ TOOLS = [
                         "description": "这一页所有栏目的标题。**填上更准**——"
                                        "它用来判断某一栏在哪里结束，不填则自动猜"}},
           "L2", "native", required=["app", "section", "text"],
-          recover="写错了可以再调一次用 line_replace 改回去；原内容在返回的 before 里"),
+          recover="写错了可以再调一次用 line_replace 改回去；原内容在返回的 before 里", agent_only=True),
 
     _tool("form_read",
           "一次读回分栏表单里各栏目的当前内容。写之前先看现状、写之后核对都用它。",
           {"app": _p("应用名"),
            "sections": {"type": "array", "items": _STR,
                         "description": "要读哪几个栏目的标题"}},
-          "L0", "native", required=["app", "sections"]),
+          "L0", "native", required=["app", "sections"], agent_only=True),
 
     # ------------------------------------------------ 界面操作剧本（会话执行）
     # 这不是"给某个 App 写工具"——剧本是数据不是代码，任何应用的任何重复流程都能存，
@@ -319,7 +308,7 @@ TOOLS = [
           "列出已经存好的界面操作剧本。用户提到一件「以前做过的、在某个应用里点一串」的事"
           "（写日志、提交审批、导出报表…）时**先查这个**——有现成剧本就别再从头摸索，"
           "重放比现场翻几百个界面元素快一个数量级，也稳得多。",
-          {}, "L0", "session", None),
+          {}, "L0", "session", None, agent_only=True),
 
     _tool("ui_recipe_run",
           "重放一个界面操作剧本。剧本按标签定位元素、每步都验证界面真的变了，"
@@ -330,79 +319,55 @@ TOOLS = [
                                      "缺参数会直接报错，不会用空值顶上"}},
           "L2", "session", None, required=["name"],
           recover="剧本会如实报告已经执行到第几步；界面停在那一步之后的状态，"
-                  "要还原得自己在应用里操作"),
+                  "要还原得自己在应用里操作", agent_only=True),
 
     _tool("ui_recipe_save",
-          "把刚刚摸索成功的一段界面操作存成剧本，以后一句话重放。"
-          "**在你靠 ui_inspect/ui_action 成功做完一件多步的事之后主动存**——"
-          "下次同样的请求就不用再摸索一遍。\n"
-          "定位一律用元素上的文字（find），**绝不要存 11/5/0/7 这种下标路径**——"
-          "界面一变它就指到别的东西上。关键步骤加 expect 写明「点完应该看到什么」，"
-          "这样重放时对不上会立刻停，而不是带着错误状态继续点。\n"
-          "提交、发送、删除这类不可撤销的动作**不要写进剧本**，把剧本停在它前一步，"
-          "并在 stops_at 里说明停在哪。",
-          {"name": _p("剧本名，英文小写加连字符，如 dingtalk-log"),
-           "title": _p("给人看的名字，如「钉钉写日志」"),
-           "description": _p("一句话说明这个剧本干什么、跑完之后停在什么状态"),
-           "app": _p("操作哪个应用，如 钉钉"),
-           "stops_at": _p("跑完停在哪一步，如「草稿已填好，未提交」"),
-           "params": {"type": "array",
-                      "description": "剧本需要的参数；步骤里用 {{参数名}} 引用",
+          "把刚跑通的一段界面操作存成剧本，下次一句话重放。定位用元素上的文字（find），"
+          "不要存下标路径；关键步骤写 expect 说明点完该看到什么；提交/发送这类不可撤销的"
+          "动作不要写进剧本，用 stops_at 说明停在哪。",
+          {"name": _p("英文小写加连字符，如 dingtalk-log"),
+           "title": _p("给人看的名字"),
+           "description": _p("干什么、跑完停在什么状态"),
+           "app": _p("操作哪个应用"),
+           "stops_at": _p("跑完停在哪一步"),
+           "params": {"type": "array", "description": "步骤里用 {{名}} 引用",
                       "items": {"type": "object",
-                                "properties": {"name": _p("参数名"),
-                                               "description": _p("这个参数是什么")}}},
-           "steps": {"type": "array",
-                     "description": "步骤列表",
+                                "properties": {"name": _STR, "description": _STR}}},
+           "steps": {"type": "array", "description": "步骤列表",
                      "items": {"type": "object",
                                "properties": {
                                    "action": {"type": "string",
                                               "enum": ["open_app", "click", "press", "type",
-                                                       "expect", "wait", "read", "optional_click"],
-                                              "description": "open_app 打开应用；click 真实鼠标点击"
-                                                             "（默认用它）；press 辅助功能点击；"
-                                                             "type 填文字；expect/wait 等某段文字出现；"
-                                                             "read 读回内容；optional_click 找到才点"
-                                                             "（用于有时才出现的确认框）"},
+                                                       "expect", "wait", "read", "optional_click"]},
                                    "find": _p("要找的元素上的文字"),
-                                   "role": _p("限定角色，如 AXButton；不确定就别填"),
-                                   "exact": _p("要求文字完全相等", _BOOL),
-                                   "text": _p("type 时要填入的文字，可用 {{参数名}}"),
-                                   "mode": _p("type 的写入方式，默认 line_end（分栏表单用它）；"
-                                              "取值同 ui_type 的 mode"),
-                                   "expect": _p("这一步做完后界面上应该出现的文字——**关键步骤都要写**。"
-                                                "必须挑「只在目标状态下才会出现」的文字：踩过一次，"
-                                                "expect 写「写日志」而侧边栏正好有同名项，"
-                                                "结果内容区根本没变、验证却过了"),
+                                   "role": _p("限定角色，如 AXButton"),
+                                   "exact": _p("要求完全相等", _BOOL),
+                                   "text": _p("type 要填的文字，可用 {{名}}"),
+                                   "mode": _p("type 的写入方式，默认 line_end"),
+                                   "expect": _p("这步之后该出现的文字。挑只在目标状态下才有的"),
                                    "region": {"type": "object",
-                                              "description": "限定在屏幕的哪块区域找，如 {\"x_min\": 200} "
-                                                             "表示只在内容区找。同名元素分布在侧边栏和"
-                                                             "内容区时必须用它区分",
+                                              "description": "限定屏幕区域；同名元素分布在"
+                                                             "侧边栏和内容区时必须用",
                                               "properties": {"x_min": _INT, "x_max": _INT,
                                                              "y_min": _INT, "y_max": _INT}},
                                    "expect_region": {"type": "object",
-                                                     "description": "expect 的区域约束，用法同 region",
+                                                     "description": "expect 的区域约束",
                                                      "properties": {"x_min": _INT, "x_max": _INT,
                                                                     "y_min": _INT, "y_max": _INT}},
                                    "sections": {"type": "array", "items": _STR,
-                                                "description": "read 时要读哪几个栏目的标题"},
-                                   "note": _p("这一步在干什么，给人看的")},
+                                                "description": "read 时要读的栏目标题"},
+                                   "note": _p("这步在干什么")},
                                "required": ["action"]}}},
           "L1", "session", None,
-          required=["name", "title", "app", "steps"]),
+          required=["name", "title", "app", "steps"], agent_only=True),
 
     _tool("ui_recipe_delete", "删掉一个剧本（界面改版后旧剧本失效时用）。",
           {"name": _p("剧本名")}, "L2", "session", None, required=["name"],
-          recover="剧本删了要重新录一遍"),
+          recover="剧本删了要重新录一遍", agent_only=True),
 
     _tool("ui_type",
-          "往当前焦点敲一段文字（合成键盘输入）。"
-          "**填输入框优先用它，不要用 ui_action 的 set_value**——很多应用"
-          "（钉钉这类 Qt 应用是典型）对辅助功能的写入支持是残的，set_value 会静默失效。"
-          "用之前先 ui_action click 一下目标输入框让它拿到焦点。\n"
-          "⚠️ **mode 决定会不会毁掉用户已有的内容。** 用户说「加一条」「补充」「再写点」"
-          "时一律用默认的 append，绝不要用 replace——"
-          "曾经发生过真实的数据丢失：让它往日志里加一条，它把已有内容全删了只留新的。"
-          "只有用户明确说「改写成」「换成」时才用 replace。",
+          "往当前焦点敲文字（合成键盘输入）。先 ui_action click 目标输入框取得焦点。"
+          "比 set_value 可靠——后者在很多应用上静默失效。",
           {"text": _p("要输入的文字，中英文都行"),
            "mode": {"type": "string",
                     "enum": ["append", "line_end", "line_replace", "insert", "replace"],
@@ -416,7 +381,7 @@ TOOLS = [
            "app": _p("目标应用名。**填上**——键盘事件发给前台应用，"
                      "不指定的话可能敲进别的窗口")},
           "L2", "native", required=["text"],
-          recover="敲进去的字要在应用里自己删；replace 清掉的内容找不回来"),
+          recover="敲进去的字要在应用里自己删；replace 清掉的内容找不回来", agent_only=True),
 
     # ------------------------------------------------ 文件（Brain 执行）
     _tool("fs_list", "列出目录内容。",
