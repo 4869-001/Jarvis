@@ -22,7 +22,42 @@ static const NSTimeInterval kSilentInputTimeout = 2.0;
 @property (nonatomic, assign) BOOL recoveryScheduled;
 @property (nonatomic, assign) BOOL silenceRecoveryDone;
 @property (nonatomic, assign) NSTimeInterval engineStartedAt;
+@property (nonatomic, strong) NSTimer *silenceWatchdog;
 @end
+
+/// 当前默认输入设备的名字和硬件采样率。
+///
+/// 值得单独跑一趟 CoreAudio HAL：日志里只写 AVAudioEngine 报的格式是不够的——
+/// 2026-08-06 实测 AirPods Pro 的硬件是 24000 Hz，而引擎一直报 48000 Hz，
+/// 正是这个不一致让收音全程静音。不把设备名和真实采样率打出来，
+/// 下次还是会在"engine 说 48k"这条假线索上绕。
+static NSString *CurrentInputDeviceDescription(void) {
+    AudioObjectPropertyAddress addr = {
+        kAudioHardwarePropertyDefaultInputDevice,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    AudioDeviceID device = kAudioObjectUnknown;
+    UInt32 size = sizeof(device);
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, &device) != noErr
+        || device == kAudioObjectUnknown) {
+        return @"（拿不到默认输入设备）";
+    }
+
+    CFStringRef name = NULL;
+    size = sizeof(name);
+    addr.mSelector = kAudioObjectPropertyName;
+    AudioObjectGetPropertyData(device, &addr, 0, NULL, &size, &name);
+
+    Float64 rate = 0;
+    size = sizeof(rate);
+    addr.mSelector = kAudioDevicePropertyNominalSampleRate;
+    addr.mScope = kAudioObjectPropertyScopeInput;
+    AudioObjectGetPropertyData(device, &addr, 0, NULL, &size, &rate);
+
+    NSString *deviceName = name ? (__bridge_transfer NSString *)name : @"?";
+    return [NSString stringWithFormat:@"%@ @ %.0f Hz", deviceName, rate];
+}
 
 @implementation AudioHub
 
@@ -135,10 +170,17 @@ static const NSTimeInterval kSilentInputTimeout = 2.0;
     self.silenceRecoveryDone = NO;
     self.engineStartedAt = CACurrentMediaTime();
 
+    NSString *device = CurrentInputDeviceDescription();
+    NSLog(@"[jarvis] 输入设备：%@ ｜ 引擎格式：%.0f Hz/%u ch commonFormat=%ld interleaved=%@",
+          device, format.sampleRate, (unsigned)format.channelCount,
+          (long)format.commonFormat, format.isInterleaved ? @"是" : @"否");
+
     __weak typeof(self) weakSelf = self;
     [input installTapOnBus:0 bufferSize:2048 format:format
                      block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
-        [weakSelf broadcast:[weakSelf monoFromBuffer:buffer]];
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        [strongSelf inspectInput:buffer];          // 先检测，且不受降混那几处 return 影响
+        [strongSelf broadcast:[strongSelf monoFromBuffer:buffer]];
     }];
 
     [engine prepare];
@@ -150,10 +192,84 @@ static const NSTimeInterval kSilentInputTimeout = 2.0;
     self.engine = engine;
     self.deviceFormat = format;
     self.format = self.monoFormat;      // 对外只承认单声道
+
+    // ⚠️ 输入设备一变（插拔耳机、AirPods 连上、A2DP↔HFP 切换），引擎缓存的格式
+    // 就作废了，但它**不会自己重建**，只会继续按旧格式收——表现是一路全零、
+    // 不报任何错。2026-08-06 实测：AirPods Pro 硬件 24000 Hz，引擎却一直报
+    // 48000 Hz，收音 30 秒一个非零采样都没有。这个通知就是系统给的正解。
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:AVAudioEngineConfigurationChangeNotification
+                                                  object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(audioConfigurationChanged:)
+                                                 name:AVAudioEngineConfigurationChangeNotification
+                                               object:engine];
+
+    // 看门狗必须按**时间**走，不能按 buffer 走。设备哑掉的时候 tap 根本不回调，
+    // 一个 buffer 都没有——挂在 buffer 上的检查一次也跑不到。这是 2026-08-06
+    // 第一版自救没生效的真正原因。
+    [self.silenceWatchdog invalidate];
+    self.silenceWatchdog = [NSTimer scheduledTimerWithTimeInterval:kSilentInputTimeout
+                                                          repeats:NO
+                                                            block:^(NSTimer *timer) {
+        [self checkForSilentInput];
+    }];
     NSLog(@"[jarvis] 麦克风已开：设备 %.0f Hz/%u ch → 下游 %.0f Hz/1 ch（Voice Processing %@）",
           format.sampleRate, (unsigned)format.channelCount, self.monoFormat.sampleRate,
           voiceProcessing ? @"开" : @"关");
     return YES;
+}
+
+/// 这一包音频里有没有任何一个非零采样；从头到尾全零就触发自救。
+///
+/// ⚠️ 这件事**必须独立于降混**。2026-08-06 栽了第二次：检测原本挂在
+/// monoFromBuffer 的后半段，而它前面有三处 return 会把检测整个跳过——
+/// 拿不到 monoFormat、单声道直通、floatChannelData 为空。那天设备变成
+/// 3 声道，日志如实报了"整段没有一个非零采样，采集链路是死的"，
+/// 而"关掉 Voice Processing 重开"的自救一次都没触发。
+///
+/// 所以这里不碰声道选择、不假设平面浮点，能认的格式全认，认不出来也要喊一声：
+/// 悄悄返回是这一晚上所有难查 bug 的共同形状。
+- (void)inspectInput:(AVAudioPCMBuffer *)buffer {
+    if (self.sawAnyNonZero) return;                 // 见过信号就不必再查
+    AVAudioFrameCount frames = buffer.frameLength;
+    if (frames == 0) return;
+
+    AVAudioChannelCount channels = buffer.format.channelCount;
+    BOOL interleaved = buffer.format.isInterleaved;
+    // 交错时全部采样挤在第 0 个平面里；非交错时每个声道一个平面。
+    NSUInteger planes = interleaved ? 1 : channels;
+    NSUInteger perPlane = interleaved ? (NSUInteger)frames * channels : frames;
+
+    BOOL nonZero = NO;
+    if (buffer.floatChannelData) {
+        float *const *data = buffer.floatChannelData;
+        for (NSUInteger p = 0; p < planes && !nonZero; p++)
+            for (NSUInteger i = 0; i < perPlane; i++)
+                if (data[p][i] != 0.0f) { nonZero = YES; break; }
+    } else if (buffer.int16ChannelData) {
+        int16_t *const *data = buffer.int16ChannelData;
+        for (NSUInteger p = 0; p < planes && !nonZero; p++)
+            for (NSUInteger i = 0; i < perPlane; i++)
+                if (data[p][i] != 0) { nonZero = YES; break; }
+    } else if (buffer.int32ChannelData) {
+        int32_t *const *data = buffer.int32ChannelData;
+        for (NSUInteger p = 0; p < planes && !nonZero; p++)
+            for (NSUInteger i = 0; i < perPlane; i++)
+                if (data[p][i] != 0) { nonZero = YES; break; }
+    } else {
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            NSLog(@"[jarvis] ⚠️ 认不出输入格式（commonFormat=%ld interleaved=%@），"
+                  @"静音检测和降混都会失效",
+                  (long)buffer.format.commonFormat, interleaved ? @"是" : @"否");
+        });
+        return;
+    }
+
+    // 只负责记录"见过信号"这一个事实。判死刑与自救交给 checkForSilentInput
+    // 那个定时器——放在这里就只能等 buffer 来，而设备哑掉时 buffer 永远不来。
+    if (nonZero) self.sawAnyNonZero = YES;
 }
 
 /// 换一台引擎，但**不动 taps**——对上层完全透明，收音不中断，
@@ -170,6 +286,25 @@ static const NSTimeInterval kSilentInputTimeout = 2.0;
     if (![self startEngine:&error withVoiceProcessing:useVoiceProcessing]) {
         NSLog(@"[jarvis] 重开麦克风失败：%@", error.localizedDescription);
     }
+}
+
+/// 引擎的 I/O 配置变了（换设备、采样率变、蓝牙 A2DP↔HFP 切换）。
+/// 系统只负责通知，重建是我们的事——不重建就会继续按作废的格式收，一路全零。
+- (void)audioConfigurationChanged:(NSNotification *)note {
+    if (!self.engine) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!self.engine) return;
+        NSLog(@"[jarvis] 音频配置已变化（%@），按新格式重建引擎", CurrentInputDeviceDescription());
+        [self restartEngineWithVoiceProcessing:self.voiceProcessing];
+    });
+}
+
+/// 开麦这么久了还一个非零采样都没见过 → 采集链路是死的，去救。
+/// 由定时器驱动，所以"设备一个 buffer 都不给"这种情况同样能抓到。
+- (void)checkForSilentInput {
+    self.silenceWatchdog = nil;
+    if (self.sawAnyNonZero || !self.engine.isRunning) return;
+    [self recoverFromSilentInput];
 }
 
 /// 输入连续送了两秒逐位精确的零。真麦克风的 ADC 底噪不可能是零，
@@ -195,6 +330,11 @@ static const NSTimeInterval kSilentInputTimeout = 2.0;
 
 - (void)stopEngine {
     if (!self.engine) return;
+    [self.silenceWatchdog invalidate];
+    self.silenceWatchdog = nil;
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:AVAudioEngineConfigurationChangeNotification
+                                                  object:nil];
     if (self.engine.isRunning) {
         [self.engine.inputNode removeTapOnBus:0];
         [self.engine stop];
@@ -216,7 +356,24 @@ static const NSTimeInterval kSilentInputTimeout = 2.0;
     if (buffer.format.channelCount == 1) return buffer;
 
     float *const *channels = buffer.floatChannelData;
-    if (!channels) return nil;
+    if (!channels) {
+        // 悄悄 return nil 会让下游一个采样都收不到、却什么错都不报——
+        // 正是这一晚上所有难查 bug 的形状。喊一声（只喊一次，这是实时线程）。
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            NSLog(@"[jarvis] ⚠️ 输入不是平面浮点，降混无法进行：commonFormat=%ld interleaved=%@",
+                  (long)buffer.format.commonFormat, buffer.format.isInterleaved ? @"是" : @"否");
+        });
+        return nil;
+    }
+    // 交错格式下 channels[c] 那套索引不成立，别乱猜，直接放弃降混并报出来。
+    if (buffer.format.isInterleaved) {
+        static dispatch_once_t onceInterleaved;
+        dispatch_once(&onceInterleaved, ^{
+            NSLog(@"[jarvis] ⚠️ 输入是交错格式，当前降混只支持平面格式");
+        });
+        return nil;
+    }
 
     if (!self.channelLocked) [self pickChannelFromBuffer:buffer];
 
@@ -252,7 +409,6 @@ static const NSTimeInterval kSilentInputTimeout = 2.0;
         const float *samples = channels[c];
         for (AVAudioFrameCount i = 0; i < frames; i++) sum += (double)samples[i] * samples[i];
         levels[c] = frames ? (float)sqrt(sum / frames) : 0.0f;
-        if (levels[c] > 0) self.sawAnyNonZero = YES;
         if (levels[c] > best) { best = levels[c]; bestIndex = c; }
     }
 
@@ -268,13 +424,7 @@ static const NSTimeInterval kSilentInputTimeout = 2.0;
         });
         return;
     }
-
-    // 一个非零采样都没见过，且已经过了判定窗口 → 采集链路死了，去救。
-    if (!self.sawAnyNonZero && !self.recoveryScheduled && !self.silenceRecoveryDone
-        && CACurrentMediaTime() - self.engineStartedAt > kSilentInputTimeout) {
-        self.recoveryScheduled = YES;
-        dispatch_async(dispatch_get_main_queue(), ^{ [self recoverFromSilentInput]; });
-    }
+    // 全零判定与自救不在这儿——它们在 inspectInput，那里对每个 buffer 无条件执行。
 }
 
 /// tap block 在 CoreAudio 的实时线程上跑，不要在里面做重活。
