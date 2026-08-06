@@ -23,7 +23,54 @@ static const NSTimeInterval kSilentInputTimeout = 2.0;
 @property (nonatomic, assign) BOOL silenceRecoveryDone;
 @property (nonatomic, assign) NSTimeInterval engineStartedAt;
 @property (nonatomic, strong) NSTimer *silenceWatchdog;
+@property (nonatomic, assign) BOOL forcedBuiltInMic;   ///< 已绕开系统默认输入，锁死内置麦克风
+@property (nonatomic, assign) BOOL restartingEngine;   ///< 正在主动重建，此间的配置变化通知是自己引起的
 @end
+
+/// 内置麦克风的设备 ID。找不到就返回 kAudioObjectUnknown。
+///
+/// 判据是 transport type 为 BuiltIn——比按名字匹配可靠，也不受系统语言影响
+/// （中文系统下它叫「MacBook Air麦克风」，英文下是 "MacBook Air Microphone"）。
+static AudioDeviceID BuiltInInputDeviceID(void) {
+    AudioObjectPropertyAddress addr = {
+        kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain
+    };
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &addr, 0, NULL, &size) != noErr) {
+        return kAudioObjectUnknown;
+    }
+    UInt32 count = size / sizeof(AudioDeviceID);
+    AudioDeviceID *devices = malloc(size);
+    if (!devices) return kAudioObjectUnknown;
+    AudioDeviceID found = kAudioObjectUnknown;
+
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, devices) == noErr) {
+        for (UInt32 i = 0; i < count; i++) {
+            // 必须有输入流，否则扬声器也会被选中
+            AudioObjectPropertyAddress streams = {
+                kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput, kAudioObjectPropertyElementMain
+            };
+            UInt32 streamSize = 0;
+            if (AudioObjectGetPropertyDataSize(devices[i], &streams, 0, NULL, &streamSize) != noErr
+                || streamSize == 0) {
+                continue;
+            }
+            UInt32 transport = 0;
+            UInt32 tSize = sizeof(transport);
+            AudioObjectPropertyAddress tAddr = {
+                kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal,
+                kAudioObjectPropertyElementMain
+            };
+            if (AudioObjectGetPropertyData(devices[i], &tAddr, 0, NULL, &tSize, &transport) == noErr
+                && transport == kAudioDeviceTransportTypeBuiltIn) {
+                found = devices[i];
+                break;
+            }
+        }
+    }
+    free(devices);
+    return found;
+}
 
 /// 当前默认输入设备的名字和硬件采样率。
 ///
@@ -106,6 +153,9 @@ static NSString *CurrentInputDeviceDescription(void) {
     if (!tap) return nil;
 
     if (!self.engine.isRunning) {
+        // 每次重新开麦都先回到系统默认输入——上一次锁内置麦克风是那次的应急，
+        // 这次用户可能已经拔了耳机、或换了别的设备，不该把上次的应急决定带过来。
+        self.forcedBuiltInMic = NO;
         if (![self startEngine:error withVoiceProcessing:YES]) return nil;
     }
 
@@ -129,6 +179,25 @@ static NSString *CurrentInputDeviceDescription(void) {
 - (BOOL)startEngine:(NSError **)error withVoiceProcessing:(BOOL)useVoiceProcessing {
     AVAudioEngine *engine = [[AVAudioEngine alloc] init];
     AVAudioInputNode *input = engine.inputNode;
+
+    // 绕开系统默认输入，直接把 AUHAL 指到内置麦克风。
+    // 必须在读 outputFormatForBus: 之前做——格式是跟着设备走的，
+    // 先读格式再换设备，拿到的就是上一台设备的格式（这正是本项目栽过的那类错位）。
+    if (self.forcedBuiltInMic) {
+        AudioDeviceID builtIn = BuiltInInputDeviceID();
+        AudioUnit unit = input.audioUnit;
+        if (builtIn != kAudioObjectUnknown && unit) {
+            OSStatus st = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+                                               kAudioUnitScope_Global, 0,
+                                               &builtIn, sizeof(builtIn));
+            if (st != noErr) {
+                NSLog(@"[jarvis] 锁定内置麦克风失败（OSStatus %d），退回系统默认输入", (int)st);
+                self.forcedBuiltInMic = NO;
+            }
+        } else {
+            self.forcedBuiltInMic = NO;
+        }
+    }
 
     // 系统级 AEC + 降噪 + AGC，必须在启动前设置。
     // 失败不致命——回落到"没有回声消除"，半双工门仍然挡得住自激。
@@ -171,14 +240,21 @@ static NSString *CurrentInputDeviceDescription(void) {
     self.engineStartedAt = CACurrentMediaTime();
 
     NSString *device = CurrentInputDeviceDescription();
-    NSLog(@"[jarvis] 输入设备：%@ ｜ 引擎格式：%.0f Hz/%u ch commonFormat=%ld interleaved=%@",
-          device, format.sampleRate, (unsigned)format.channelCount,
+    NSLog(@"[jarvis] 输入设备：%@%@ ｜ 引擎格式：%.0f Hz/%u ch commonFormat=%ld interleaved=%@",
+          device, self.forcedBuiltInMic ? @"（已锁定内置）" : @"",
+          format.sampleRate, (unsigned)format.channelCount,
           (long)format.commonFormat, format.isInterleaved ? @"是" : @"否");
 
+    // ⚠️ 传 nil 而不是我们自己读到的 format。
+    // 换设备之后 outputFormatForBus: 不会同步跟上：2026-08-06 实测，切到内置麦克风
+    // 那一刻它仍返回 AirPods 的 24000 Hz，而硬件是 48000 Hz，装 tap 直接抛
+    // 「Input HW format and tap format not matching」把整个 App 打崩。
+    // nil 表示"用这条总线当前真正的格式"，从根上消掉这类错位。
     __weak typeof(self) weakSelf = self;
-    [input installTapOnBus:0 bufferSize:2048 format:format
+    [input installTapOnBus:0 bufferSize:2048 format:nil
                      block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
+        [strongSelf ensureMonoFormatMatches:buffer];
         [strongSelf inspectInput:buffer];          // 先检测，且不受降混那几处 return 影响
         [strongSelf broadcast:[strongSelf monoFromBuffer:buffer]];
     }];
@@ -218,6 +294,26 @@ static NSString *CurrentInputDeviceDescription(void) {
           format.sampleRate, (unsigned)format.channelCount, self.monoFormat.sampleRate,
           voiceProcessing ? @"开" : @"关");
     return YES;
+}
+
+/// 下游的单声道格式必须跟着实际进来的音频走。
+///
+/// 开麦前读到的格式只是"当时的"——换设备、蓝牙切模式都会让它作废，而我们
+/// 广播出去的 monoFormat 如果还写着旧采样率，下游（唤醒词的 48k→16k 重采样、
+/// 识别器的 buffer）就会按错的速率解读，声音要么变调要么彻底不成立。
+/// 以第一包真实音频为准，之后每包比对一次，变了就重建。
+- (void)ensureMonoFormatMatches:(AVAudioPCMBuffer *)buffer {
+    double rate = buffer.format.sampleRate;
+    if (rate <= 0 || (self.monoFormat && self.monoFormat.sampleRate == rate)) return;
+
+    self.monoFormat = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                                       sampleRate:rate
+                                                         channels:1
+                                                      interleaved:NO];
+    self.format = self.monoFormat;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSLog(@"[jarvis] 下游格式跟随实际输入调整为 %.0f Hz/1 ch", rate);
+    });
 }
 
 /// 这一包音频里有没有任何一个非零采样；从头到尾全零就触发自救。
@@ -275,6 +371,7 @@ static NSString *CurrentInputDeviceDescription(void) {
 /// 换一台引擎，但**不动 taps**——对上层完全透明，收音不中断，
 /// 正在跑的识别任务只是中间少了一小段音频。
 - (void)restartEngineWithVoiceProcessing:(BOOL)useVoiceProcessing {
+    self.restartingEngine = YES;
     AVAudioEngine *old = self.engine;
     if (old.isRunning) {
         [old.inputNode removeTapOnBus:0];
@@ -286,15 +383,29 @@ static NSString *CurrentInputDeviceDescription(void) {
     if (![self startEngine:&error withVoiceProcessing:useVoiceProcessing]) {
         NSLog(@"[jarvis] 重开麦克风失败：%@", error.localizedDescription);
     }
+    // 稍等一拍再放行通知：设备切换引发的那条通知总是滞后一点到。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ self.restartingEngine = NO; });
 }
 
 /// 引擎的 I/O 配置变了（换设备、采样率变、蓝牙 A2DP↔HFP 切换）。
 /// 系统只负责通知，重建是我们的事——不重建就会继续按作废的格式收，一路全零。
 - (void)audioConfigurationChanged:(NSNotification *)note {
-    if (!self.engine) return;
+    if (!self.engine || self.restartingEngine) return;
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!self.engine) return;
-        NSLog(@"[jarvis] 音频配置已变化（%@），按新格式重建引擎", CurrentInputDeviceDescription());
+        if (!self.engine || self.restartingEngine) return;
+
+        // 换设备这个动作**本身**就会再发一条配置变化通知。不比对就重建的话，
+        // 重建又发通知、通知又重建，2026-08-06 实测直接进死循环刷屏。
+        // 只有格式真的变了才动手。
+        AVAudioFormat *now = [self.engine.inputNode outputFormatForBus:0];
+        if (now.sampleRate == self.deviceFormat.sampleRate
+            && now.channelCount == self.deviceFormat.channelCount) {
+            return;
+        }
+        NSLog(@"[jarvis] 音频配置已变化（%.0f Hz/%u ch → %.0f Hz/%u ch），按新格式重建引擎",
+              self.deviceFormat.sampleRate, (unsigned)self.deviceFormat.channelCount,
+              now.sampleRate, (unsigned)now.channelCount);
         [self restartEngineWithVoiceProcessing:self.voiceProcessing];
     });
 }
@@ -303,20 +414,47 @@ static NSString *CurrentInputDeviceDescription(void) {
 /// 由定时器驱动，所以"设备一个 buffer 都不给"这种情况同样能抓到。
 - (void)checkForSilentInput {
     self.silenceWatchdog = nil;
-    if (self.sawAnyNonZero || !self.engine.isRunning) return;
+    if (self.sawAnyNonZero) return;                 // 有信号，正常，不吭声
+    if (self.engine && !self.engine.isRunning) {
+        // 引擎自己停了——AirPods 在 A2DP 下给不出输入流时，CoreAudio 会把 IO 拆掉，
+        // 而 startAndReturnError 那一刻是成功的，所以不看这里根本发现不了。
+        NSLog(@"[jarvis] ⚠️ 开麦 %.0f 秒后引擎已自行停止，收音从未真正开始",
+              kSilentInputTimeout);
+    }
     [self recoverFromSilentInput];
 }
 
 /// 输入连续送了两秒逐位精确的零。真麦克风的 ADC 底噪不可能是零，
 /// 所以这不是"房间安静"，是采集链路死了。
 - (void)recoverFromSilentInput {
-    if (self.silenceRecoveryDone || !self.engine.isRunning) return;
+    // 判据是"引擎对象还在不在"，不是"跑没跑"。stopEngine 会把它置 nil——那是我们
+    // 主动收工，不该救；而它自己停下来（对象还在、isRunning 变假）恰恰是最该救的
+    // 那种故障。2026-08-06 之前写成 !isRunning 就 return，等于把真故障挡在门外。
+    if (self.silenceRecoveryDone || !self.engine) return;
 
     if (!self.voiceProcessing) {
-        // VP 都关了还是全零：问题在设备或授权那一层，代码这边没得救了，
-        // 留一行能直接指路的日志。
+        // VP 关了还是全零 —— 最后一招：绕开系统默认输入，直接锁内置麦克风。
+        //
+        // 这一级是给蓝牙耳机准备的。A2DP（高音质播放）模式下**根本没有麦克风通道**，
+        // 录音要切 HFP，而 HFP 会把播放音质砍到电话级，系统在有播放流时不肯切。
+        // 结果是：AirPods 在系统里是个正常的"输入设备"，能选中、能打开、
+        // 就是一个采样都不给。2026-08-06 实测，戴 AirPods 时 30 秒收音峰值 0.000。
+        //
+        // 对语音助手来说这个取舍很清楚：**戴不戴耳机都得能听见你说话**。
+        // 宁可用内置麦克风收，也不要静默失败。
+        if (!self.forcedBuiltInMic) {
+            AudioDeviceID builtIn = BuiltInInputDeviceID();
+            if (builtIn != kAudioObjectUnknown) {
+                NSLog(@"[jarvis] ⚠️ 关掉 Voice Processing 后仍然全零（当前输入：%@）。"
+                      @"改用内置麦克风——蓝牙耳机在 A2DP 下不提供麦克风通道。",
+                      CurrentInputDeviceDescription());
+                self.forcedBuiltInMic = YES;
+                [self restartEngineWithVoiceProcessing:NO];
+                return;
+            }
+        }
         self.silenceRecoveryDone = YES;
-        NSLog(@"[jarvis] ⚠️ 关掉 Voice Processing 后输入仍然全零。"
+        NSLog(@"[jarvis] ⚠️ 换到内置麦克风后输入仍然全零。"
               @"查：系统设置→隐私与安全性→麦克风是否给了 Jarvis、"
               @"输入设备是不是被别的应用独占、输入音量是不是 0。");
         return;
