@@ -7,8 +7,20 @@
 
 | 路径 | 说明 | 大小 |
 |------|------|------|
-| `en/jarvis-high.onnx` | 英文音色，Piper 格式 | 114MB |
+| `en/jarvis-high.onnx` | 英文音色，Piper 格式 · **不在 git 里，见下** | 114MB |
 | `en/jarvis-high.onnx.json` | Piper 配置（必须与 onnx 同目录） | 7KB |
+
+## ⚠️ 模型不入库，克隆后要自己放
+
+`en/jarvis-high.onnx` 有 114MB，超过 GitHub 单文件 100MB 的硬限制，已从版本库里
+剔除（`.gitignore` 挡着）。**不放这个文件，合成会在首次播报时失败。**
+
+从下面「英文：jarvis-high」一节的出处下载，放到 `voices/en/jarvis-high.onnx`
+即可——`.onnx.json` 配置仍在库里，两个文件必须同目录。
+
+历史上这里还有过一个 328MB 的中文 Kokoro 模型，早已不用（中文短词改走拼音 +
+同一英文音色），2026-08-06 连同它在 git 历史里的副本一起清掉了：仓库从 420MB
+降到 29MB。别再把 `.onnx` 提交进来。
 | `synth.py` | 英文及中文拼音合成脚本 | — |
 | `samples/` | 你确认的两个金属处理 mp3 | 65KB |
 
