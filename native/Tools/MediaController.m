@@ -72,6 +72,9 @@ static const CGFloat kNetEaseSongsTabYA = 140.0;
 static const CGFloat kNetEaseSongsTabYB = 152.0;
 static const CGFloat kNetEasePlayAllRightInset = 213.0;
 static const CGFloat kNetEasePlayAllY = 146.0;
+/// 单曲列表第一行（备选入口，在窗口左侧）。行高约 79 点，比按钮宽容得多。
+static const CGFloat kNetEaseFirstRowX = 270.0;
+static const CGFloat kNetEaseFirstRowY = 275.0;
 
 /// 口语名 → bundle id。auto 不在表里，单独处理。
 static NSDictionary<NSString *, NSString *> *PlayerAliases(void) {
@@ -127,9 +130,31 @@ static BOOL MainWindowBoundsForPID(pid_t pid, CGRect *outBounds) {
 /// 单靠矩形包含判断，会得出"哪儿都被挡住了"的荒唐结论。自家窗口不一样：
 /// 是不是浮动、在不在那个位置、透不透事件，我们全都确切知道。
 ///
+/// 自家有没有浮动窗口盖在这个点上。**只查不动**——用来"绕开"而不是"挪开"。
+///
+/// 绕得开就别动面板：把面板 orderOut 再放回虽然管用，但用户看到的是对话框
+/// 凭空消失一秒多再冒出来（2026-08-06 用户反馈「切歌时对话框会闪退再出现」）。
+/// 播放入口本来就有左右两个、相距近 1000 点，挑没被盖住的那个即可。
+static BOOL OwnWindowCoversPoint(CGPoint point) {
+    NSScreen *primary = NSScreen.screens.firstObject;
+    if (!primary || NSApp == nil) return NO;
+    CGFloat flipHeight = NSMaxY(primary.frame);
+    NSPoint flipped = NSMakePoint(point.x, flipHeight - point.y);
+    for (NSWindow *window in NSApp.windows) {
+        if (!window.isVisible || window.level <= NSNormalWindowLevel) continue;
+        if (NSPointInRect(flipped, window.frame)) return YES;
+    }
+    return NO;
+}
+
+/// 最后一招：把挡路的自家窗口收起来，点完立刻放回。
+///
+/// 只在两个播放入口**都**被盖住时才用得上——678 点宽的面板盖不住相距 1000 点的
+/// 两个点，除非用户把面板拉得特别宽。会让面板闪一下，所以能绕就不走这条。
+///
 /// 试过 ignoresMouseEvents（不改层序、无视觉变化，理论上最干净）——**在这个面板上
 /// 没用**：2026-08-06 实测日志明明打了"放行鼠标事件"，右上角那一下仍被面板接走，
-/// 而同一次里没被盖住的两下标签点击照常生效。所以老老实实 orderOut，点完立刻放回。
+/// 而同一次里没被盖住的两下标签点击照常生效。
 /// `[jarvisApp hide]` 也拦不住这件事——NSRunningApplication 的 hide 对浮动面板无效。
 static NSArray<NSWindow *> *HideOwnWindowsCovering(NSArray<NSValue *> *points) {
     NSScreen *primary = NSScreen.screens.firstObject;
@@ -408,18 +433,40 @@ static void PostClick(CGPoint point) {
 /// 选「播放全部」而不是列表第一行，是因为它点空了最安全：万一标签没切过去，
 /// 这个位置在综合页上是空白，什么都不会发生；而第一行那个位置在综合页上是
 /// 歌手卡片，点下去会跳转，一跳转后面的坐标就全落进另一套布局了。
+- (BOOL)ownWindowCoversPoint:(CGPoint)point { return OwnWindowCoversPoint(point); }
+
 - (CGPoint)clickNetEasePlayInWindow:(CGRect)bounds {
     CGFloat tabX = CGRectGetMinX(bounds) + kNetEaseSongsTabX;
     CGPoint tabA = CGPointMake(tabX, CGRectGetMinY(bounds) + kNetEaseSongsTabYA);
     CGPoint tabB = CGPointMake(tabX, CGRectGetMinY(bounds) + kNetEaseSongsTabYB);
-    CGPoint play = CGPointMake(CGRectGetMaxX(bounds) - kNetEasePlayAllRightInset,
-                               CGRectGetMinY(bounds) + kNetEasePlayAllY);
 
-    NSArray<NSWindow *> *reopened = HideOwnWindowsCovering(@[
-        [NSValue valueWithPoint:NSPointFromCGPoint(tabA)],
-        [NSValue valueWithPoint:NSPointFromCGPoint(tabB)],
-        [NSValue valueWithPoint:NSPointFromCGPoint(play)],
-    ]);
+    // 播放入口有两个，一右一左，相距近 1000 点：
+    //   右上角「播放全部」——点空了落在空白区，最安全，首选
+    //   单曲列表第一行——行高约 79 点，最宽容，备选
+    // 先挑一个**没被自家面板盖住**的用。这样面板全程不用动：
+    // 之前的做法是把面板 orderOut 再放回，功能上对，但用户看到的是
+    // 对话框凭空消失一秒多再冒出来（2026-08-06 用户反馈"切歌时对话框会闪退"）。
+    CGPoint playAll = CGPointMake(CGRectGetMaxX(bounds) - kNetEasePlayAllRightInset,
+                                  CGRectGetMinY(bounds) + kNetEasePlayAllY);
+    CGPoint firstRow = CGPointMake(CGRectGetMinX(bounds) + kNetEaseFirstRowX,
+                                   CGRectGetMinY(bounds) + kNetEaseFirstRowY);
+    CGPoint play = playAll;
+    if ([self ownWindowCoversPoint:playAll] && ![self ownWindowCoversPoint:firstRow]) {
+        play = firstRow;
+        NSLog(@"[jarvis] 「播放全部」被面板挡住，改点单曲列表第一行");
+    }
+
+    // 两个都被盖住才动面板——678 点宽的面板盖不住相距 1000 点的两个点，
+    // 只有用户把面板拉得特别宽时才会走到这里。
+    NSArray<NSWindow *> *reopened = @[];
+    if ([self ownWindowCoversPoint:play] || [self ownWindowCoversPoint:tabA]
+        || [self ownWindowCoversPoint:tabB]) {
+        reopened = HideOwnWindowsCovering(@[
+            [NSValue valueWithPoint:NSPointFromCGPoint(tabA)],
+            [NSValue valueWithPoint:NSPointFromCGPoint(tabB)],
+            [NSValue valueWithPoint:NSPointFromCGPoint(play)],
+        ]);
+    }
 
     // ⚠️ 必须让运行循环转一圈，改动才会真正到达窗口服务器。
     // 用 usleep 阻塞主线程的话 CATransaction 一次都不提交——实测症状是
