@@ -135,7 +135,8 @@ static const CGFloat kWorkbenchHeight = 700.0;
     self.panel.releasedWhenClosed = NO;
     self.panel.opaque = NO;
     self.panel.backgroundColor = [NSColor clearColor];
-    self.panel.appearance = [NSAppearance appearanceNamed:NSAppearanceNameVibrantDark];
+    // 跟随系统外观：毛玻璃材质和网页的 prefers-color-scheme 会一起在深浅之间切换
+    self.panel.appearance = nil;
     self.panel.minSize = NSMakeSize(360, 360);
 
     // 毛玻璃必须由 AppKit 做：WKWebView 关掉 drawsBackground 后，CSS 的
