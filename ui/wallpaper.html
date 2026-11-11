@@ -13,16 +13,16 @@
   body{
     /* 壁纸模式下背景保持透明，只在球体后面压一层柔和暗晕来保证对比度。
        若你的桌面壁纸很亮、球体发虚，把 --backdrop 的透明度调高即可。 */
-    background:radial-gradient(circle at 50% 47%, rgba(4,7,13,.62) 0%, rgba(4,7,13,.34) 34%, transparent 62%);
     font-family:-apple-system,'Helvetica Neue',sans-serif;
   }
-  #core{position:fixed;inset:0;width:100%;height:100%;display:block;}
+  #core{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:1;}
+  .telemetry, #boot{z-index:3;}
 
   /* 底部极简遥测。启动完成前不露面——先让 #boot 把那句"我准备好了"说完，
-     两者共用同一个锚点（球体正下方 23vh），交接时是同一个位置的淡入淡出，
+     两者共用同一个锚点（球体光环正下方 33vmin），交接时是同一个位置的淡入淡出，
      不是两个东西各占一块地方。 */
   .telemetry{
-    position:fixed;left:50%;top:calc(50% + 23vh);transform:translateX(-50%);
+    position:fixed;left:50%;top:calc(50% + 33vmin);transform:translateX(-50%);
     display:flex;align-items:center;gap:14px;white-space:nowrap;
     font-family:'SF Mono',Menlo,monospace;font-size:11px;letter-spacing:3px;
     color:var(--text-dim);text-shadow:0 0 12px rgba(255,140,26,.45);
@@ -44,7 +44,7 @@
      用一条细进度条而不是套在球体上的圆环，两者不会互相抢视觉重心。
      全英文：LOADING + 百分比，不出现中文。 */
   #boot{
-    position:fixed;left:50%;top:calc(50% + 23vh);transform:translateX(-50%);
+    position:fixed;left:50%;top:calc(50% + 33vmin);transform:translateX(-50%);
     display:flex;flex-direction:column;align-items:center;gap:8px;
     pointer-events:none;transition:opacity .5s ease;
   }
@@ -62,10 +62,67 @@
     display:block;height:100%;width:0%;border-radius:2px;background:var(--accent);
     box-shadow:0 0 8px rgba(255,140,26,.65);transition:width .35s ease;
   }
+  /* ── 全息投影 ─────────────────────────────────────────────
+     粒子球像一束投射出来的全息影像：球后一团环境光和一小片点阵（只在球周围，
+     边缘淡出，不盖住桌面壁纸）、扫描线和缓慢下移的扫描带、边缘的色散重影、
+     偶尔一次轻微的信号抖动、外圈一道缓慢转动的细光环。
+     尺寸全用 vmin：相机按屏幕短边定距（见 resize() 的 FILL），球的大小就和 vmin 成正比，
+     横屏竖屏都对得上。主页的实时演示用的是同一套（scripts/sync-jarvis-orb.py），
+     它只额外铺一层整页背景、加一套白天配色。 */
+  :root{
+    --ambient: radial-gradient(circle at 50% 50%, rgba(255,128,30,.16) 0%, rgba(255,110,20,.05) 32%, transparent 58%);
+    --dot:     rgba(255,190,130,.10);
+    --field:   radial-gradient(circle, rgba(255,140,40,.07) 0%, transparent 62%);
+    --scan:    rgba(255,196,140,.075);
+    --band:    rgba(255,196,140,.09);
+    --ring:    rgba(255,170,90,.30);
+    --fringe-r: rgba(255,70,20,.28);
+    --fringe-c: rgba(90,200,255,.07);
+    --orb-filter: sepia(.35) saturate(1.35) hue-rotate(-8deg);
+    --orb-blend: normal;
+    --blend:   screen;
+  }
+  .holo-bg, .holo{position:fixed;inset:0;overflow:hidden;pointer-events:none;}
+  .holo-bg{
+    background: radial-gradient(circle, var(--dot) 1px, transparent 1.3px) 0 0 / 22px 22px, var(--ambient);
+    -webkit-mask-image: radial-gradient(circle at 50% 50%, #000 0, #000 22vmin, transparent 46vmin);
+  }
+  .holo-field{position:absolute;left:50%;top:50%;width:64vmin;height:64vmin;transform:translate(-50%,-50%);
+    border-radius:50%;background:var(--field);}
+  #core.holo-orb{
+    filter: var(--orb-filter) drop-shadow(.16vmin 0 0 var(--fringe-c)) drop-shadow(-.16vmin 0 0 var(--fringe-r));
+    mix-blend-mode: var(--orb-blend);
+    animation: holo-glitch 11s steps(1) infinite;
+  }
+  @keyframes holo-glitch{
+    0%,100%{transform:none;opacity:1} 47%{transform:translateX(.5vmin) skewX(-1.5deg);opacity:.78}
+    47.6%{transform:translateX(-.3vmin);opacity:.95} 48.2%{transform:none;opacity:1}
+    82%{opacity:.86} 82.5%{opacity:1}
+  }
+  .holo-scan{position:absolute;left:50%;top:50%;width:64vmin;height:64vmin;transform:translate(-50%,-50%);
+    border-radius:50%;mix-blend-mode:var(--blend);
+    background:repeating-linear-gradient(to bottom, var(--scan) 0 1px, transparent 1px 3px);
+    -webkit-mask-image:radial-gradient(circle, #000 42%, transparent 70%);}
+  .holo-scan::after{content:'';position:absolute;left:0;right:0;top:-20%;height:16%;
+    background:linear-gradient(to bottom, transparent, var(--band) 45%, var(--band) 55%, transparent);
+    animation:holo-sweep 6.5s cubic-bezier(.45,0,.55,1) infinite;}
+  @keyframes holo-sweep{from{top:-20%}to{top:104%}}
+  .holo-ring{position:absolute;left:50%;top:50%;width:56vmin;height:56vmin;transform:translate(-50%,-50%);border-radius:50%;
+    background:conic-gradient(from 0deg, transparent 0deg, var(--ring) 40deg, transparent 110deg, transparent 200deg, var(--ring) 230deg, transparent 290deg);
+    -webkit-mask:radial-gradient(circle, transparent 69.4%, #000 69.8%, #000 70.4%, transparent 70.8%);
+    animation:holo-turn 18s linear infinite;}
+  @keyframes holo-turn{to{transform:translate(-50%,-50%) rotate(360deg)}}
+  /* 省电：去掉每帧都要算的色散滤镜和几条动画，只留静态的扫描线和光环 */
+  body.low-power #core.holo-orb{filter:var(--orb-filter);animation:none;}
+  body.low-power .holo-scan::after, body.low-power .holo-ring{animation:none;}
+  @media (prefers-reduced-motion: reduce){ #core.holo-orb, .holo-scan::after, .holo-ring{animation:none;} }
 </style>
 </head>
 <body>
-  <canvas id="core"></canvas>
+  <div class="holo-bg"></div>
+  <div class="holo"><div class="holo-field"></div></div>
+  <canvas id="core" class="holo-orb"></canvas>
+  <div class="holo" style="z-index:2"><div class="holo-scan"></div><div class="holo-ring"></div></div>
   <div id="boot">
     <div class="label">LOADING <b id="bootPct">0%</b></div>
     <div class="bar"><i id="bootFill"></i></div>
@@ -100,8 +157,8 @@ const FX = { pulse: 0, state: 'idle', stateMix: 0, level: 0, levelMix: 0,
 
 /* ---------- 功耗档位 ---------- */
 const PROFILE = {
-  ac:      { fps: 30, rim: true,  plates: true  },
-  battery: { fps: 15, rim: false, plates: false }
+  ac:      { fps: 30, density: 1.0 },
+  battery: { fps: 15, density: 0.5 }
 };
 let power = 'ac';
 let running = true;
@@ -128,19 +185,6 @@ const CORE = (function(){
   const ADD = THREE.AdditiveBlending;
   const R   = 1.0;
 
-  const cHot  = new THREE.Color(0xfff3d0);
-  const cGold = new THREE.Color(0xffc46a);
-  const cAmb  = new THREE.Color(0xff8a1e);
-  const cDeep = new THREE.Color(0xff6a0e);
-  const tmp   = new THREE.Color();
-
-  /* 分层渐入渐出的相位映射：把 stateMix 的某段区间映射到 0..1。
-     各动效按不同阈值启动（涟漪最先 → 光点 → 波纹 → 喷射粒子），
-     形成"波浪式"激活；回到 idle 时反向渐出，不再瞬时消失。 */
-  function phaseOf(mix, start, end) {
-    return Math.max(0, Math.min(1, (mix - start) / (end - start)));
-  }
-
   function radialTex(stops){
     const c = document.createElement('canvas'); c.width = c.height = 128;
     const x = c.getContext('2d');
@@ -149,323 +193,182 @@ const CORE = (function(){
     x.fillStyle = g; x.fillRect(0,0,128,128);
     return new THREE.CanvasTexture(c);
   }
-  function gridTex(){
-    const c = document.createElement('canvas'); c.width = c.height = 64;
-    const x = c.getContext('2d');
-    x.strokeStyle = 'rgba(255,205,130,.85)'; x.lineWidth = 2;
-    for (let i = 0; i <= 4; i++){
-      const p = i*16;
-      x.beginPath(); x.moveTo(p,0); x.lineTo(p,64); x.stroke();
-      x.beginPath(); x.moveTo(0,p); x.lineTo(64,p); x.stroke();
-    }
-    x.fillStyle = 'rgba(255,170,60,.18)'; x.fillRect(0,0,64,64);
-    return new THREE.CanvasTexture(c);
-  }
   const glowTex = radialTex([
     [0,'rgba(255,255,252,1)'],[0.09,'rgba(255,240,190,.96)'],
     [0.30,'rgba(255,168,60,.52)'],[1,'rgba(255,120,20,0)']
   ]);
 
-  const _a = new THREE.Vector3(), _b = new THREE.Vector3();
-  function onSphere(out){
-    const u = Math.random()*2-1, ph = Math.random()*Math.PI*2;
-    const s = Math.sqrt(Math.max(0, 1-u*u));
-    return out.set(s*Math.cos(ph), u, s*Math.sin(ph));
+  /* =========================================================
+     虚空粒子 —— 球只由粒子构成，没有线框、环和"皮"。
+     "活"来自四件事，全部在顶点着色器里算，CPU 每帧只改几个 uniform：
+       1) 流转：粒子沿球面被一张缓慢流动的噪声场推着走，同时按半径差速自转
+          （越靠里转得越快），整体像一团在自己转动的星云；
+       2) 微澜：沿法线只有很小的起伏，用来让亮度成片明暗，而不是让外形变软——
+          外形大幅变形就是"水母"；
+       3) 逸散：一部分粒子从表面升起、飘远、熄灭，再从表面重生，像在缓缓呼出火星；
+       4) 呼吸：吸气快、呼气慢、呼完停一拍，半径、亮度、逸散一起涨落。
+     ========================================================= */
+  const mats = [];
+  // Simplex 3D noise —— Ian McEwan / Ashima Arts（MIT）
+  const NOISE_GLSL = [
+    'vec3 mod289(vec3 x){ return x - floor(x * (1.0/289.0)) * 289.0; }',
+    'vec4 mod289(vec4 x){ return x - floor(x * (1.0/289.0)) * 289.0; }',
+    'vec4 permute(vec4 x){ return mod289(((x*34.0)+1.0)*x); }',
+    'vec4 taylorInvSqrt(vec4 r){ return 1.79284291400159 - 0.85373472095314 * r; }',
+    'float snoise(vec3 v){',
+    '  const vec2 C = vec2(1.0/6.0, 1.0/3.0); const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);',
+    '  vec3 i = floor(v + dot(v, C.yyy)); vec3 x0 = v - i + dot(i, C.xxx);',
+    '  vec3 g = step(x0.yzx, x0.xyz); vec3 l = 1.0 - g;',
+    '  vec3 i1 = min(g.xyz, l.zxy); vec3 i2 = max(g.xyz, l.zxy);',
+    '  vec3 x1 = x0 - i1 + C.xxx; vec3 x2 = x0 - i2 + C.yyy; vec3 x3 = x0 - D.yyy;',
+    '  i = mod289(i);',
+    '  vec4 p = permute(permute(permute(i.z + vec4(0.0, i1.z, i2.z, 1.0)) + i.y + vec4(0.0, i1.y, i2.y, 1.0)) + i.x + vec4(0.0, i1.x, i2.x, 1.0));',
+    '  float n_ = 0.142857142857; vec3 ns = n_ * D.wyz - D.xzx;',
+    '  vec4 j = p - 49.0 * floor(p * ns.z * ns.z);',
+    '  vec4 x_ = floor(j * ns.z); vec4 y_ = floor(j - 7.0 * x_);',
+    '  vec4 x = x_ * ns.x + ns.yyyy; vec4 y = y_ * ns.x + ns.yyyy; vec4 h = 1.0 - abs(x) - abs(y);',
+    '  vec4 b0 = vec4(x.xy, y.xy); vec4 b1 = vec4(x.zw, y.zw);',
+    '  vec4 s0 = floor(b0)*2.0 + 1.0; vec4 s1 = floor(b1)*2.0 + 1.0; vec4 sh = -step(h, vec4(0.0));',
+    '  vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy; vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;',
+    '  vec3 p0 = vec3(a0.xy, h.x); vec3 p1 = vec3(a0.zw, h.y); vec3 p2 = vec3(a1.xy, h.z); vec3 p3 = vec3(a1.zw, h.w);',
+    '  vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));',
+    '  p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;',
+    '  vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0); m = m * m;',
+    '  return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));',
+    '}'].join('\n');
+
+  /* 一种材质管三团粒子（主云 / 内核 / 逸散火星），靠 uniform 区分性格。
+     position 存单位方向；半径 = uRadius * aShell。 */
+  function voidMat(o){
+    const m = new THREE.ShaderMaterial({
+      uniforms:{
+        uTime:{value:0}, uDist:{value:9}, uScale:{value:500},
+        uRadius:{value:o.radius}, uSize:{value:o.size}, uOpacity:{value:o.opacity},
+        uAmp:{value:o.amp}, uFreq:{value:o.freq}, uFlow:{value:o.flow}, uSpin:{value:o.spin},
+        uBreath:{value:0}, uLevel:{value:0}, uHeat:{value:0}, uBack:{value:o.back == null ? 0.25 : o.back},
+        uEmber:{value:o.ember ? 1 : 0}, uRise:{value:o.rise || 0}, uSeedT:{value:o.seedT || 0},
+        uDeep:{value:new THREE.Color(o.deep)}, uMid:{value:new THREE.Color(o.mid)}, uHot:{value:new THREE.Color(o.hot)}
+      },
+      transparent:true, blending:ADD, depthWrite:false,
+      vertexShader:[
+        'attribute float aSeed; attribute float aShell;',
+        'uniform float uTime, uDist, uScale, uRadius, uSize, uAmp, uFreq, uFlow, uSpin, uBreath, uLevel, uHeat, uBack, uEmber, uRise, uSeedT;',
+        'uniform vec3 uDeep, uMid, uHot;',
+        'varying float vA; varying vec3 vCol;',
+        NOISE_GLSL,
+        'void main(){',
+        '  float t = uTime + uSeedT;',
+        '  vec3 n = normalize(position);',
+        // 差速自转：越靠里、种子越大转得越快
+        '  float ang = t * uSpin * (0.55 + 0.9 * aSeed) / max(aShell, 0.35);',
+        '  float ca = cos(ang), sa = sin(ang);',
+        '  n = vec3(ca * n.x - sa * n.z, n.y, sa * n.x + ca * n.z);',
+        // 流转：沿切向被一张慢慢流动的噪声场推着走
+        '  vec3 q = n * 1.3;',
+        '  vec3 f = vec3(snoise(q + vec3(t * 0.06, 0.0, 0.0)), snoise(q + vec3(0.0, t * 0.06, 5.2)), snoise(q + vec3(9.1, 0.0, t * 0.06)));',
+        '  n = normalize(n + (f - n * dot(f, n)) * uFlow);',
+        // 微澜：成片的明暗，外形只动一点点
+        '  float wave = snoise(n * uFreq + vec3(0.0, t * 0.11, t * 0.07)) * 0.75 + snoise(n * uFreq * 2.3 - vec3(t * 0.17)) * 0.25;',
+        // 声音：从下往上一圈圈推过去的亮环
+        '  float lat = acos(clamp(n.y, -1.0, 1.0));',
+        '  float ring = pow(0.5 + 0.5 * sin(lat * 8.0 - t * 4.5), 4.0) * uLevel;',
+        // 逸散：生命周期 0..1，从表面升起、飘远、熄灭
+        '  float life = fract(t * uRise * (0.5 + aSeed) + aSeed * 7.31);',
+        '  float shellR = aShell + uEmber * life * 0.62;',
+        '  float emberFade = mix(1.0, sin(3.14159 * life), uEmber);',
+        '  float r = uRadius * shellR * (1.0 + uBreath) * (1.0 + uAmp * wave + 0.035 * ring);',
+        '  vec4 mv = modelViewMatrix * vec4(n * r, 1.0);',
+        '  float fade = mix(uBack, 1.0, smoothstep(-0.95, 0.6, mv.z + uDist));',
+        '  float crest = clamp(smoothstep(-0.45, 0.8, wave) + ring * 0.7, 0.0, 1.0);',
+        '  float tw = 0.8 + 0.2 * sin(t * (0.9 + aSeed * 2.6) + aSeed * 50.0);',
+        // 云的厚度方向：贴近表面的最亮，向里向外渐暗——于是有"一团"而不是"一层"
+        '  float core = 1.0 - smoothstep(0.0, 0.22, abs(aShell - 1.0)) * (1.0 - uEmber) * 0.55;',
+        '  vec3 c = mix(uDeep, uMid, crest);',
+        '  vCol = mix(c, uHot, pow(crest, 3.5) * (0.35 + uHeat * 0.5) + uHeat * 0.10);',
+        '  vA = fade * tw * emberFade * core * (0.55 + 1.0 * crest);',
+        '  gl_PointSize = max(1.2, uSize * (0.5 + 0.9 * aSeed) * (0.8 + 0.5 * crest) * uScale / (-mv.z));',
+        '  gl_Position = projectionMatrix * mv;',
+        '}'].join('\n'),
+      fragmentShader:[
+        'uniform float uOpacity; varying float vA; varying vec3 vCol;',
+        'void main(){',
+        '  float r = length(gl_PointCoord - 0.5) * 2.0;',
+        '  float a = smoothstep(1.0, 0.0, r); a *= a;',
+        // 亮度放进 alpha：画布透明，暗色片元也会累加 alpha，叠到亮壁纸上会发黑
+        '  float m = max(max(vCol.r, vCol.g), vCol.b);',
+        '  gl_FragColor = vec4(vCol / max(m, 0.0001), min(1.0, a * vA * uOpacity * m));',
+        '}'].join('\n')
+    });
+    mats.push(m); return m;
   }
 
-  /* 1) 光核 + 辉光 */
-  function sprite(scale, color, opacity){
-    const s = new THREE.Sprite(new THREE.SpriteMaterial({
-      map:glowTex, color:color, blending:ADD, depthWrite:false, transparent:true, opacity:opacity
-    }));
-    s.scale.set(scale, scale, 1);
-    return s;
-  }
-  const coreLight = sprite(0.42, 0xffffff, 0.85); root.add(coreLight);
-  const halo1     = sprite(1.90, 0xffa040, 0.22); root.add(halo1); halo1.visible = false; // 外层辉光关闭（试效果）
-  const halo2     = sprite(3.20, 0xff6a10, 0.13); root.add(halo2); halo2.visible = false; // 外层辉光关闭（试效果）
-
-  /* 2) 主粒子壳 */
-  const PN = 4500;
-  const pPos = new Float32Array(PN*3), pCol = new Float32Array(PN*3);
-  for (let i = 0; i < PN; i++){
-    onSphere(_a);
-    const inner = Math.random() < 0.09;
-    const rr = inner ? R*(0.34 + Math.random()*0.52)
-                     : R*(0.93 + Math.pow(Math.random(), 2.2)*0.17);
-    pPos[i*3] = _a.x*rr; pPos[i*3+1] = _a.y*rr; pPos[i*3+2] = _a.z*rr;
-    const k = Math.random();
-    tmp.copy(k < 0.14 ? cHot : cGold).lerp(cAmb, Math.random()*0.9);
-    if (k > 0.88) tmp.lerp(cDeep, 0.5);
-    pCol[i*3] = tmp.r; pCol[i*3+1] = tmp.g; pCol[i*3+2] = tmp.b;
-  }
-  const starGeo = new THREE.BufferGeometry();
-  starGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
-  starGeo.setAttribute('color',    new THREE.BufferAttribute(pCol, 3));
-  const STAR_BASE = 0.0155;
-  const starMat = new THREE.PointsMaterial({
-    size:STAR_BASE, map:glowTex, vertexColors:true, transparent:true,
-    opacity:0.9, blending:ADD, depthWrite:false, sizeAttenuation:true
-  });
-  shell.add(new THREE.Points(starGeo, starMat));
-
-  /* 3) 城市灯团 */
-  const cityMat = new THREE.PointsMaterial({
-    size:0.030, map:glowTex, vertexColors:true, transparent:true,
-    opacity:0.9, blending:ADD, depthWrite:false, sizeAttenuation:true
-  });
-  (function cityLights(){
-    const CLUSTERS = 66, PER = 26, N = CLUSTERS*PER;
-    const pos = new Float32Array(N*3), col = new Float32Array(N*3);
-    const c = new THREE.Vector3(), q = new THREE.Vector3();
-    let i = 0;
-    for (let k = 0; k < CLUSTERS; k++){
-      onSphere(c);
-      const spread = 0.07 + Math.random()*0.16, heat = Math.random();
-      for (let j = 0; j < PER; j++){
-        q.set(c.x + (Math.random()-0.5)*spread,
-              c.y + (Math.random()-0.5)*spread,
-              c.z + (Math.random()-0.5)*spread).normalize()
-         .multiplyScalar(R*(0.99 + Math.random()*0.045));
-        pos[i*3] = q.x; pos[i*3+1] = q.y; pos[i*3+2] = q.z;
-        tmp.copy(cHot).lerp(cAmb, 0.25 + heat*0.7*Math.random());
-        col[i*3] = tmp.r; col[i*3+1] = tmp.g; col[i*3+2] = tmp.b;
-        i++;
-      }
+  /* 粒子云：斐波那契方向打底（疏密均匀），整体洗牌——任何前缀都是均匀的，
+     省电时直接少画一半也不会缺一块。 */
+  const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+  const gauss = () => { let u = 0; for (let i = 0; i < 4; i++) u += Math.random(); return (u - 2) / 1.15; };
+  function cloud(n, shellOf){
+    const pos = new Float32Array(n*3), seed = new Float32Array(n), shl = new Float32Array(n);
+    const order = new Uint32Array(n);
+    for (let i = 0; i < n; i++) order[i] = i;
+    for (let i = n-1; i > 0; i--){ const j = (Math.random()*(i+1))|0; const k = order[i]; order[i] = order[j]; order[j] = k; }
+    for (let o = 0; o < n; o++){
+      const i = order[o];
+      const y = 1 - 2*(i + 0.5)/n, rad = Math.sqrt(1 - y*y), th = GOLDEN*i;
+      pos[o*3] = Math.cos(th)*rad; pos[o*3+1] = y; pos[o*3+2] = Math.sin(th)*rad;
+      seed[o] = Math.random(); shl[o] = shellOf();
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    g.setAttribute('color',    new THREE.BufferAttribute(col, 3));
-    shell.add(new THREE.Points(g, cityMat));
-  })();
-
-  /* 4) 城市光柱 */
-  (function cityLines(){
-    const N = 400, pos = [], col = [];   // 大幅减少（参考图无外延光柱）
-    for (let i = 0; i < N; i++){
-      onSphere(_a);
-      const h = 0.004 + Math.pow(Math.random(), 3.0)*0.022;  // 长度大幅缩短，贴球面做内部数据标记
-      _b.copy(_a).multiplyScalar(R*0.985); pos.push(_b.x,_b.y,_b.z);
-      _b.copy(_a).multiplyScalar(R*0.985 + h); pos.push(_b.x,_b.y,_b.z);
-      tmp.copy(cAmb).lerp(cHot, Math.min(1, h/0.022));
-      col.push(cDeep.r*0.9, cDeep.g*0.9, cDeep.b*0.9, tmp.r, tmp.g, tmp.b);
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    g.setAttribute('color',    new THREE.Float32BufferAttribute(col, 3));
-    shell.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({
-      vertexColors:true, transparent:true, opacity:0.75, blending:ADD, depthWrite:false
-    })));
-  })();
-
-  /* 4b) 内部数据线 —— 从球面向球心画短线（参考图：球体内部透出的数据/电路感） */
-  (function innerData(){
-    const N = 800, pos = [], col = [];
-    for (let i = 0; i < N; i++){
-      onSphere(_a);
-      const len = 0.05 + Math.pow(Math.random(), 1.8)*0.25;  // 向内延伸 0.05~0.30
-      _b.copy(_a).multiplyScalar(R*0.985); pos.push(_b.x,_b.y,_b.z);
-      _b.copy(_a).multiplyScalar(R*0.985 - len); pos.push(_b.x,_b.y,_b.z);  // 减号：向内
-      tmp.copy(cGold).lerp(cAmb, Math.random()*0.6);
-      col.push(tmp.r, tmp.g, tmp.b, tmp.r*0.10, tmp.g*0.08, tmp.b*0.05);
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    g.setAttribute('color',    new THREE.Float32BufferAttribute(col, 3));
-    shell.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({
-      vertexColors:true, transparent:true, opacity:0.35, blending:ADD, depthWrite:false
-    })));
-  })();
-
-  /* 5) 边缘毛刺（电池模式下关闭） */
-  const rimMat = new THREE.LineBasicMaterial({
-    vertexColors:true, transparent:true, opacity:0.30, blending:ADD, depthWrite:false
-  });
-  let rimMesh;
-  (function rimSpikes(){
-    const N = 380, pos = [], col = [];
-    for (let i = 0; i < N; i++){
-      onSphere(_a);
-      const len = 0.025 + Math.pow(Math.random(), 3.2)*0.17;
-      _b.copy(_a).multiplyScalar(R); pos.push(_b.x,_b.y,_b.z);
-      _b.copy(_a).multiplyScalar(R+len); pos.push(_b.x,_b.y,_b.z);
-      tmp.copy(cGold).lerp(cAmb, Math.random());
-      col.push(tmp.r, tmp.g, tmp.b, tmp.r*0.15, tmp.g*0.10, tmp.b*0.05);
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    g.setAttribute('color',    new THREE.Float32BufferAttribute(col, 3));
-    rimMesh = new THREE.LineSegments(g, rimMat);
-    shell.add(rimMesh);
-    rimMesh.visible = false; // 边缘毛刺关闭（参考图无外延毛刺）
-  })();
-
-  /* 6) 轨道弧网 —— 大弧经线（参考图：几段很长的弧横跨球面，像经线） */
-  (function arcNet(){
-    const ARCS = 52, pos = [], col = [];
-    const n = new THREE.Vector3(), e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), v = new THREE.Vector3();
-    for (let k = 0; k < ARCS; k++){
-      const radius = R*(0.94 + Math.random()*0.10);
-      onSphere(n);
-      e1.set(0,1,0);
-      if (Math.abs(n.y) > 0.9) e1.set(1,0,0);
-      e1.crossVectors(e1, n).normalize();
-      e2.crossVectors(n, e1).normalize();
-      const arcLen = 2.8 + Math.random()*2.8;   // 大弧跨大半球
-      const start  = Math.random()*Math.PI*2;
-      const segs   = 28;                          // 段数多，弧线平滑
-      tmp.copy(cGold).lerp(cAmb, 0.2 + Math.random()*0.4);   // 偏金色
-      let prev = null;
-      for (let i = 0; i <= segs; i++){
-        const a = start + arcLen*(i/segs);
-        v.copy(e1).multiplyScalar(Math.cos(a)*radius).addScaledVector(e2, Math.sin(a)*radius);
-        if (prev){
-          pos.push(prev.x, prev.y, prev.z, v.x, v.y, v.z);
-          col.push(tmp.r, tmp.g, tmp.b, tmp.r, tmp.g, tmp.b);
-        }
-        prev = v.clone();
-      }
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    g.setAttribute('color',    new THREE.Float32BufferAttribute(col, 3));
-    shell.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({
-      vertexColors:true, transparent:true, opacity:0.42, blending:ADD, depthWrite:false
-    })));
-  })();
-
-  /* 7) 纬线笼 —— 稀疏化（参考图纬线少而精，非均匀铺满） */
-  (function latitudes(){
-    const mat = new THREE.LineBasicMaterial({
-      color:0xffb066, transparent:true, opacity:0.17, blending:ADD, depthWrite:false
-    });
-    for (let i = 1; i < 9; i++){
-      const y = -1 + (i/9)*2;
-      const rr = Math.sqrt(Math.max(0, 1-y*y))*R*0.995;
-      const pts = [];
-      for (let s = 0; s <= 80; s++){
-        const a = s/80*Math.PI*2;
-        pts.push(new THREE.Vector3(Math.cos(a)*rr, y*R*0.995, Math.sin(a)*rr));
-      }
-      shell.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), mat));
-    }
-  })();
-
-  /* 8) 表面数据板（电池模式下关闭） */
-  const plateMeshes = [];
-  (function plates(){
-    const tex = gridTex();
-    for (let i = 0; i < 72; i++){
-      const w = 0.05 + Math.random()*0.15, h = 0.04 + Math.random()*0.12;
-      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({
-        map:tex, color:0xffb45a, transparent:true, opacity:0.08 + Math.random()*0.20,
-        blending:ADD, depthWrite:false, side:THREE.DoubleSide
-      }));
-      onSphere(_a);
-      mesh.position.copy(_a).multiplyScalar(R*(1.0 + Math.random()*0.07));
-      mesh.lookAt(0,0,0);
-      mesh.rotateZ(Math.random()*Math.PI);
-      shell.add(mesh); plateMeshes.push(mesh);
-    }
-  })();
-
-  /* 9) 主赤道环 */
-  const tori = [];
-  [{r:0.52,op:0.62,rx:0.35,rz:0.10,w:96},
-   {r:0.68,op:0.50,rx:-0.62,rz:0.55,w:104},
-   {r:0.82,op:0.42,rx:1.15,rz:-0.30,w:112},
-   {r:0.92,op:0.34,rx:-0.25,rz:0.85,w:118},
-   {r:0.99,op:0.28,rx:0.70,rz:-0.65,w:124},
-   {r:1.06,op:0.22,rx:-1.05,rz:0.20,w:128}].forEach(c => {
-    const pts = [];
-    for (let s = 0; s <= c.w; s++){
-      const a = s/c.w*Math.PI*2;
-      pts.push(new THREE.Vector3(Math.cos(a)*c.r*R, 0, Math.sin(a)*c.r*R));
-    }
-    const ring = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts),
-      new THREE.LineBasicMaterial({color:0xff9526, transparent:true, opacity:c.op, blending:ADD, depthWrite:false}));
-    ring.rotation.set(c.rx, 0, c.rz);
-    spin.add(ring); tori.push(ring);
-  });
-
-  /* 9b) 交互环波 —— 交互态时从核心向外脉冲扩散 */
-  const ringWaves = [];
-  const rwColorCur = new THREE.Color(0xff8a1e);      // 同样缓动着色，别硬跳
-  const rwColorTarget = new THREE.Color();
-  const RW_COUNT = 8;
-  for (let i = 0; i < RW_COUNT; i++) {
-    const geo = new THREE.TorusGeometry(R * 0.60, 0.004, 8, 100);
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xff9526, transparent: true, opacity: 0,
-      blending: ADD, depthWrite: false
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.visible = false;
-    // Fibonacci 球面分布：8 个环法线均匀在球面上，绝不出现完全水平环（白色横线）
-    const _phi = Math.acos(1 - 2 * (i + 0.5) / RW_COUNT);
-    const _theta = Math.PI * (1 + Math.sqrt(5)) * i;
-    _a.set(Math.sin(_phi)*Math.cos(_theta), Math.cos(_phi), Math.sin(_phi)*Math.sin(_theta));
-    mesh.quaternion.setFromUnitVectors(_b.set(0,0,1), _a);
-    mesh.userData = { phase: i / RW_COUNT * Math.PI * 2, nextFire: i * 0.35 };
-    root.add(mesh);
-    ringWaves.push(mesh);
+    g.setAttribute('aSeed',    new THREE.BufferAttribute(seed, 1));
+    g.setAttribute('aShell',   new THREE.BufferAttribute(shl, 1));
+    g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 2.4);
+    return g;
   }
 
-  // 流动光点已删除（环上亮光点像"小疙瘩"，流动感改由球面能量流承担）
-  const flowDots = [];
+  // 主云：两万颗，半径按高斯分布在表面附近，有厚度
+  const CLOUD_N = 20000;
+  const cloudMat = voidMat({ radius:R, size:0.062, opacity:1.0, amp:0.028, freq:1.7, flow:0.10, spin:0.05, back:0.20,
+                             deep:0xb8440a, mid:0xff8a1e, hot:0xffd9a0 });
+  const cloudGeo = cloud(CLOUD_N, () => Math.min(1.16, Math.max(0.74, 1.0 + gauss() * 0.065)));
+  const cloudPts = new THREE.Points(cloudGeo, cloudMat);
+  shell.add(cloudPts);
 
-  /* 9d) 球面能量流 —— 交互态时粒子沿球面大圆流动，带拖尾
-          取代"径向喷射烟花"（从核心直线飞出，廉价）。粒子沿球面大圆
-          流转（像能量在球面流动），每个粒子带 4 段拖尾渐隐，形成连续的
-          "流"而非孤立的"点"。头部白热，拖尾渐隐到金，末段整体淡出。 */
-  const FLOW_N = 56;          // 流动粒子数
-  const TRAIL  = 4;           // 每粒子拖尾点数
-  const FTOTAL = FLOW_N * TRAIL;
-  const flowPos = new Float32Array(FTOTAL*3);
-  const flowCol = new Float32Array(FTOTAL*3);
-  const flowData = [];
-  for (let i = 0; i < FLOW_N; i++){
-    flowData.push({ axis:new THREE.Vector3(), e1:new THREE.Vector3(), e2:new THREE.Vector3(),
-                    angle:0, speed:0, life:0, radius:R*0.98, active:false });
-    for (let j = 0; j < TRAIL; j++){
-      const idx = (i*TRAIL+j)*3;
-      flowCol[idx] = flowCol[idx+1] = flowCol[idx+2] = 0;
-    }
+  // 内核：小而暖的一团，转得快，透过外云隐约可见
+  const NUCLEUS_N = 2400;
+  const nucleusMat = voidMat({ radius:R*0.32, size:0.052, opacity:1.0, amp:0.06, freq:1.4, flow:0.14, spin:0.16, back:0.5, seedT:37.0,
+                               deep:0xc25010, mid:0xffa640, hot:0xfff0d0 });
+  const nucleus = new THREE.Points(cloud(NUCLEUS_N, () => 0.6 + Math.random() * 0.5), nucleusMat);
+  root.add(nucleus);
+
+  // 逸散火星：从表面升起、飘远、熄灭
+  const EMBER_N = 1400;
+  const emberMat = voidMat({ radius:R, size:0.060, opacity:1.0, amp:0.0, freq:1.0, flow:0.18, spin:0.03, back:0.3, ember:true, rise:0.05, seedT:11.0,
+                             deep:0xb44a0c, mid:0xffa340, hot:0xfff0cc });
+  const embers = new THREE.Points(cloud(EMBER_N, () => 0.98 + Math.random() * 0.06), emberMat);
+  shell.add(embers);
+
+  // 光核与体温
+  function sprite(scale, color, opacity){
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+      map:glowTex, color:color, blending:ADD, depthWrite:false, transparent:true, opacity:opacity
+    }));
+    sp.scale.set(scale, scale, 1);
+    return sp;
   }
-  const flowGeo = new THREE.BufferGeometry();
-  flowGeo.setAttribute('position', new THREE.BufferAttribute(flowPos, 3));
-  flowGeo.setAttribute('color',    new THREE.BufferAttribute(flowCol, 3));
-  const flowMat = new THREE.PointsMaterial({
-    size:0.05, map:glowTex, vertexColors:true, transparent:true,
-    opacity:0.95, blending:ADD, depthWrite:false, sizeAttenuation:true
-  });
-  const flowPoints = new THREE.Points(flowGeo, flowMat);
-  root.add(flowPoints);
-  let flowSpawnAcc = 0;
+  const coreLight = sprite(0.22, 0xffe2b0, 0.55); root.add(coreLight);
+  const coreBloom = sprite(1.25, 0xff8a2a, 0.12); root.add(coreBloom);
+  const aura      = sprite(3.0,  0xff7a1a, 0.045); root.add(aura);
 
-  /* 9e) 涟漪球面 —— speaking 时顶点做音乐式径向起伏（上下起伏 + 赤道扩散涟漪）
-          取代旧版"辉光增强"的主视觉。一个 wireframe 二十面体，每帧按多波叠加
-          做径向位移：sin(纬度*K + t*speed) 是上下起伏主感，
-          sin(赤道距离*K2 - t*speed) 是从赤道向外扩散的涟漪，
-          叠加经度小波增加有机感。idle 时不可见，顶点复位。 */
-  const RIPPLE_R = R * 0.985;
-  const rippleGeo = new THREE.IcosahedronGeometry(RIPPLE_R, 3);
-  const RIPPLE_N  = rippleGeo.attributes.position.count;
-  const rippleOrig = new Float32Array(rippleGeo.attributes.position.array);
-  const rippleMat = new THREE.MeshBasicMaterial({
-    color:0xffc46a, wireframe:true, transparent:true, opacity:0,
-    blending:ADD, depthWrite:false
-  });
-  const rippleMesh = new THREE.Mesh(rippleGeo, rippleMat);
-  shell.add(rippleMesh);
-  let rippleDirty = false;
-  // 颜色/振幅/透明度以前是每帧直接 setHex + 硬赋值——线框球在叠加混合下，
-  // 状态一切换（尤其切进 thinking 的近白色 0xfff3d0）就是一帧内的硬跳变，
-  // 看起来像"一条白线在闪"。现在跟其它状态参数一样缓动，颜色用 Color.lerp。
-  const rippleColorCur = new THREE.Color(0xff8a1e);
-  const rippleColorTarget = new THREE.Color();
-
-  // 中央涡旋已删除（反复造成核心区域白色横线闪烁）
+  // 呼吸：吸气占 38%，呼气占 50%，最后 12% 屏住。返回 0（呼尽）..1（吸满）。
+  const BREATH_PERIOD = 5.6;
+  const ease = x => x*x*(3 - 2*x);
+  function breathAt(time){
+    const ph = (time / BREATH_PERIOD) % 1;
+    if (ph < 0.38) return ease(ph / 0.38);
+    if (ph < 0.88) return 1 - ease((ph - 0.38) / 0.50);
+    return 0;
+  }
+  let lifeT = 0;          // 粒子自己的时钟：活跃时走得快，但永远连续，状态切换不会跳
 
   /* ---------- 尺寸：按屏幕短边定距，保证球体占比稳定 ---------- */
   const FILL = 0.46;   // 球体（含外缘）占屏幕短边一半的比例
@@ -476,10 +379,14 @@ const CORE = (function(){
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     const halfFov = (FOV * Math.PI / 180) / 2;
-    let dist = (R * 1.15) / (FILL * Math.tan(halfFov));
+    let dist = (R * 1.35) / (FILL * Math.tan(halfFov));   // 1.35：给逸散的火星留出余量
     if (camera.aspect < 1) dist /= camera.aspect;   // 竖屏时按宽度收敛
     camera.position.set(0, 0, dist);
     camera.updateProjectionMatrix();
+    mats.forEach(m => {
+      m.uniforms.uDist.value = dist;
+      if (m.uniforms.uScale) m.uniforms.uScale.value = h * dpr * 0.5;
+    });
   }
   resize();
   window.addEventListener('resize', resize);
@@ -487,10 +394,13 @@ const CORE = (function(){
   /* ---------- 宿主 App 控制接口 ---------- */
   api.setPower = function(p){
     power = (p === 'battery') ? 'battery' : 'ac';
-    const cfg = PROFILE[power];
-    if (rimMesh) rimMesh.visible = false; // 边缘毛刺永久关闭（参考图无外延毛刺）
-    plateMeshes.forEach(m => m.visible = cfg.plates);
-    document.getElementById('tState').textContent = power === 'battery' ? 'LOW-POWER' : 'ONLINE';
+    document.body.classList.toggle('low-power', power === 'battery');
+    // 省电：粒子数减半（粒子是洗过牌的，前一半照样铺满整个球）
+    const k = PROFILE[power].density;
+    cloudGeo.setDrawRange(0, Math.floor(CLOUD_N * k));
+    nucleus.geometry.setDrawRange(0, Math.floor(NUCLEUS_N * k));
+    embers.geometry.setDrawRange(0, Math.floor(EMBER_N * k));
+    document.getElementById('tState').textContent = power === 'battery' ? 'LOW-POWER' : (STATE_LABEL[FX.state] || 'ONLINE');
   };
   api.setVisible = function(v){
     const was = running;
@@ -526,242 +436,69 @@ const CORE = (function(){
 
     FX.pulse *= Math.pow(0.93, dt*60);
     const p = FX.pulse;
-    const breath = Math.sin(t * 0.9);
-    const micro  = Math.sin(t * 2.7) * 0.25;
-    const b = 0.5 + 0.5 * breath;
 
-    // -- 交互状态混合（丝滑过渡：放慢 + ease-in-out + 分层渐入渐出） --
+    // -- 交互状态混合：idle ↔ 活跃，约 1.2s，ease-in-out --
     const st = FX.state || 'idle';
-    const stTarget = (st === 'idle') ? 0 : 1;
-    // 放缓速率（dt*5 → dt*2.2），约 1.2s 到位，过渡更从容
-    FX.stateMix += (stTarget - FX.stateMix) * Math.min(1, dt * 2.2);
-    const stMixRaw = FX.stateMix;
-    // ease-in-out cubic：起步和收尾都柔，没有"骤起骤停"的硬感
-    const stMix = stMixRaw < 0.5
-      ? 4 * stMixRaw * stMixRaw * stMixRaw
-      : 1 - Math.pow(-2 * stMixRaw + 2, 3) / 2;
-    // 分层渐入渐出：涟漪最先，光点次之，波纹再次，喷射粒子最后；
-    // 回到 idle 时反向渐出（喷射先停 → 波纹 → 光点 → 涟漪最后暗下）
-    const ripplePhase = phaseOf(stMix, 0.00, 0.50);
-    const flowPhase   = phaseOf(stMix, 0.15, 0.65);
-    const wavePhase   = phaseOf(stMix, 0.35, 0.85);
-    const ejectPhase  = phaseOf(stMix, 0.55, 1.00);
-    // 状态驱动参数——这几个是"目标值"，不直接用，先缓动到 FX.s* 再用
-    let stSpin=0, stCore=0, stHalo=0, stPulse=0, stSpeed=0;
-    if(st==='listening'){ stCore=0.35;stHalo=0.30;stPulse=0.25;stSpeed=1.3; }
-    else if(st==='thinking'){ stSpin=0.80;stCore=0.45;stHalo=0.18;stPulse=0.15;stSpeed=2.2; }
-    else if(st==='speaking'){ stCore=0.28;stHalo=0.22;stPulse=0.10;stSpeed=0.8; }
-    // idle: all zero → 纯呼吸
+    FX.stateMix += ((st === 'idle' ? 0 : 1) - FX.stateMix) * Math.min(1, dt * 2.2);
+    const m0 = FX.stateMix;
+    const stMix = m0 < 0.5 ? 4*m0*m0*m0 : 1 - Math.pow(-2*m0 + 2, 3)/2;
 
-    // 缓动速率比 stateMix（1.2s）快一档，~0.5s 到位：
-    // 既不会像 stateMix 那么慢导致"追不上对话节奏"，又足够抹平硬切的跳变。
-    const paramRate = Math.min(1, dt * 3.5);
-    FX.sCore  += (stCore  - FX.sCore)  * paramRate;
-    FX.sHalo  += (stHalo  - FX.sHalo)  * paramRate;
-    FX.sPulse += (stPulse - FX.sPulse) * paramRate;
-    FX.sSpin  += (stSpin  - FX.sSpin)  * paramRate;
-    FX.sSpeed += (stSpeed - FX.sSpeed) * paramRate;
+    // 各状态的"性格"——目标值，先缓动再用，切换不会一帧硬跳
+    //   listening 倾听：云微微收拢、变亮，像凑近了在听
+    //   thinking  思考：流转和自转明显加快，色温升高
+    //   speaking  说话：亮环跟着真实音量从下往上推，火星逸散得更多
+    let tFlow = 0, tSpeed = 0, tHeat = 0, tTight = 0, tRise = 0;
+    if (st === 'listening')     { tFlow = 0.02; tSpeed = 0.4; tHeat = 0.20; tTight = 0.035; }
+    else if (st === 'thinking') { tFlow = 0.06; tSpeed = 1.8; tHeat = 0.60; tRise = 0.02; }
+    else if (st === 'speaking') { tFlow = 0.03; tSpeed = 0.6; tHeat = 0.30; tRise = 0.04; }
+    const rate = Math.min(1, dt * 3.0);
+    FX.sPulse += (tFlow  - FX.sPulse) * rate;
+    FX.sCore  += (tHeat  - FX.sCore)  * rate;
+    FX.sSpeed += (tSpeed - FX.sSpeed) * rate;
+    FX.sHalo  += (tTight - FX.sHalo)  * rate;
+    FX.sSpin  += (tRise  - FX.sSpin)  * rate;
 
-    // 真实音量驱动。宿主播报时上报播放振幅，收音时上报麦克风 RMS，
-    // 所以球体是真的跟着声音在动，不是在跑一条预设动画。
-    // 起振快、落振慢（attack/release）：播报戛然而止时 level 会瞬间归零，
-    // 之前落振和起振同一个 dt*14 速率，球体跟着在同一帧里"瘪"下去，
-    // 这才是"语音交互结束回到静态呼吸"最刺眼的那一下，比状态参数的硬切更明显。
+    // 真实音量：起振快、落振慢，说完话不会在一帧里"瘪"下去
     const levelRate = FX.level > FX.levelMix ? dt * 14 : dt * 3.0;
     FX.levelMix += (FX.level - FX.levelMix) * Math.min(1, levelRate);
     const lvl = FX.levelMix * stMix;
-    const core  = FX.sCore  + lvl * 0.55;
-    const halo  = FX.sHalo  + lvl * 0.45;
-    const pulseAmt = FX.sPulse + lvl * 0.30;
 
-    spin.rotation.y += (0.10 + p*0.55 + stMix*FX.sSpin) * dt;
-    spin.rotation.x  = Math.sin(t * 0.23) * 0.10;
-    root.scale.setScalar(1 + breath*0.030 + micro*0.008 + p*0.055 + stMix*0.012*Math.sin(t*2.5));
+    lifeT += dt * (1 + FX.sSpeed + lvl * 0.8 + p * 0.6);
 
-    shell.scale.setScalar(1 + breath*0.045 + micro*0.012);
-    starMat.size    = STAR_BASE * (1 + b*0.16 + p*0.55 + stMix*core*1.4);
-    starMat.opacity = 0.66 + b*0.28 + p*0.04 + stMix*pulseAmt*0.2;
-    cityMat.size    = 0.030 * (1 + b*0.22 + p*0.60 + stMix*core*0.9);
-    cityMat.opacity = 0.72 + b*0.26 + p*0.04 + stMix*pulseAmt*0.15;
+    // 呼吸用真实时间（节律不因"在思考"就乱），活跃时呼吸略浅
+    const b = breathAt(t);
+    const breath = (b - 0.42) * 0.06 * (1 - stMix * 0.4) - FX.sHalo;
 
-    coreLight.scale.setScalar(0.36 + b*0.08 + p*0.30 + stMix*core);
-    halo1.material.opacity = 0.17 + b*0.10 + p*0.24 + stMix*halo;
-    halo2.material.opacity = 0.09 + b*0.07 + p*0.13 + stMix*halo*0.6;
+    spin.rotation.y += (0.04 + p*0.2) * dt;
+    spin.rotation.x  = 0.32;
+    spin.rotation.z  = 0.10;
+    nucleus.rotation.y -= 0.12 * dt;
+    nucleus.rotation.x += 0.05 * dt;
 
-    // 赤道环交互缩放
-    const torusScale = 1 + stMix * 0.12 * Math.sin(t * 3.5);
-    tori.forEach(tr => { tr.scale.setScalar(torusScale); });
-    // 毛刺交互亮度
-    if (rimMesh) {
-      rimMat.opacity = (0.20 + b*0.16 + p*0.28) + stMix * 0.22 * (0.5 + 0.5 * Math.sin(t * 5.2));
+    for (let i = 0; i < mats.length; i++){
+      const u = mats[i].uniforms;
+      u.uTime.value = lifeT;
+      u.uLevel.value = lvl;
+      u.uHeat.value = FX.sCore + lvl*0.25;
     }
-    tori[0].rotation.y += (0.30 + stMix*FX.sSpeed*0.4) * dt;
-    tori[1].rotation.y -= (0.20 + stMix*FX.sSpeed*0.25) * dt;
-    tori[2].rotation.z += (0.12 + stMix*FX.sSpeed*0.15) * dt;
+    cloudMat.uniforms.uBreath.value  = breath;
+    cloudMat.uniforms.uFlow.value    = 0.10 + FX.sPulse;
+    cloudMat.uniforms.uOpacity.value = 1.0 + b*0.3 + p*0.15 + lvl*0.25;
+    cloudMat.uniforms.uSize.value    = 0.062 * (1 + b*0.10 + lvl*0.25 + p*0.2);
 
-    // -- 交互环波：从核心向外脉冲扩散 --
-    if (ringWaves && ringWaves.length) {
-      // 电池供电时不点火新波（与 rim/plates 同一档位策略），已在跑的让它自然消散。
-      const rwActive = power === 'ac'
-        && (st === 'listening' || st === 'thinking' || st === 'speaking');
-      const rwInterval = st === 'thinking' ? 0.25 : st === 'listening' ? 0.45 : 0.70;
-      const rwSpeed = st === 'thinking' ? 2.8 : st === 'listening' ? 1.8 : 1.2;
-      const rwFade = st === 'thinking' ? 4.5 : st === 'listening' ? 3.2 : 2.0;
-      let rwAny = false;
-      for (let i = 0; i < ringWaves.length; i++) {
-        const rw = ringWaves[i];
-        const ud = rw.userData;
-        if (!rwActive) {
-          // 回退：渐隐
-          if (rw.visible) {
-            rw.material.opacity = Math.max(0, rw.material.opacity - dt * 5);
-            const s = rw.scale.x + dt * 0.8;
-            rw.scale.setScalar(s);
-            if (rw.material.opacity <= 0.01) { rw.visible = false; rw.material.opacity = 0; }
-          }
-          continue;
-        }
-        // 点火新波
-        ud.nextFire -= dt;
-        if (ud.nextFire <= 0 && !rw.visible) {
-          rw.visible = true;
-          rw.scale.setScalar(0.55);
-          rw.material.opacity = 0.55;
-          ud.nextFire = rwInterval;
-        }
-        if (rw.visible) {
-          rwAny = true;
-          rw.scale.setScalar(rw.scale.x + dt * rwSpeed);
-          rw.material.opacity = Math.max(0, rw.material.opacity - dt * rwFade);
-          if (rw.scale.x > 2.8 || rw.material.opacity <= 0.01) {
-            rw.visible = false; rw.material.opacity = 0;
-          }
-        }
-      }
-      // 确保至少一个波在跑
-      if (rwActive && !rwAny && ringWaves[0]) {
-        ringWaves[0].visible = true;
-        ringWaves[0].scale.setScalar(0.55);
-        ringWaves[0].material.opacity = 0.55;
-        ringWaves[0].userData.nextFire = rwInterval;
-      }
-      // 波纹颜色随状态变化：thinking 偏白热，listening 偏金，speaking 偏暖橙
-      if (rwActive) {
-        rwColorTarget.setHex(st === 'thinking' ? 0xfff3d0
-                           : st === 'listening' ? 0xffc46a
-                           : 0xff8a1e);
-        rwColorCur.lerp(rwColorTarget, Math.min(1, dt * 3.5));
-        for (let i = 0; i < ringWaves.length; i++) ringWaves[i].material.color.copy(rwColorCur);
-      }
-    }
+    nucleusMat.uniforms.uBreath.value  = breath*1.3 + lvl*0.15;
+    nucleusMat.uniforms.uOpacity.value = 0.95 + b*0.2 + lvl*0.25;
 
-    // 流动光点已删除（小疙瘩），流动感由球面能量流承担
+    emberMat.uniforms.uBreath.value  = breath;
+    emberMat.uniforms.uRise.value    = 0.045 + b*0.012 + FX.sSpin + lvl*0.03;
+    emberMat.uniforms.uOpacity.value = 0.9 + b*0.35 + lvl*0.3;
 
-    // -- 球面能量流：粒子沿球面大圆流动，带拖尾，ejectPhase 渐入渐出 --
-    if (flowData.length) {
-      const flowRate = ejectPhase * (st === 'thinking' ? 20
-                          : st === 'listening' ? 12
-                          : st === 'speaking' ? 8 : 0);
-      flowSpawnAcc += flowRate * dt;
-      let flowBudget = Math.floor(flowSpawnAcc);
-      flowSpawnAcc -= flowBudget;
-      for (let i = 0; i < FLOW_N && flowBudget > 0; i++){
-        const d = flowData[i];
-        if (!d.active){
-          d.active = true;
-          d.life = 2.0 + Math.random()*1.5;          // 寿命 2~3.5s，流动一段
-          // 避免水平大圆（法线接近 Y 轴），防止粒子沿赤道流动形成水平光带
-          do { onSphere(d.axis); } while (Math.abs(d.axis.y) > 0.55);
-          _a.set(0,1,0); if (Math.abs(d.axis.y)>0.9) _a.set(1,0,0);
-          d.e1.crossVectors(_a, d.axis).normalize();   // 大圆正交基
-          d.e2.crossVectors(d.axis, d.e1).normalize();
-          d.angle = Math.random()*Math.PI*2;           // 随机起始角
-          d.speed = (0.5 + Math.random()*0.7) * (Math.random()<0.5?1:-1);  // 角速度+方向
-          d.radius = R*(0.96 + Math.random()*0.06);
-          flowBudget--;
-        }
-      }
-      for (let i = 0; i < FLOW_N; i++){
-        const d = flowData[i];
-        if (!d.active){
-          for (let j = 0; j < TRAIL; j++){
-            const idx=(i*TRAIL+j)*3; flowCol[idx]=flowCol[idx+1]=flowCol[idx+2]=0;
-          }
-          continue;
-        }
-        d.life -= dt;
-        if (d.life <= 0){
-          d.active = false;
-          for (let j = 0; j < TRAIL; j++){
-            const idx=(i*TRAIL+j)*3; flowCol[idx]=flowCol[idx+1]=flowCol[idx+2]=0;
-          }
-          continue;
-        }
-        d.angle += d.speed * dt;
-        const lifeFade = Math.min(1, d.life/0.5);      // 末段整体淡出
-        for (let j = 0; j < TRAIL; j++){
-          const trailAngle = d.angle - j*0.055*Math.sign(d.speed);  // 拖尾沿反方向
-          const idx = (i*TRAIL+j)*3;
-          const ca = Math.cos(trailAngle), sa = Math.sin(trailAngle);
-          flowPos[idx]   = (d.e1.x*ca + d.e2.x*sa) * d.radius;
-          flowPos[idx+1] = (d.e1.y*ca + d.e2.y*sa) * d.radius;
-          flowPos[idx+2] = (d.e1.z*ca + d.e2.z*sa) * d.radius;
-          // 头部白热，拖尾渐隐到金
-          const fade = 1 - j/TRAIL;
-          tmp.copy(cHot).lerp(cGold, j/TRAIL);
-          flowCol[idx]   = tmp.r * fade * lifeFade;
-          flowCol[idx+1] = tmp.g * fade * lifeFade;
-          flowCol[idx+2] = tmp.b * fade * lifeFade;
-        }
-      }
-      flowGeo.attributes.position.needsUpdate = true;
-      flowGeo.attributes.color.needsUpdate = true;
-    }
-
-    // -- 涟漪球面：speaking 时音乐式径向起伏，listening/thinking 低强度 --
-    // 这是"球体线条涟漪"的主载体：wireframe 二十面体顶点按多波叠加做径向位移
-    if (rippleMesh) {
-      let stRippleAmpT = 0, stRippleOpT = 0;
-      if (st === 'listening')     { stRippleAmpT = 0.30; stRippleOpT = 0.28; }
-      else if (st === 'thinking') { stRippleAmpT = 0.45; stRippleOpT = 0.38; }
-      else if (st === 'speaking') { stRippleAmpT = 1.0;  stRippleOpT = 0.62; }
-      FX.sRippleAmp     += (stRippleAmpT - FX.sRippleAmp)     * paramRate;
-      FX.sRippleOpacity += (stRippleOpT  - FX.sRippleOpacity) * paramRate;
-
-      const rippleAmp = stMix * (FX.sRippleAmp * 0.045 + lvl * 0.075);
-      rippleMat.opacity = stMix * FX.sRippleOpacity;
-      rippleColorTarget.setHex(st === 'thinking' ? 0xfff3d0
-                             : st === 'listening' ? 0xffc46a
-                             : 0xff8a1e);
-      rippleColorCur.lerp(rippleColorTarget, Math.min(1, dt * 3.5));
-      rippleMat.color.copy(rippleColorCur);
-      if (rippleAmp > 0.0004) {
-        const pos = rippleGeo.attributes.position.array;
-        for (let i = 0; i < RIPPLE_N; i++) {
-          const ix = i*3, iy = ix+1, iz = ix+2;
-          const ox = rippleOrig[ix], oy = rippleOrig[iy], oz = rippleOrig[iz];
-          const len = Math.sqrt(ox*ox + oy*oy + oz*oz) || 1;
-          const nx = ox/len, ny = oy/len, nz = oz/len;
-          // 沿纬度(y)传播 —— "上下起伏"的主感
-          const w1 = Math.sin(ny * 8 + t * 2.6);
-          // 从赤道向外扩散的涟漪
-          const distEq = Math.sqrt(nx*nx + nz*nz);
-          const w2 = Math.sin(distEq * 10 - t * 3.2);
-          // 经度方向小波，增加有机感
-          const w3 = Math.sin(Math.atan2(nz, nx) * 6 + t * 1.9) * 0.4;
-          const disp = (w1 + w2*0.8 + w3) * rippleAmp;
-          const k = 1 + disp / RIPPLE_R;
-          pos[ix] = ox * k; pos[iy] = oy * k; pos[iz] = oz * k;
-        }
-        rippleGeo.attributes.position.needsUpdate = true;
-        rippleDirty = true;
-      } else if (rippleDirty) {
-        // 回到 idle：顶点复位一次，避免浮点漂移累积
-        rippleGeo.attributes.position.array.set(rippleOrig);
-        rippleGeo.attributes.position.needsUpdate = true;
-        rippleDirty = false;
-      }
-    }
+    coreLight.scale.setScalar(0.20 + b*0.05 + lvl*0.22 + p*0.08);
+    coreLight.material.opacity = 0.45 + b*0.15 + lvl*0.2;
+    coreBloom.scale.setScalar(1.1 + b*0.22 + lvl*0.6 + p*0.2);
+    coreBloom.material.opacity = 0.09 + b*0.06 + lvl*0.14 + p*0.05;
+    aura.scale.setScalar(2.8 + b*0.35 + lvl*0.5);
+    aura.material.opacity = 0.03 + b*0.035 + lvl*0.04 + p*0.02;
 
     // -- demo 推进：独立预览时自动循环四种状态 + 模拟音量 --
     // 宿主一旦调用过 __jarvisSetState，hostTookOver 置 true，demo 永久关闭
