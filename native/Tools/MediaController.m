@@ -41,41 +41,6 @@ static void LoadMediaRemote(void) {
 #pragma mark - 播放器名录
 
 static NSString *const kNetEaseBundleID = @"com.netease.163music";
-static NSString *const kJarvisBundleID = @"com.jarvis.desktop";
-
-/// 搜索结果页上的点击目标，**相对窗口原点的点偏移**。
-///
-/// 走的是「单曲」标签页而不是「综合」页。综合页那颗「▶ 播放」按钮的 y
-/// 取决于页面上方有没有「歌手 / MV」卡片区——出现与否由搜的内容决定，
-/// 出现时按钮在 326、不出现时在 204，差 122 点，**没有任何常数能同时对**。
-/// 单曲页没有卡片区，布局与查询内容无关；那里的「播放全部」还高 34 点，
-/// 比综合页那颗 26 点的小按钮宽容得多。
-///
-/// 更要紧的是**点空了不会闯祸**：标签行和右上角在综合页上都是空白，
-/// 点不中最多是没播成；而综合页上按老坐标点歪会落进歌手卡片，
-/// 一跳转就把后续点击带进了另一套布局，最后播的是不相干的歌。
-///
-/// 2026-08-06 实测（窗口 1470×820 与 1100×741 两种尺寸，取值完全一致）：
-///   「单曲」标签   x=316（固定左偏移）
-///   「播放全部」   距窗口**右缘** 213 点（右对齐，所以按右缘算）
-/// y 有两种页头：搜索框下方是「猜你想搜」一行时整行在 140，是查询大标题时在 152。
-/// 标签只有 16 点高，两个 y 都点一下（都落在标签行内，无副作用）；
-/// 「播放全部」34 点高，取中点 146 对两种页头都落在按钮内。
-///
-/// 单位是**点**不是像素。AX 的 position/size 和 CGEvent 鼠标坐标说的都是点，
-/// 所以这些常数跨显示器通用——内置 Retina、1× 外接屏、多屏负坐标都不用特判。
-/// ⚠️ 但凡以后再从截图上量这些值，记得**除以那块屏的 backing scale**
-/// （内置屏截图是 2×，一般外接 1080p 是 1×）——同一个目标在两块屏上量出的
-/// 像素数差一倍，点数才是相同的那个。
-static const CGFloat kNetEaseSongsTabX = 316.0;
-static const CGFloat kNetEaseSongsTabYA = 140.0;
-static const CGFloat kNetEaseSongsTabYB = 152.0;
-static const CGFloat kNetEasePlayAllRightInset = 213.0;
-static const CGFloat kNetEasePlayAllY = 146.0;
-/// 单曲列表第一行（备选入口，在窗口左侧）。行高约 79 点，比按钮宽容得多。
-static const CGFloat kNetEaseFirstRowX = 270.0;
-static const CGFloat kNetEaseFirstRowY = 275.0;
-
 /// 口语名 → bundle id。auto 不在表里，单独处理。
 static NSDictionary<NSString *, NSString *> *PlayerAliases(void) {
     static NSDictionary *table = nil;
@@ -101,101 +66,6 @@ static NSDictionary<NSString *, NSString *> *PlayerAliases(void) {
 static NSRunningApplication *RunningAppWithBundleID(NSString *bundleID) {
     NSArray *apps = [NSRunningApplication runningApplicationsWithBundleIdentifier:bundleID];
     return apps.firstObject;
-}
-
-static BOOL MainWindowBoundsForPID(pid_t pid, CGRect *outBounds) {
-    NSArray *windows = CFBridgingRelease(CGWindowListCopyWindowInfo(
-        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
-    for (NSDictionary *window in windows) {
-        if ([window[(id)kCGWindowOwnerPID] intValue] != pid) continue;
-        if ([window[(id)kCGWindowLayer] integerValue] != 0) continue;
-        CGRect bounds = CGRectZero;
-        if (CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)window[(id)kCGWindowBounds],
-                                                   &bounds)) {
-            if (outBounds) *outBounds = bounds;
-            return YES;
-        }
-    }
-    return NO;
-}
-
-/// 自家挡在点击位置上的窗口，在这几下点击期间先收起来。
-///
-/// 起因：对话面板是**浮动层级**，网易云再怎么激活也压不到它上面，于是合成点击
-/// 打在面板上被它接走——症状正是「搜索能搜，就是不播放」。面板又能被用户拖到
-/// 屏幕任何位置，所以「把目标挪到左边」这种写死的躲法迟早再被挡。
-///
-/// 为什么不去查别人的窗口挡没挡：CGWindowList 给不出命中测试。实测程序坞和
-/// 截屏工具都把自己报成全屏窗口（0,0 1470×956），可它们是透明的、点击照穿——
-/// 单靠矩形包含判断，会得出"哪儿都被挡住了"的荒唐结论。自家窗口不一样：
-/// 是不是浮动、在不在那个位置、透不透事件，我们全都确切知道。
-///
-/// 自家有没有浮动窗口盖在这个点上。**只查不动**——用来"绕开"而不是"挪开"。
-///
-/// 绕得开就别动面板：把面板 orderOut 再放回虽然管用，但用户看到的是对话框
-/// 凭空消失一秒多再冒出来（2026-08-06 用户反馈「切歌时对话框会闪退再出现」）。
-/// 播放入口本来就有左右两个、相距近 1000 点，挑没被盖住的那个即可。
-static BOOL OwnWindowCoversPoint(CGPoint point) {
-    NSScreen *primary = NSScreen.screens.firstObject;
-    if (!primary || NSApp == nil) return NO;
-    CGFloat flipHeight = NSMaxY(primary.frame);
-    NSPoint flipped = NSMakePoint(point.x, flipHeight - point.y);
-    for (NSWindow *window in NSApp.windows) {
-        if (!window.isVisible || window.level <= NSNormalWindowLevel) continue;
-        if (NSPointInRect(flipped, window.frame)) return YES;
-    }
-    return NO;
-}
-
-/// 最后一招：把挡路的自家窗口收起来，点完立刻放回。
-///
-/// 只在两个播放入口**都**被盖住时才用得上——678 点宽的面板盖不住相距 1000 点的
-/// 两个点，除非用户把面板拉得特别宽。会让面板闪一下，所以能绕就不走这条。
-///
-/// 试过 ignoresMouseEvents（不改层序、无视觉变化，理论上最干净）——**在这个面板上
-/// 没用**：2026-08-06 实测日志明明打了"放行鼠标事件"，右上角那一下仍被面板接走，
-/// 而同一次里没被盖住的两下标签点击照常生效。
-/// `[jarvisApp hide]` 也拦不住这件事——NSRunningApplication 的 hide 对浮动面板无效。
-static NSArray<NSWindow *> *HideOwnWindowsCovering(NSArray<NSValue *> *points) {
-    NSScreen *primary = NSScreen.screens.firstObject;
-    if (!primary || NSApp == nil) return @[];
-    CGFloat flipHeight = NSMaxY(primary.frame);
-
-    NSMutableArray<NSWindow *> *changed = [NSMutableArray array];
-    for (NSWindow *window in NSApp.windows) {
-        // 只有浮动层级的窗口才可能压在网易云上面。球体在桌面层，永远在下面。
-        if (!window.isVisible || window.level <= NSNormalWindowLevel) continue;
-        for (NSValue *value in points) {
-            CGPoint p = value.pointValue;
-            // CGEvent 用左上原点、y 向下；NSWindow.frame 用左下原点、y 向上。
-            if (!NSPointInRect(NSMakePoint(p.x, flipHeight - p.y), window.frame)) continue;
-            [changed addObject:window];
-            [window orderOut:nil];
-            NSLog(@"[jarvis] 面板(%.0f,%.0f %.0fx%.0f) 挡住点击位置 (%.0f,%.0f)，先收起",
-                  window.frame.origin.x, window.frame.origin.y,
-                  window.frame.size.width, window.frame.size.height, p.x, p.y);
-            break;
-        }
-    }
-    return changed;
-}
-
-static void MoveMouse(CGPoint point) {
-    CGEventRef move = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, point, kCGMouseButtonLeft);
-    CGEventPost(kCGHIDEventTap, move);
-    CFRelease(move);
-}
-
-static void PostClick(CGPoint point) {
-    CGEventRef move = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, point, kCGMouseButtonLeft);
-    CGEventRef down = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, point, kCGMouseButtonLeft);
-    CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp, point, kCGMouseButtonLeft);
-    CGEventPost(kCGHIDEventTap, move);
-    CGEventPost(kCGHIDEventTap, down);
-    CGEventPost(kCGHIDEventTap, up);
-    CFRelease(move);
-    CFRelease(down);
-    CFRelease(up);
 }
 
 #pragma mark -
@@ -289,279 +159,256 @@ static void PostClick(CGPoint point) {
 
 #pragma mark - 网易云音乐
 
-/// 网易云 3.x 的主内容区是自绘 WebView，不暴露可点的 AX 元素，也没有 AppleScript
-/// 字典。可靠入口是它自己的搜索框：聚焦窗口左上角搜索框、提交，再点“单曲”的播放。
-/// 所有坐标都相对 window 1，不依赖窗口放在屏幕什么位置。
+/// 按歌名点歌。
+///
+/// 以前的做法是模拟用户：把网易云拉到前台、⌘F、粘贴、回车、再按写死的坐标点
+/// 「单曲」和「播放全部」。它在每一环上都会失手——窗口尺寸和页头布局一变坐标就偏，
+/// 联想下拉会被鼠标悬停换掉搜索词，焦点被别的窗口抢走时粘贴落空，冷启动时
+/// 点击安静地什么都不发生；而且 macOS 15.4 起第三方进程读不到 MediaRemote 的曲名，
+/// 回读校验永远失败，即使播对了也只会报"无法确认播放"。
+///
+/// 现在不碰界面：
+///   1. 用网易云 PC 客户端自己的搜索接口拿到歌曲 id（云搜索，对口误和大小写很宽容，
+///      语音识别成 "back in back" 也能搜到 Back In Black）；
+///   2. 交给客户端注册的 orpheus:// 协议：base64({"type":"song","id":…,"cmd":"play"})，
+///      这是网页版「在客户端打开」用的同一条通道，客户端收到后直接插进队列并播放；
+///   3. 先暂停、再发命令、再等「控制」菜单翻成"暂停"——看到在播放，才说明是新歌
+///      起播了，而不是原来那首还在放。曲名和歌手来自搜索结果，id 是确定的。
+/// 整个过程网易云留在后台，不抢焦点、不动鼠标、不借剪贴板。
 - (void)searchAndPlayNetEase:(NSString *)query completion:(JarvisMediaCompletion)completion {
     query = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (query.length == 0) { completion(nil, @"搜索歌曲时缺少 query"); return; }
-    if (!AXIsProcessTrusted()) {
-        completion(nil, [NSString stringWithFormat:@"%@（辅助功能）：系统设置 → 隐私与安全性 → "
-                         @"辅助功能，把 JARVIS 打开", [self permissionHint]]);
+    if (![[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:kNetEaseBundleID]) {
+        completion(nil, @"本机没装网易云音乐");
         return;
     }
 
-    BOOL wasAlreadyRunning = RunningAppWithBundleID(kNetEaseBundleID) != nil;
-    BOOL wasHidden = RunningAppWithBundleID(kNetEaseBundleID).hidden;
-    NSString *previousFrontmostBundleID = NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier;
-    NSRunningApplication *jarvisApp = RunningAppWithBundleID(kJarvisBundleID);
-    BOOL shouldTemporarilyHideJarvis = jarvisApp && !jarvisApp.hidden;
-
-    void (^restorePreviousApp)(void) = ^{
-        // 搜索必须短暂让网易云接收键盘输入；若它原本已经运行，完成后立即把用户之前
-        // 使用的应用切回来。这样网易云只在后台播放，不会一直盖在 Jarvis 或其他窗口上。
-        if (shouldTemporarilyHideJarvis) [RunningAppWithBundleID(kJarvisBundleID) unhide];
-        if (wasAlreadyRunning && previousFrontmostBundleID.length > 0 &&
-            ![previousFrontmostBundleID isEqualToString:kNetEaseBundleID]) {
-            NSRunningApplication *previous = RunningAppWithBundleID(previousFrontmostBundleID);
-            [previous activateWithOptions:NSApplicationActivateAllWindows];
-        }
-        if (wasHidden) [RunningAppWithBundleID(kNetEaseBundleID) hide];
-    };
-
-    void (^runSearch)(void) = ^{
-        // 后台隐藏或最小化时，网易云的 WebView 不会接收搜索键盘事件，也没有可取的
-        // on-screen 窗口坐标。临时恢复窗口，播放完成后再还原原来的前台/隐藏状态。
-        // Jarvis 对话面板是浮动层级，会遮住网易云左侧的“单曲”标签；来自面板的命令
-        // 必须在点击期间临时隐藏 Jarvis，结束后再完整恢复面板。
-        if (shouldTemporarilyHideJarvis) [RunningAppWithBundleID(kJarvisBundleID) hide];
-        NSRunningApplication *runningNetEase = RunningAppWithBundleID(kNetEaseBundleID);
-        [runningNetEase activateWithOptions:NSApplicationActivateAllWindows];
-        // 回车之前必须把鼠标挪出搜索框下方——**这是搜错歌的真正原因**。
-        //
-        // 网易云的搜索联想下拉**按鼠标悬停高亮**，回车提交的是被悬停的那一条，
-        // 而不是你输入的文字。上一次点击（比如点"单曲"标签）会把指针留在
-        // (316, 189) 附近，正好压在下拉列表第三行上，于是
-        // 「海阔天空 Beyond」被提交成了联想词「海阔天空 beyond伴奏」——
-        // 2026-08-06 截图实测：粘贴进去的原文一字不差，是回车挑走了别的词。
-        // 搜错了词，页面内容跟着变，后面点得再准也是在播别的歌。
-        //
-        // 停在窗口左下角：那里是侧边栏/播放条，悬停无副作用，也够远。
-        CGRect parkBounds = CGRectZero;
-        if (MainWindowBoundsForPID(runningNetEase.processIdentifier, &parkBounds)) {
-            MoveMouse(CGPointMake(CGRectGetMinX(parkBounds) + 40,
-                                  CGRectGetMaxY(parkBounds) - 40));
-        }
-
-        // 搜索词走剪贴板 + ⌘V，**不要**用 keystroke 逐字符打。
-        // 实测（2026-08-06）：keystroke 打进网易云的搜索框会丢字符——
-        // 「Back in Black」进去成了「Back inBlack」，「Hells Bells」更是只剩
-        // 「Bells」并接在上一次的残留后面。搜错了词，页面布局跟着变，
-        // 后面点得再准也是在播别的歌。粘贴是一次性事务，没有这个问题。
-        NSPasteboard *board = [NSPasteboard generalPasteboard];
-        NSString *savedClipboard = [board stringForType:NSPasteboardTypeString];
-        [board clearContents];
-        [board setString:query forType:NSPasteboardTypeString];
-
-        NSString *source =
-            @"tell application \"System Events\"\n"
-             "tell process \"NeteaseMusic\"\n"
-             "set frontmost to true\n"
-             "if (count of windows) is 0 then error \"网易云音乐没有可用窗口\"\n"
-             "if value of attribute \"AXMinimized\" of window 1 is true then "
-             "set value of attribute \"AXMinimized\" of window 1 to false\n"
-             "keystroke \"f\" using command down\n"
-             "delay 0.6\n"
-             "keystroke \"a\" using command down\n"
-             "delay 0.2\n"
-             "key code 51\n"
-             "delay 0.2\n"
-             "keystroke \"v\" using command down\n"
-             "delay 0.4\n"
-             "key code 36\n"
-             "delay 3\n"
-             "end tell\n"
-             "end tell";
-        NSString *error = nil;
-        [self runAppleScript:source error:&error];
-
-        // 借完就还。用户的剪贴板不是我们的暂存区。
-        if (savedClipboard) {
-            [board clearContents];
-            [board setString:savedClipboard forType:NSPasteboardTypeString];
-        }
-        if (error) { restorePreviousApp(); completion(nil, error); return; }
-
-        NSRunningApplication *netEase = RunningAppWithBundleID(kNetEaseBundleID);
-        CGRect bounds = CGRectZero;
-        if (!netEase || !MainWindowBoundsForPID(netEase.processIdentifier, &bounds)) {
-            restorePreviousApp();
-            completion(nil, @"找不到网易云音乐主窗口");
+    [self searchNetEaseSongs:query completion:^(NSArray<NSDictionary *> *songs, NSString *error) {
+        if (error) { completion(nil, error); return; }
+        NSDictionary *song = BestNetEaseSong(songs, query);
+        if (!song) {
+            completion(nil, [NSString stringWithFormat:@"网易云音乐里没有搜到「%@」", query]);
             return;
         }
-        // 已经在放要的那首就别再点了——点下去是从头重放，而且万一状态回读
-        // 慢半拍还会误判成没命中、再点一次点到别的歌上去。
-        [self fetchStatus:^(NSDictionary *status) {
-            if ([status[@"playing"] boolValue] && NetEaseTrackMatches(status, query)) {
-                NSMutableDictionary *r = [status mutableCopy];
-                r[@"action"] = @"search_play";
-                r[@"query"] = query;
-                r[@"verified"] = @YES;
-                restorePreviousApp();
-                completion(r, nil);
-                return;
-            }
-            CGPoint clicked = [self clickNetEasePlayInWindow:bounds];
-            [self pollNetEasePlayback:4 query:query clicked:clicked
-                              restore:restorePreviousApp completion:completion];
-        }];
-    };
-
-    if (RunningAppWithBundleID(kNetEaseBundleID)) { runSearch(); return; }
-    NSURL *url = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:kNetEaseBundleID];
-    if (!url) { completion(nil, @"本机没装网易云音乐"); return; }
-    [[NSWorkspace sharedWorkspace] openApplicationAtURL:url
-                                          configuration:[NSWorkspaceOpenConfiguration configuration]
-                                      completionHandler:^(NSRunningApplication *app, NSError *error) {
-        if (error) {
-            completion(nil, [NSString stringWithFormat:@"启动网易云音乐失败：%@",
-                              error.localizedDescription]);
-            return;
-        }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), runSearch);
+        [self playNetEaseSong:song query:query completion:completion];
     }];
 }
 
-/// 切到「单曲」标签页，再点右上角「播放全部」，从第一首开始播。返回点下去的位置。
-///
-/// 标签点两下是因为页头有两种布局（搜索框下方是「猜你想搜」一行时标签在 140，
-/// 是查询大标题时在 152），两下都落在标签行内，点空无副作用。
-/// 中间要留时间给标签页切换渲染——网易云是 Electron，切页不是同步的，
-/// 不等就会点在还没出现的按钮位置上。
-///
-/// 选「播放全部」而不是列表第一行，是因为它点空了最安全：万一标签没切过去，
-/// 这个位置在综合页上是空白，什么都不会发生；而第一行那个位置在综合页上是
-/// 歌手卡片，点下去会跳转，一跳转后面的坐标就全落进另一套布局了。
-- (BOOL)ownWindowCoversPoint:(CGPoint)point { return OwnWindowCoversPoint(point); }
+/// 网易云 PC 端的云搜索。回调总在主线程。
+- (void)searchNetEaseSongs:(NSString *)query
+                completion:(void (^)(NSArray<NSDictionary *> *songs, NSString *error))completion {
+    NSMutableCharacterSet *allowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+    [allowed removeCharactersInString:@"&=+?/"];
+    NSString *body = [NSString stringWithFormat:@"s=%@&type=1&limit=10&offset=0",
+                      [query stringByAddingPercentEncodingWithAllowedCharacters:allowed]];
 
-- (CGPoint)clickNetEasePlayInWindow:(CGRect)bounds {
-    CGFloat tabX = CGRectGetMinX(bounds) + kNetEaseSongsTabX;
-    CGPoint tabA = CGPointMake(tabX, CGRectGetMinY(bounds) + kNetEaseSongsTabYA);
-    CGPoint tabB = CGPointMake(tabX, CGRectGetMinY(bounds) + kNetEaseSongsTabYB);
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:
+        [NSURL URLWithString:@"https://music.163.com/api/cloudsearch/pc"]];
+    request.HTTPMethod = @"POST";
+    request.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
+    request.timeoutInterval = 8;
+    [request setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:@"https://music.163.com/" forHTTPHeaderField:@"Referer"];
+    [request setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+                      @"(KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+   forHTTPHeaderField:@"User-Agent"];
 
-    // 播放入口有两个，一右一左，相距近 1000 点：
-    //   右上角「播放全部」——点空了落在空白区，最安全，首选
-    //   单曲列表第一行——行高约 79 点，最宽容，备选
-    // 先挑一个**没被自家面板盖住**的用。这样面板全程不用动：
-    // 之前的做法是把面板 orderOut 再放回，功能上对，但用户看到的是
-    // 对话框凭空消失一秒多再冒出来（2026-08-06 用户反馈"切歌时对话框会闪退"）。
-    CGPoint playAll = CGPointMake(CGRectGetMaxX(bounds) - kNetEasePlayAllRightInset,
-                                  CGRectGetMinY(bounds) + kNetEasePlayAllY);
-    CGPoint firstRow = CGPointMake(CGRectGetMinX(bounds) + kNetEaseFirstRowX,
-                                   CGRectGetMinY(bounds) + kNetEaseFirstRowY);
-    CGPoint play = playAll;
-    if ([self ownWindowCoversPoint:playAll] && ![self ownWindowCoversPoint:firstRow]) {
-        play = firstRow;
-        NSLog(@"[jarvis] 「播放全部」被面板挡住，改点单曲列表第一行");
-    }
-
-    // 两个都被盖住才动面板——678 点宽的面板盖不住相距 1000 点的两个点，
-    // 只有用户把面板拉得特别宽时才会走到这里。
-    NSArray<NSWindow *> *reopened = @[];
-    if ([self ownWindowCoversPoint:play] || [self ownWindowCoversPoint:tabA]
-        || [self ownWindowCoversPoint:tabB]) {
-        reopened = HideOwnWindowsCovering(@[
-            [NSValue valueWithPoint:NSPointFromCGPoint(tabA)],
-            [NSValue valueWithPoint:NSPointFromCGPoint(tabB)],
-            [NSValue valueWithPoint:NSPointFromCGPoint(play)],
-        ]);
-    }
-
-    // ⚠️ 必须让运行循环转一圈，改动才会真正到达窗口服务器。
-    // 用 usleep 阻塞主线程的话 CATransaction 一次都不提交——实测症状是
-    // 日志里明明打了"放行鼠标事件"，点击却照样被面板接走。
-    // 后面几处等待同理，一律走 CFRunLoopRunInMode，不用 usleep。
-    if (reopened.count) CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.2, false);
-
-    PostClick(tabA);
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.15, false);
-    PostClick(tabB);
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.9, false);
-    PostClick(play);
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.2, false);
-
-    for (NSWindow *window in reopened) [window orderFront:nil];
-    return play;
+    [[[NSURLSession sharedSession] dataTaskWithRequest:request
+                                     completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSArray *songs = nil;
+        NSString *failure = nil;
+        if (error) {
+            failure = [NSString stringWithFormat:@"搜索歌曲失败：%@", error.localizedDescription];
+        } else {
+            id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+            id result = [json isKindOfClass:[NSDictionary class]] ? json[@"result"] : nil;
+            id list = [result isKindOfClass:[NSDictionary class]] ? result[@"songs"] : nil;
+            if ([list isKindOfClass:[NSArray class]]) {
+                songs = list;
+            } else if (![json isKindOfClass:[NSDictionary class]]) {
+                failure = @"网易云的搜索接口返回了看不懂的内容";
+            } else if ([json[@"code"] integerValue] != 200) {
+                failure = [NSString stringWithFormat:@"网易云的搜索接口拒绝了请求（code %@）",
+                           json[@"code"] ?: @"?"];
+            } else {
+                songs = @[];
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(songs, failure); });
+    }] resume];
 }
 
-/// 播放到的是不是用户要的那首。
+/// 小写、去重音、只留字母数字（含中日韩文字），用来做"包含"判断。
+static NSString *FoldForMatch(NSString *text) {
+    if (![text isKindOfClass:[NSString class]]) return @"";
+    NSString *folded = [[text lowercaseString] stringByFoldingWithOptions:NSDiacriticInsensitiveSearch
+                                                                   locale:nil];
+    NSCharacterSet *drop = [[NSCharacterSet alphanumericCharacterSet] invertedSet];
+    return [[folded componentsSeparatedByCharactersInSet:drop] componentsJoinedByString:@""];
+}
+
+static NSString *NetEaseArtists(NSDictionary *song) {
+    NSMutableArray *names = [NSMutableArray array];
+    id artists = song[@"ar"] ?: song[@"artists"];
+    if ([artists isKindOfClass:[NSArray class]]) {
+        for (id artist in artists) {
+            id name = [artist isKindOfClass:[NSDictionary class]] ? artist[@"name"] : nil;
+            if ([name isKindOfClass:[NSString class]] && [name length]) [names addObject:name];
+        }
+    }
+    return [names componentsJoinedByString:@" / "];
+}
+
+/// 从搜索结果里挑最像用户要的那首。
 ///
-/// 词元一半以上出现在「标题 + 歌手」里就算命中——搜索词很少和曲目全称逐字一致。
-/// 但**必须至少有一个词元落在曲名上**：2026-08-06 实测，只按合并串算的话，
-/// 查询「Hells Bells AC/DC」对上正在放的「Highway To Hell (Live) · AC/DC」
-/// 光靠 ac + dc 两个词元就凑够了一半，于是判定"已经在放你要的歌"——
-/// 播的是完全另一首，却报 verified: true。歌手对上不等于歌对上。
-static BOOL NetEaseTrackMatches(NSDictionary *status, NSString *query) {
-    NSString *(^fold)(NSString *) = ^NSString *(NSString *text) {
-        return [[text lowercaseString] stringByFoldingWithOptions:
-            NSDiacriticInsensitiveSearch locale:[NSLocale currentLocale]];
+/// 搜索接口按热度排，热门的翻唱、伴奏、DJ 版常常排在原曲前面。所以：
+///   · 曲名（去掉括号里的版本说明）出现在查询里 +4
+///   · 某位歌手的名字出现在查询里 +3（"海阔天空 Beyond" 就该选 Beyond 的）
+///   · 曲名里带伴奏 / Live / DJ / 翻唱 / 女声版之类、而用户没提 −3
+///   · 原始排序做轻微的平手裁决
+static NSDictionary *BestNetEaseSong(NSArray<NSDictionary *> *songs, NSString *query) {
+    NSString *q = FoldForMatch(query);
+    NSString *qLower = [query lowercaseString];
+    NSArray *variants = @[@"伴奏", @"纯音乐", @"instrumental", @"karaoke", @"live", @"dj",
+                          @"remix", @"翻自", @"翻唱", @"cover", @"女声", @"男声", @"钢琴", @"片段",
+                          @"铃声", @"加速", @"降调", @"慢速", @"0.8x", @"1.2x", @"童声", @"抖音"];
+
+    NSDictionary *best = nil;
+    double bestScore = -1e9;
+    NSUInteger index = 0;
+    for (NSDictionary *song in songs) {
+        if (![song isKindOfClass:[NSDictionary class]] || !song[@"id"]) { index++; continue; }
+        NSString *name = [song[@"name"] isKindOfClass:[NSString class]] ? song[@"name"] : @"";
+        NSString *base = name;
+        for (NSString *open in @[@"(", @"（", @"[", @"【", @" - "]) {
+            NSRange cut = [base rangeOfString:open];
+            if (cut.location != NSNotFound && cut.location > 0) base = [base substringToIndex:cut.location];
+        }
+
+        double score = -0.1 * (double)index;
+        NSString *baseFolded = FoldForMatch(base);
+        if (baseFolded.length && [q containsString:baseFolded]) score += 4;
+
+        id artists = song[@"ar"] ?: song[@"artists"];
+        if ([artists isKindOfClass:[NSArray class]]) {
+            for (id artist in artists) {
+                NSString *artistFolded = FoldForMatch([artist isKindOfClass:[NSDictionary class]] ? artist[@"name"] : nil);
+                if (artistFolded.length >= 2 && [q containsString:artistFolded]) { score += 3; break; }
+            }
+        }
+
+        NSString *nameLower = [name lowercaseString];
+        for (NSString *word in variants) {
+            if ([nameLower containsString:word] && ![qLower containsString:word]) { score -= 3; break; }
+        }
+
+        if (score > bestScore) { bestScore = score; best = song; }
+        index++;
+    }
+    return best;
+}
+
+static BOOL NetEaseMenuSaysPlaying(NSArray<NSString *> *items) {
+    NSString *first = items.firstObject ?: @"";
+    return [first containsString:@"暂停"] || [first containsString:@"Pause"];
+}
+
+- (void)playNetEaseSong:(NSDictionary *)song
+                  query:(NSString *)query
+             completion:(JarvisMediaCompletion)completion {
+    NSURL *appURL = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:kNetEaseBundleID];
+    NSString *songID = [NSString stringWithFormat:@"%@", song[@"id"]];
+    NSData *payload = [NSJSONSerialization dataWithJSONObject:@{@"type": @"song", @"id": songID, @"cmd": @"play"}
+                                                      options:0 error:nil];
+    NSURL *orpheus = [NSURL URLWithString:[@"orpheus://" stringByAppendingString:
+                                           [payload base64EncodedStringWithOptions:0]]];
+
+    NSMutableDictionary *result = [@{@"action": @"search_play", @"query": query,
+                                     @"player": @"网易云音乐", @"song_id": songID} mutableCopy];
+    if ([song[@"name"] isKindOfClass:[NSString class]]) result[@"title"] = song[@"name"];
+    NSString *artists = NetEaseArtists(song);
+    if (artists.length) result[@"artist"] = artists;
+    id album = [song[@"al"] isKindOfClass:[NSDictionary class]] ? song[@"al"][@"name"] : nil;
+    if ([album isKindOfClass:[NSString class]]) result[@"album"] = album;
+
+    void (^send)(void) = ^{
+        NSWorkspaceOpenConfiguration *config = [NSWorkspaceOpenConfiguration configuration];
+        config.activates = NO;     // 留在后台：不抢用户正在用的窗口
+        [[NSWorkspace sharedWorkspace] openURLs:@[orpheus] withApplicationAtURL:appURL
+                                  configuration:config completionHandler:nil];
     };
-    NSString *title = fold(status[@"title"] ?: @"");
-    NSString *actual = fold([NSString stringWithFormat:@"%@ %@",
-                             status[@"title"] ?: @"", status[@"artist"] ?: @""]);
-    NSCharacterSet *separators = [[NSCharacterSet alphanumericCharacterSet] invertedSet];
-    NSArray *tokens = [fold(query) componentsSeparatedByCharactersInSet:separators];
 
-    NSInteger useful = 0, matched = 0, titleHits = 0;
-    for (NSString *token in tokens) {
-        if (token.length < 2) continue;
-        useful++;
-        if ([actual containsString:token]) matched++;
-        if (title.length && [title containsString:token]) titleHits++;
-    }
-    if (useful == 0 || titleHits == 0) return NO;
-    return matched >= MAX(1, (useful + 1) / 2);
+    void (^start)(void) = ^{
+        // 先停下当前在放的，之后"变成在播放"才能证明新歌起播了。
+        NSArray<NSString *> *items = nil;
+        if ([self netEaseControlMenuItems:&items] == nil && NetEaseMenuSaysPlaying(items)) {
+            NSInteger index = MenuIndexForAction(items, @"pause");
+            if (index > 0) [self clickNetEaseControlItemAtIndex:index];
+            [self netEaseBecomesPlaying:NO within:1.5];
+        }
+        send();
+        // 后台收到协议到真正出声，实测 3～8 秒；一直没动静就补发一次（同一首，重复无害）。
+        [self waitForNetEaseSong:result attempts:28 resendAt:12 send:send completion:completion];
+    };
+
+    if (RunningAppWithBundleID(kNetEaseBundleID)) { start(); return; }
+
+    // 冷启动：先在后台拉起来，等菜单能读了、播放内核接上了再发，否则协议消息会被吞掉。
+    NSWorkspaceOpenConfiguration *config = [NSWorkspaceOpenConfiguration configuration];
+    config.activates = NO;
+    [[NSWorkspace sharedWorkspace] openApplicationAtURL:appURL configuration:config
+                                      completionHandler:^(NSRunningApplication *app, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (error) {
+                completion(nil, [NSString stringWithFormat:@"启动网易云音乐失败：%@", error.localizedDescription]);
+                return;
+            }
+            [self whenNetEaseReady:20 then:^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), start);
+            }];
+        });
+    }];
 }
 
-/// 点完之后每秒回读一次播放状态，最多 attemptsLeft 次。
-///
-/// 为什么要轮询而不是等一次：网易云冷启动后头几秒，点击会安静地什么都不发生
-/// （见 media_control 的老账）；歌曲起播也有网络延迟。等一次就判死刑会把
-/// 「其实播上了」误报成失败。
-///
-/// 为什么**不再**点第二个位置：点错地方的代价比失败大得多——落在歌手卡片上会
-/// 跳转到歌手页，后续点击就落进了另一套布局，最后可能播的是完全不相干的歌。
-/// 坐标是实测常量（见 kNetEasePlayButtonX/Y），真失手了就老实报失败，
-/// 把点击坐标写进 note 里，下次一眼能看出是布局变了还是没点上。
-///
-/// 用方法递归而不是块递归，避免 ARC retain cycle。
-- (void)pollNetEasePlayback:(int)attemptsLeft
-                      query:(NSString *)query
-                    clicked:(CGPoint)point
-                    restore:(void (^)(void))restorePreviousApp
-                 completion:(JarvisMediaCompletion)completion {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+/// 每 0.5 秒看一次菜单是否已经能读，最多 attempts 次。用 dispatch_after 而不是
+/// 原地空转 runloop，主线程在等的这几秒里球体和面板照常响应。
+- (void)whenNetEaseReady:(int)attempts then:(void (^)(void))next {
+    NSArray *items = nil;
+    if ([self netEaseControlMenuItems:&items] == nil || attempts <= 0) { next(); return; }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ [self whenNetEaseReady:attempts - 1 then:next]; });
+}
+
+- (void)waitForNetEaseSong:(NSMutableDictionary *)result
+                  attempts:(int)attemptsLeft
+                  resendAt:(int)resendAt
+                      send:(void (^)(void))send
+                completion:(JarvisMediaCompletion)completion {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        [self fetchStatus:^(NSDictionary *status) {
-            if ([status[@"playing"] boolValue] && NetEaseTrackMatches(status, query)) {
-                NSMutableDictionary *r = [status mutableCopy];
-                r[@"action"] = @"search_play";
-                r[@"query"] = query;
-                r[@"verified"] = @YES;
-                restorePreviousApp();
-                completion(r, nil);
-                return;
-            }
-            if (attemptsLeft > 1) {
-                [self pollNetEasePlayback:attemptsLeft - 1 query:query clicked:point
-                                  restore:restorePreviousApp completion:completion];
-                return;
-            }
-            restorePreviousApp();
-            // 点击坐标只进日志。它是给排障看的，不该出现在面板和播报里——
-            // 用户要听的是"没播成"，不是我点了哪个像素。
-            NSLog(@"[jarvis] search_play 未命中：点击 %.0f,%.0f，当前曲目 %@",
-                  point.x, point.y, status[@"title"] ?: @"（读不到）");
-            NSMutableDictionary *r = [NSMutableDictionary dictionary];
-            r[@"action"] = @"search_play";
-            r[@"query"] = query;
-            r[@"verified"] = @NO;
-            r[@"note"] = status[@"title"]
-                ? [NSString stringWithFormat:@"搜索结果已打开，但实际仍是 %@", status[@"title"]]
-                : @"已打开搜索结果，但没有确认歌曲开始播放";
-            completion(r, nil);
-        }];
+        NSArray<NSString *> *items = nil;
+        NSString *error = [self netEaseControlMenuItems:&items];
+        if (!error && NetEaseMenuSaysPlaying(items)) {
+            result[@"verified"] = @YES;
+            result[@"playing"] = @YES;
+            completion(result, nil);
+            return;
+        }
+        if (attemptsLeft == resendAt) send();
+        if (attemptsLeft > 1) {
+            [self waitForNetEaseSong:result attempts:attemptsLeft - 1 resendAt:resendAt
+                                send:send completion:completion];
+            return;
+        }
+        NSLog(@"[jarvis] search_play：已把歌曲 %@ 交给网易云，但它没有开始播放（%@）",
+              result[@"song_id"], error ?: items.firstObject ?: @"?");
+        if (error) { completion(nil, error); return; }
+        result[@"verified"] = @NO;
+        result[@"playing"] = @NO;
+        result[@"note"] = @"已经把这首歌交给网易云，但它没有开始播放——可能需要会员、没有版权，"
+                          @"或者网易云弹出了需要处理的提示";
+        completion(result, nil);
     });
 }
 
@@ -936,7 +783,8 @@ static NSInteger MenuIndexForAction(NSArray<NSString *> *names, NSString *action
         if ([self netEaseControlMenuItems:&items] == nil && items.count > 0) {
             NSString *first = items.firstObject;
             status[@"playing"] = @([first containsString:@"暂停"] || [first containsString:@"Pause"]);
-            status[@"liked"] = @([items containsObject:@"取消喜欢"]);
+            status[@"liked"] = @([items containsObject:@"取消喜欢"] || [items containsObject:@"Unlike"] ||
+                                 [items containsObject:@"Dislike"]);
             if (!status[@"player"]) status[@"player"] = @"网易云音乐";
         }
     }

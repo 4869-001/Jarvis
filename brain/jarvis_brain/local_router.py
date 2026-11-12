@@ -10,11 +10,24 @@ import time
 from . import weather as weather_mod
 
 
+# 点歌的说法。前缀可带「用/在 网易云(音乐) 里/上」；动词后面的「一下/一首/首」也一并吃掉，
+# 否则「播放一下晴天」会拿「一下晴天」去搜。
+_MUSIC_PREFIX = (r"^(?:请|帮我|麻烦你|给我)?\s*(?:(?:用|在|打开)\s*)?(?:网易云音乐|网易云)?\s*(?:里|上|里面)?\s*"
+                 r"(?:搜索并播放|搜索播放|搜一下|帮我放|我想听|我要听|想听|来一首|来首|来一个|播一首|放一首|"
+                 r"点一首|播放|放)\s*(?:一下|一首|首|个)?\s*(?:歌曲|音乐|歌)?\s*")
+_MUSIC_SUFFIX = r"\s*(?:给我听|听听|听一下|吧|啊|呀|好吗|可以吗|谢谢)?[\s。.!！?？~～]*$"
+# 剩下的只是泛称时，意思是"放点音乐"而不是去搜一首叫「歌」的歌
+_GENERIC_MUSIC = {"", "歌", "歌曲", "音乐", "首歌", "一首歌", "点歌", "点音乐", "些歌", "一些歌",
+                  "首音乐", "歌吧", "music", "some music", "a song"}
+
+
 def _clean_music_query(text):
-    value = re.sub(r"^(?:请|帮我|麻烦你)?\s*(?:在\s*)?(?:网易云音乐|网易云)?\s*"
-                   r"(?:搜索并播放|搜索播放|播放|放一下|放一首)\s*", "", text,
-                   flags=re.I).strip(" ：:，,。.!！\"“”'")
-    return value
+    value = re.sub(_MUSIC_PREFIX, "", text, count=1, flags=re.I)
+    value = re.sub(_MUSIC_SUFFIX, "", value)
+    value = value.strip(" ：:，,。.!！\"“”'‘’《》")
+    # 「周杰伦的歌」→ 搜歌手本人；「周杰伦的晴天」保留原样，云搜索自己会拆
+    value = re.sub(r"的(?:歌|歌曲|音乐)$", "", value)
+    return value.strip()
 
 
 def route(text, identity, cfg=None):
@@ -66,15 +79,19 @@ def route(text, identity, cfg=None):
         (("喜欢这首", "收藏这首", "like this song", "like this track"), "like"),
         (("现在放的什么", "这是什么歌", "what is playing", "what song is this"), "status"),
     )
+    # 「继续播放 / 播放音乐」这类泛称放到点歌之后再判：「播放音乐海阔天空」里虽然
+    # 含有「播放音乐」，用户要的是那首歌，不是接着放上次停下的那首。
     for phrases, action in media_actions:
-        if any(phrase in folded for phrase in phrases):
+        if action != "play" and any(phrase in folded for phrase in phrases):
             return _media_route(action)
 
-    if re.match(r"^(?:请|帮我|麻烦你)?\s*(?:在\s*)?(?:网易云音乐|网易云)?\s*"
-                r"(?:搜索并播放|搜索播放|播放|放一下|放一首)\s*\S+", raw, re.I):
-        query = _clean_music_query(raw)
-        if query:
-            return _media_route("search_play", query=query)
+    song = _song_route(raw)
+    if song:
+        return song
+
+    for phrases, action in media_actions:
+        if action == "play" and any(phrase in folded for phrase in phrases):
+            return _media_route(action)
 
     # ---- 天气：联网取数但不经过模型 ----
     if re.search(r"天气|气温|下雨|weather|temperature", folded):
@@ -113,6 +130,20 @@ def route(text, identity, cfg=None):
                 else ("无法打开 %s：%s" % (app, result["error"])),
             ),
         }
+    return None
+
+
+def _song_route(raw):
+    """点歌。认不出就返回 None；只是泛称（放首歌）就当成「继续播放」。"""
+    if re.match(_MUSIC_PREFIX + r"\S", raw, re.I):
+        query = _clean_music_query(raw)
+        if query.casefold() in _GENERIC_MUSIC:
+            return _media_route("play")
+        # 「放」太短，「放大」「放心」「放到桌面」也以它开头：单字「放」只在后面
+        # 跟着像歌名的东西、且没有明显的非音乐动词时才算点歌
+        bare_fang = re.match(r"^(?:请|帮我|麻烦你|给我)?\s*放(?!一首|首|一下)", raw)
+        if query and not (bare_fang and re.match(r"^(?:大|小|心|弃|假|松|到|在|进|入|下|开|过|学|映|电影|视频)", query)):
+            return _media_route("search_play", query=query)
     return None
 
 
