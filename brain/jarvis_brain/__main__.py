@@ -35,9 +35,9 @@ def _watch_parent(server, interval=2.0):
             server.log("父进程已退出（ppid %d → %d），Brain 一并退出" % (original, current))
             # 只删 socket 文件，不 close listener——从别的线程关掉它会让
             # 主线程的 accept() 抛异常，在 os._exit 落地前刷出半截 traceback。
+            # 只删自己的那个文件：此时新宿主拉起的新 Brain 可能已经 bind 好了同名路径
             try:
-                if os.path.exists(server.socket_path):
-                    os.unlink(server.socket_path)
+                server.unlink_own_socket()
             except Exception:
                 pass
             os._exit(0)

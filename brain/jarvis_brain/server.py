@@ -73,6 +73,8 @@ class BrainServer:
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listener.bind(self.socket_path)
         os.chmod(self.socket_path, 0o600)
+        st = os.stat(self.socket_path)
+        self._socket_identity = (st.st_dev, st.st_ino)
         self.listener.listen(4)
         # 用 session.provider 实际在用的那个，不是配置里的默认值——
         # 上次选了自定义模型的话，重启后接着用的是那个，日志得如实反映。
@@ -143,10 +145,27 @@ class BrainServer:
                 self.listener.close()
         except Exception:
             pass
+        self.unlink_own_socket()
+
+    def unlink_own_socket(self):
+        """只删**自己 bind 出来的那个** socket 文件。
+
+        重启时新旧两个 Brain 会短暂并存：新的先 unlink 旧文件、bind 出新文件，
+        旧的随后才发现父进程没了退出。旧的若按路径无条件 unlink，删掉的是新 Brain
+        刚建好的文件——新 Brain 还活着、监听的 fd 也还在，但路径没了，宿主一旦
+        断线就再也连不回来，面板一直「未连接」。2026-11-11 重启后实测复现：
+        brain.sock 不见了，而 Brain 进程好好地在跑。按 (dev, inode) 认领就不会误删。
+        """
+        ident = getattr(self, "_socket_identity", None)
         try:
-            if os.path.exists(self.socket_path):
-                os.unlink(self.socket_path)
-        except Exception:
+            st = os.stat(self.socket_path)
+        except OSError:
+            return
+        if ident is not None and (st.st_dev, st.st_ino) != ident:
+            return
+        try:
+            os.unlink(self.socket_path)
+        except OSError:
             pass
 
     # ------------------------------------------------------------ 收
