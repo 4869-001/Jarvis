@@ -304,6 +304,14 @@
     // WebGL 球体是否已经合成上屏还得等页面自己回报，见 userContentController:didReceiveScriptMessage:。
 }
 
+/// WebGL 页面跑在独立的 WebContent 进程里，系统内存紧张、GPU 重置时会被直接杀掉。
+/// 不接这个回调，窗口还在、球却没了，而且再也不会回来——看上去就是"闪退"。
+/// 重新加载即可；didFinishNavigation 会把电源档位、状态、启动进度重新同步一遍。
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+    NSLog(@"[jarvis] 球体页面的 WebContent 进程被终止，重新加载");
+    [webView reload];
+}
+
 #pragma mark - WKScriptMessageHandler
 
 - (void)userContentController:(WKUserContentController *)userContentController

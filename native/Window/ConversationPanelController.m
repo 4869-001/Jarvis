@@ -732,6 +732,14 @@ static const NSInteger kUsageTopN       = 8;     // "/" 菜单里最多展示几
     [self deliver:@{@"type": @"opacity", @"value": @(self.panelOpacity)}];
 }
 
+/// 网页进程被系统杀掉后面板会变成一片空白，不重载就一直空着。
+/// 重载期间到来的事件先进 pendingEvents，didFinishNavigation 再补发。
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+    NSLog(@"[jarvis] 对话面板的 WebContent 进程被终止，重新加载");
+    self.pageReady = NO;
+    [webView reload];
+}
+
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
     NSLog(@"[jarvis] 对话面板加载失败：%@", error.localizedDescription);
 }

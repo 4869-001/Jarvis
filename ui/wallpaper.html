@@ -12,7 +12,12 @@
   html,body{width:100%;height:100%;overflow:hidden;background:transparent;}
   body{
     /* 壁纸模式下背景保持透明，只在球体后面压一层柔和暗晕来保证对比度。
-       若你的桌面壁纸很亮、球体发虚，把 --backdrop 的透明度调高即可。 */
+       若你的桌面壁纸很亮、球体发虚，把 --backdrop 的透明度调高即可。
+       粒子和光晕都是加法混合，只在暗底上才亮得起来——没有这层暗晕，
+       亮壁纸会把球洗成一团灰。尺寸用 vmin，跟球体（半径约 23vmin）一起缩放。 */
+    --backdrop: radial-gradient(circle at 50% 50%,
+      rgba(5,8,14,.82) 0, rgba(5,8,14,.66) 22vmin, rgba(5,8,14,.32) 38vmin, transparent 58vmin);
+    background: var(--backdrop);
     font-family:-apple-system,'Helvetica Neue',sans-serif;
   }
   #core{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:1;}
@@ -405,31 +410,41 @@ const CORE = (function(){
   api.setVisible = function(v){
     const was = running;
     running = !!v;
-    if (running && !was){ last = performance.now(); requestAnimationFrame(animate); }
+    if (running && !was){ last = performance.now(); kick(); }
   };
   // 看门狗：万一 rAF 因为任何原因没能恢复（宿主漏发通知、系统抑制回调等），
   // 这里兜底重启循环，避免壁纸永久卡死在一帧上。setInterval 即使在
   // rAF 被停掉时也仍会触发，所以它是可靠的恢复通道。
   setInterval(() => {
     if (running && performance.now() - lastFrame > 2000){
+      // 旧的 rAF 可能只是被系统节流、并没有死：先撤掉再重排，否则每触发一次
+      // 看门狗就多出一条并行的循环，越跑越多，CPU 一路涨
+      cancelAnimationFrame(rafId); rafId = 0;
       last = performance.now();
-      requestAnimationFrame(animate);
+      kick();
     }
   }, 2000);
   api.pulse = function(v){ FX.pulse = Math.max(FX.pulse, v == null ? 1 : v); };
 
   /* ---------- 限帧主循环 ---------- */
-  let t = 0, last = performance.now(), acc = 0, lastFrame = performance.now();
+  // 全程只允许一条 rAF 循环。setVisible 在一帧之内被来回切换（遮挡通知抖动）、
+  // 看门狗兜底重启，以前都会各自再起一条，几条循环叠在一起，CPU 持续上涨。
+  let t = 0, last = performance.now(), acc = 0, lastFrame = performance.now(), rafId = 0;
+  function kick(){ if (!rafId) rafId = requestAnimationFrame(animate); }
   function animate(now){
+    rafId = 0;
     lastFrame = now;
     if (!running) return;                       // 被完全遮挡 → 彻底停帧
-    requestAnimationFrame(animate);
+    kick();
 
     const raw = Math.min(0.25, (now - last) / 1000);
     last = now;
     acc += raw;
     const step = 1 / PROFILE[power].fps;
-    if (acc < step) return;                     // 限帧
+    // 限帧要留一点余量：60Hz 下两帧的间隔是 16.67ms×2，但 WebKit 的时间戳只精确到
+    // 毫秒，常常凑出 33ms，比 step（33.3ms）差一点点，于是多等一帧变成 50ms。
+    // 帧间隔在 33/50ms 之间乱跳，看上去就是球在一抽一抽的。
+    if (acc < step * 0.85) return;
     const dt = Math.min(0.1, acc);
     acc = 0;
     t += dt;
@@ -521,7 +536,7 @@ const CORE = (function(){
 
     renderer.render(scene, camera);
   }
-  requestAnimationFrame(animate);
+  kick();
 
   setInterval(() => { if (running && FX.pulse < 0.18) FX.pulse = 0.18; }, 5200);
   return api;
